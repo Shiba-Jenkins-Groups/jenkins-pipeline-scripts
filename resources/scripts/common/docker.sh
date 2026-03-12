@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # common/docker.sh — Docker Build 共通
 
-source "$(dirname "$0")/error-handler.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/error-handler.sh"
 
 # 優先順序：
-# 1. 專案根目錄 Dockerfile-java
+# 1. 專案根目錄 Dockerfile-{language}
 # 2. 專案根目錄 Dockerfile
-# 3. jenkins-pipeline 預設 Dockerfile-java
+# 3. pipeline 預設 Dockerfile（由 ciPipeline.groovy 寫入 .pipeline/dockerfiles/）
 resolve_dockerfile() {
     local language="${1}"
     local workspace="${WORKSPACE}"
-    local lib_root="${WORKSPACE}@libs/jenkins-pipeline/resources/dockerfiles"
+    local lib_root="${WORKSPACE}/.pipeline/dockerfiles"
 
     if [[ -f "${workspace}/Dockerfile-${language}" ]]; then
         echo "${workspace}/Dockerfile-${language}"

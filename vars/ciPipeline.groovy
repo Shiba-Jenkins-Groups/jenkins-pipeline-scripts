@@ -23,11 +23,52 @@ def call(Map config = [:]) {
                 }
             }
 
+            stage('Load Scripts') {
+                steps {
+                    script {
+                        // Shared Library 的 scripts 在 Controller 上，Agent 無法直接存取
+                        // 用 libraryResource() 讀取內容並寫入 Agent workspace
+                        def scripts = [
+                            'scripts/ci.sh',
+                            'scripts/cd.sh',
+                            'scripts/common/error-handler.sh',
+                            'scripts/common/docker.sh',
+                            'scripts/common/git-tag.sh',
+                            'scripts/common/archive-base.sh',
+                            'scripts/java/java-build.sh',
+                            'scripts/java/java-test.sh',
+                            'scripts/java/java-archive.sh',
+                            'scripts/node/node-build.sh',
+                            'scripts/node/node-test.sh',
+                            'scripts/node/node-archive.sh',
+                            'scripts/python/python-build.sh',
+                            'scripts/python/python-test.sh',
+                            'scripts/python/python-archive.sh',
+                        ]
+                        scripts.each { path ->
+                            def content = libraryResource(path)
+                            writeFile file: ".pipeline/${path}", text: content
+                        }
+
+                        // Dockerfile 也一併寫入（供 docker.sh 使用）
+                        def dockerfiles = [
+                            'dockerfiles/Dockerfile-java',
+                            'dockerfiles/Dockerfile-node',
+                            'dockerfiles/Dockerfile-python',
+                        ]
+                        dockerfiles.each { path ->
+                            def content = libraryResource(path)
+                            writeFile file: ".pipeline/${path}", text: content
+                        }
+
+                        sh 'find .pipeline/scripts -name "*.sh" -exec chmod +x {} +'
+                    }
+                }
+            }
+
             stage('CI') {
                 steps {
-                    sh """
-                        bash \${WORKSPACE}@libs/jenkins-pipeline/resources/scripts/ci.sh
-                    """
+                    sh 'bash .pipeline/scripts/ci.sh'
                 }
             }
 
@@ -36,9 +77,7 @@ def call(Map config = [:]) {
                     expression { env.CD_ENABLED == 'true' }
                 }
                 steps {
-                    sh """
-                        bash \${WORKSPACE}@libs/jenkins-pipeline/resources/scripts/cd.sh
-                    """
+                    sh 'bash .pipeline/scripts/cd.sh'
                 }
             }
         }
