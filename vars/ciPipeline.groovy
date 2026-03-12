@@ -17,6 +17,7 @@ def call(Map config = [:]) {
         }
 
         stages {
+
             stage('Checkout') {
                 steps {
                     checkout scm
@@ -26,9 +27,10 @@ def call(Map config = [:]) {
             stage('Load Scripts') {
                 steps {
                     script {
-                        // Shared Library 的 scripts 在 Controller 上，Agent 無法直接存取
-                        // 用 libraryResource() 讀取內容並寫入 Agent workspace
+                        // Shared Library scripts 在 Controller，Agent 無法直接存取
+                        // 用 libraryResource() 讀取後寫入 Agent workspace 的 .pipeline/
                         def scripts = [
+                            'scripts/detect.sh',
                             'scripts/ci.sh',
                             'scripts/cd.sh',
                             'scripts/common/error-handler.sh',
@@ -50,7 +52,6 @@ def call(Map config = [:]) {
                             writeFile file: ".pipeline/${path}", text: content
                         }
 
-                        // Dockerfile 也一併寫入（供 docker.sh 使用）
                         def dockerfiles = [
                             'dockerfiles/Dockerfile-java',
                             'dockerfiles/Dockerfile-node',
@@ -66,20 +67,72 @@ def call(Map config = [:]) {
                 }
             }
 
-            stage('CI') {
+            stage('Detect') {
                 steps {
-                    sh 'bash .pipeline/scripts/ci.sh'
+                    script {
+                        def output = sh(
+                            script: 'bash .pipeline/scripts/detect.sh',
+                            returnStdout: true
+                        ).trim()
+                        output.split('\n').each { line ->
+                            def parts = line.split('=', 2)
+                            if (parts.size() == 2) {
+                                env[parts[0].trim()] = parts[1].trim()
+                            }
+                        }
+                        echo "[detect] Language: ${env.LANGUAGE}, BuildTool: ${env.BUILD_TOOL}"
+                    }
                 }
             }
 
-            stage('CD') {
+            stage('Build') {
+                steps {
+                    sh "bash .pipeline/scripts/${env.LANGUAGE}/${env.LANGUAGE}-build.sh"
+                }
+            }
+
+            stage('Test') {
+                steps {
+                    sh "bash .pipeline/scripts/${env.LANGUAGE}/${env.LANGUAGE}-test.sh"
+                }
+                post {
+                    always {
+                        junit allowEmptyResults: true,
+                              testResults: '**/target/surefire-reports/*.xml'
+                    }
+                }
+            }
+
+            stage('Archive') {
+                steps {
+                    sh "bash .pipeline/scripts/${env.LANGUAGE}/${env.LANGUAGE}-archive.sh"
+                }
+            }
+
+            stage('Docker Build') {
+                steps {
+                    sh 'bash .pipeline/scripts/cd.sh docker-build'
+                }
+            }
+
+            stage('Harbor Push') {
                 when {
                     expression { env.CD_ENABLED == 'true' }
                 }
                 steps {
-                    sh 'bash .pipeline/scripts/cd.sh'
+                    sh 'bash .pipeline/scripts/cd.sh harbor-push'
                 }
             }
+
+            stage('Deploy') {
+                when {
+                    expression { env.CD_ENABLED == 'true' }
+                }
+                steps {
+                    sh 'bash .pipeline/scripts/cd.sh deploy'
+                }
+            }
+
         }
 
         post {
