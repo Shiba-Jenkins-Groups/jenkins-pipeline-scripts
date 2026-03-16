@@ -7,6 +7,15 @@
 
 ---
 
+## [1.2.0] - 2026-03-16
+
+### Added
+- `node/node-build.sh`：Node.js Build 實作，以 python3 解析 `engines.node` 透過 nvm 切換版本，執行 `npm ci` / `yarn install --frozen-lockfile`，偵測到 `scripts.build` 才執行（兼容前端框架）
+- `node/node-test.sh`：Node.js Test 實作，重新 source nvm 確保版本一致，依 branch 決定測試範圍（develop: unit、main: +coverage/integration TODO、prod: +security TODO）
+- `node/node-archive.sh`：Node.js Archive 實作，以 python3 讀取 appName/appVersion/nodeVersion，打包 zip（排除 node_modules/.git/.pipeline/logs），比照 Java 命名規則與 release/backup 目錄結構，寫入 build.env
+
+---
+
 ## [1.1.0] - 2026-03-16
 
 ### Added
@@ -46,6 +55,7 @@
 ### Docs
 - 新增 README：使用方式、目錄結構、語言偵測邏輯、版本管理說明
 
-[Unreleased]: https://github.com/ShibaDev2026/jenkins-pipeline/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/ShibaDev2026/jenkins-pipeline/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/ShibaDev2026/jenkins-pipeline/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/ShibaDev2026/jenkins-pipeline/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/ShibaDev2026/jenkins-pipeline/releases/tag/v1.0.0
