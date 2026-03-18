@@ -9,6 +9,9 @@ source "${SCRIPT_DIR}/common/error-handler.sh"
 WORKSPACE="${WORKSPACE:-$(pwd)}"
 BUILD_TOOL="${BUILD_TOOL:-maven}"
 
+# 依 pom.xml / build.gradle 宣告的版本切換 JAVA_HOME，確保使用正確 JDK
+source "${SCRIPT_DIR}/java/java-env.sh"
+
 echo "[java-build] Build tool: ${BUILD_TOOL}"
 
 case "${BUILD_TOOL}" in

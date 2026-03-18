@@ -7,6 +7,18 @@
 
 ---
 
+## [1.2.3] - 2026-03-18
+
+### Fixed
+- `java/java-build.sh`：加入 `source java-env.sh`，確保 Build stage 執行前自動切換至正確 JDK 版本
+- `java/java-test.sh`：加入 `source java-env.sh`，確保 Test stage 與 Build stage 使用相同 JDK
+- `ciPipeline.groovy`：Load Scripts 補入遺漏的 `java-env.sh`，修復 java-build.sh source 時找不到檔案的問題
+
+### Changed
+- `ci.sh`：移除重複的 `source java-env.sh`（已改由 java-build.sh 自行 source，避免雙重載入）
+
+---
+
 ## [1.2.2] - 2026-03-18
 
 ### Fixed
@@ -69,7 +81,8 @@
 ### Docs
 - 新增 README：使用方式、目錄結構、語言偵測邏輯、版本管理說明
 
-[Unreleased]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.2.2...HEAD
+[Unreleased]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.2.3...HEAD
+[1.2.3]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.2.2...v1.2.3
 [1.2.2]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.1.0...v1.2.0

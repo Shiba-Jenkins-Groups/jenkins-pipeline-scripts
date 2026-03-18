@@ -37,6 +37,7 @@ def call(Map config = [:]) {
                             'scripts/common/docker.sh',
                             'scripts/common/git-tag.sh',
                             'scripts/common/archive-base.sh',
+                            'scripts/java/java-env.sh',
                             'scripts/java/java-build.sh',
                             'scripts/java/java-test.sh',
                             'scripts/java/java-archive.sh',

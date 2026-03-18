@@ -56,8 +56,7 @@ echo "[ci] Detected buildTool: ${BUILD_TOOL}"
 # ── 執行對應語言的 CI 流程 ────────────────────────────────────────────────────
 case "${LANGUAGE}" in
     java)
-        # 依 pom.xml / build.gradle 宣告的版本切換 JAVA_HOME
-        source "${SCRIPT_DIR}/java/java-env.sh"
+        # java-env.sh 由 java-build.sh 自行 source，此處不重複呼叫
         bash "${SCRIPT_DIR}/java/java-build.sh"
         bash "${SCRIPT_DIR}/java/java-test.sh"
         bash "${SCRIPT_DIR}/java/java-archive.sh"

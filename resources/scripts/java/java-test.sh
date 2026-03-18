@@ -9,6 +9,9 @@ source "${SCRIPT_DIR}/common/error-handler.sh"
 WORKSPACE="${WORKSPACE:-$(pwd)}"
 BUILD_TOOL="${BUILD_TOOL:-maven}"
 BRANCH="${GIT_BRANCH:-unknown}"
+
+# 依 pom.xml / build.gradle 宣告的版本切換 JAVA_HOME，與 java-build.sh 保持一致
+source "${SCRIPT_DIR}/java/java-env.sh"
 BRANCH="${BRANCH#origin/}"
 
 echo "[java-test] Branch: ${BRANCH}"

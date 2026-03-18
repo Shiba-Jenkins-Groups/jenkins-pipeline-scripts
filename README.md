@@ -11,7 +11,7 @@ Jenkins Shared Library，統一管理所有專案的 CI/CD 流程。
 在專案根目錄的 `Jenkinsfile` 加入以下內容即可：
 
 ```groovy
-@Library('jenkins-pipeline@v1.2.1') _
+@Library('jenkins-pipeline@v1.2.3') _
 
 ciPipeline(
     githubCredentials: 'github-credentials'
@@ -161,14 +161,14 @@ Checkout → Load Scripts → Detect → Build → Test → Archive → Docker B
 
 ```bash
 # 發布新版本
-git tag v1.3.0 -m "v1.3.0 - 說明"
-git push origin v1.3.0
+git tag v1.2.3 -m "v1.2.3 - 說明"
+git push origin v1.2.3
 ```
 
 各專案在 Jenkinsfile 指定版本：
 
 ```groovy
-@Library('jenkins-pipeline@v1.3.0') _
+@Library('jenkins-pipeline@v1.2.3') _
 ```
 
 | 版本 | 說明 |
@@ -177,6 +177,8 @@ git push origin v1.3.0
 | v1.1.0 | 新增 java-env.sh（JDK 多版本自動切換）|
 | v1.2.0 | Node.js CI scripts 實作（build / test / archive）|
 | v1.2.1 | fix node-archive.sh parsing and zip exclude |
+| v1.2.2 | fix Dockerfile-java base image（alpine → jammy，修復 ARM64 build 失敗）|
+| v1.2.3 | fix java-env.sh 未在 ciPipeline stage 架構中正確載入 |
 
 ---
 
