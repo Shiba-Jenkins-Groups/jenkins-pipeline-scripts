@@ -7,7 +7,19 @@
 
 ---
 
-## [1.4.0] - 2026-03-26
+## [1.5.0] - 2026-03-26
+
+### Added
+- `ciPipeline.groovy`：以 Sequential Stages 將 pipeline 劃分為三層群組：`Prepare（準備）` / `Continuous Integration（持續整合）` / `Continuous Delivery（持續交付）`，Stage View 可視化呈現各層職責邊界
+
+### Changed
+- `ciPipeline.groovy`：`dockerBuild` 從 `ciStages` 移至 `cdStages`（破壞性變更），語意上 Docker Build 為 CD 起點，負責將 CI artifact 容器化
+- `ciPipeline.groovy`：依賴推導調整為 `archive: false → cdStages.dockerBuild = false`（跨群組推導）
+- Profile 矩陣同步更新：`ciStages` 僅含 `build / test / archive`；`cdStages` 含 `dockerBuild / harborPush / smokeTest / deploy`
+
+---
+
+## [1.4.1] - 2026-03-26
 
 ### Added
 - `ciPipeline.groovy`：新增 `profile` 參數，支援四種預定義 pipeline 規模（`full` / `ci-only` / `ci-cd` / `smoke`），統一由 Shared Library 維護，代表組織層策略選擇
@@ -154,7 +166,9 @@
 ### Docs
 - 新增 README：使用方式、目錄結構、語言偵測邏輯、版本管理說明
 
-[Unreleased]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.4.1...v1.5.0
+[1.4.1]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.2.7...v1.3.0
 [1.2.7]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.2.6...v1.2.7

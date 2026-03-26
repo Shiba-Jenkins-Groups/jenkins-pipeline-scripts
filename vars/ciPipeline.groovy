@@ -5,19 +5,21 @@ def call(Map config = [:]) {
 
     // ── 1. Profile 預設矩陣 ──────────────────────────────────────────────────
     // 組織策略層：預定義 pipeline 規模，統一由 Shared Library 維護
+    // ciStages：build / test / archive
+    // cdStages：dockerBuild / harborPush / smokeTest / deploy
     def profiles = [
         // full：跑完所有 stage，適用 main / prod 正式交付
-        'full'   : [ci: [build: true,  test: true, archive: true, dockerBuild: true],
-                    cd: [harborPush: true,  smokeTest: true,  deploy: true]],
-        // ci-only：僅 CI 階段（不含 dockerBuild），適用 PR 快速驗證、feature branch
-        'ci-only': [ci: [build: true,  test: true, archive: true, dockerBuild: false],
-                    cd: [harborPush: false, smokeTest: false, deploy: false]],
-        // ci-cd：CI + dockerBuild + harborPush，需要打包但不部署
-        'ci-cd'  : [ci: [build: true,  test: true, archive: true, dockerBuild: true],
-                    cd: [harborPush: true,  smokeTest: false, deploy: false]],
-        // smoke：完整 CI/CD + smokeTest，不 deploy，適用 staging 環境驗證
-        'smoke'  : [ci: [build: true,  test: true, archive: true, dockerBuild: true],
-                    cd: [harborPush: true,  smokeTest: true,  deploy: false]],
+        'full'   : [ci: [build: true,  test: true, archive: true],
+                    cd: [dockerBuild: true,  harborPush: true,  smokeTest: true,  deploy: true]],
+        // ci-only：僅 CI 階段，不含任何 CD stage，適用 PR 快速驗證、feature branch
+        'ci-only': [ci: [build: true,  test: true, archive: true],
+                    cd: [dockerBuild: false, harborPush: false, smokeTest: false, deploy: false]],
+        // ci-cd：CI + Docker Build + Harbor Push，需要打包但不部署
+        'ci-cd'  : [ci: [build: true,  test: true, archive: true],
+                    cd: [dockerBuild: true,  harborPush: true,  smokeTest: false, deploy: false]],
+        // smoke：完整 CI/CD + Smoke Test，不 deploy，適用 staging 環境驗證
+        'smoke'  : [ci: [build: true,  test: true, archive: true],
+                    cd: [dockerBuild: true,  harborPush: true,  smokeTest: true,  deploy: false]],
     ]
 
     // ── 2. 套用 profile（預設 full）──────────────────────────────────────────
@@ -35,15 +37,15 @@ def call(Map config = [:]) {
 
     // ── 4. 強制依賴推導（自動，不需手動設定）──────────────────────────────
     // 上游 stage 關閉時，自動關閉所有依賴的下游 stage
-    if (!ciStages.build)        ciStages.test        = false
-    if (!ciStages.build)        ciStages.archive     = false
-    if (!ciStages.archive)      ciStages.dockerBuild = false
-    if (!ciStages.dockerBuild) {
+    if (!ciStages.build)         ciStages.test           = false
+    if (!ciStages.build)         ciStages.archive        = false
+    if (!ciStages.archive)       cdStages.dockerBuild    = false
+    if (!cdStages.dockerBuild) {
         cdStages.harborPush = false
         cdStages.smokeTest  = false
         cdStages.deploy     = false
     }
-    if (!cdStages.harborPush)   cdStages.smokeTest   = false
+    if (!cdStages.harborPush)    cdStages.smokeTest      = false
 
     // 初始化 log：Pipeline 啟動時輸出推導後的 stage 設定，方便 debug
     echo "[ciPipeline] profile  : ${profileName}"
@@ -66,9 +68,10 @@ def call(Map config = [:]) {
 
         stages {
 
-            // ── Continuous Integration（持續整合）群組 ──────────────────────
-            // 包含骨架 stage（Checkout / Load Scripts / Detect）與 CI stage
-            stage('Continuous Integration（持續整合）') {
+            // ── Prepare（準備）群組 ──────────────────────────────────────────
+            // Pipeline 基礎建設：取得程式碼、載入腳本、偵測語言
+            // 永遠執行，不暴露 flag
+            stage('Prepare（準備）') {
                 stages {
 
                     stage('Checkout') {
@@ -151,6 +154,14 @@ def call(Map config = [:]) {
                         }
                     }
 
+                }
+            }
+
+            // ── Continuous Integration（持續整合）群組 ──────────────────────
+            // 程式碼整合與驗證：編譯 → 測試 → 打包成 artifact
+            stage('Continuous Integration（持續整合）') {
+                stages {
+
                     stage('Build') {
                         // ciStages.build = false 時跳過
                         when { expression { ciStages.build } }
@@ -185,13 +196,14 @@ def call(Map config = [:]) {
             }
 
             // ── Continuous Delivery（持續交付）群組 ────────────────────────
-            // Docker Build 作為 CI/CD 銜接點納入此群組；Harbor Push / Smoke Test / Deploy 受 CD_ENABLED + flag 雙重把關
+            // 交付流程：容器化 → 推送至 registry → 健康驗證 → 部署
+            // Docker Build 僅受 flag 控制；Harbor Push 以後受 CD_ENABLED（branch）+ flag 雙重把關
             stage('Continuous Delivery（持續交付）') {
                 stages {
 
                     stage('Docker Build') {
-                        // ciStages.dockerBuild = false 時跳過（archive: false 時依賴推導自動關閉）
-                        when { expression { ciStages.dockerBuild } }
+                        // cdStages.dockerBuild = false 時跳過（archive: false 時依賴推導自動關閉）
+                        when { expression { cdStages.dockerBuild } }
                         steps {
                             sh 'bash .pipeline/scripts/cd.sh docker-build'
                         }
