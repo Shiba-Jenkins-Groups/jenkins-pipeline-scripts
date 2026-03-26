@@ -7,6 +7,18 @@
 
 ---
 
+## [1.3.0] - 2026-03-26
+
+### Added
+- `smoke-test.sh`：Smoke Test 入口，Harbor Push 後自動驗證 image 可正常啟動，依語言呼叫對應實作
+- `java/java-smoke-test.sh`：Java Smoke Test 實作，啟動 Harbor image 臨時容器，輪詢 Spring Boot Actuator health，status=UP 才算通過，trap EXIT 確保容器自動清理
+  - 選用 `smoke-test.env`：專案根目錄可放置此檔注入啟動所需最小設定（例如排除多餘 AutoConfiguration）
+- `node/node-smoke-test.sh`：空殼佔位，尚未實作
+- `python/python-smoke-test.sh`：空殼佔位，尚未實作
+- `ciPipeline.groovy`：新增 `Smoke Test` stage（位於 Harbor Push 之後、Deploy 之前），CD_ENABLED=true 時觸發
+
+---
+
 ## [1.2.7] - 2026-03-26
 
 ### Fixed
@@ -123,7 +135,8 @@
 ### Docs
 - 新增 README：使用方式、目錄結構、語言偵測邏輯、版本管理說明
 
-[Unreleased]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.2.7...HEAD
+[Unreleased]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.2.7...v1.3.0
 [1.2.7]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.2.6...v1.2.7
 [1.2.6]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.2.5...v1.2.6
 [1.2.5]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.2.4...v1.2.5

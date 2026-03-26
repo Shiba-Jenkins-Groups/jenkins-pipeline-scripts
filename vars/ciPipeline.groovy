@@ -53,9 +53,13 @@ def call(Map config = [:]) {
                             'scripts/node/node-build.sh',
                             'scripts/node/node-test.sh',
                             'scripts/node/node-archive.sh',
+                            'scripts/node/node-smoke-test.sh',
                             'scripts/python/python-build.sh',
                             'scripts/python/python-test.sh',
                             'scripts/python/python-archive.sh',
+                            'scripts/python/python-smoke-test.sh',
+                            'scripts/smoke-test.sh',
+                            'scripts/java/java-smoke-test.sh',
                         ]
                         scripts.each { path ->
                             def content = libraryResource(path)
@@ -139,6 +143,18 @@ def call(Map config = [:]) {
                     )]) {
                         sh 'bash .pipeline/scripts/cd.sh harbor-push'
                     }
+                }
+            }
+
+            stage('Smoke Test') {
+                when {
+                    expression { env.CD_ENABLED == 'true' }
+                }
+                steps {
+                    // Harbor Push 後自動驗證 image 可正常啟動
+                    // Java：起臨時容器輪詢 Actuator health，UP 才算通過
+                    // Node / Python：空殼，尚未實作
+                    sh 'bash .pipeline/scripts/smoke-test.sh'
                 }
             }
 
