@@ -26,7 +26,10 @@ BRANCH="${BRANCH#origin/}"
 APP_NAME="${APP_NAME:?APP_NAME is required}"
 APP_VERSION="${APP_VERSION:?APP_VERSION is required}"
 BUILD_NUMBER="${BUILD_NUMBER:?BUILD_NUMBER is required}"
+ARTIFACT_NAME="${ARTIFACT_NAME:-}"
+RUNTIME_VERSION="${RUNTIME_VERSION:-17}"
 LANGUAGE="${LANGUAGE:-java}"
+ARTIFACTS_ROOT="${ARTIFACTS_ROOT:-/var/jenkins_home/artifacts}"
 
 IMAGE_TAG="${APP_NAME}:${APP_VERSION}-${BUILD_NUMBER}"
 
@@ -38,11 +41,24 @@ echo "[cd] Image: ${IMAGE_TAG}"
 docker_build_if_needed() {
     case "${BRANCH}" in
         develop|main|prod)
+            # JAR 存放於 ARTIFACTS_ROOT，需複製至 .pipeline/（Docker build context 內）
+            # 才能被 Dockerfile 的 COPY ${JAR_FILE} app.jar 正確引用
+            local jar_source="${ARTIFACTS_ROOT}/${APP_NAME}/release/${ARTIFACT_NAME}"
+            local jar_dest="${WORKSPACE}/.pipeline/${ARTIFACT_NAME}"
+
+            echo "[cd] Copying JAR to build context: ${jar_source}"
+            cp "${jar_source}" "${jar_dest}"
+
             local build_args="--build-arg APP_NAME=${APP_NAME} \
                               --build-arg APP_VERSION=${APP_VERSION} \
                               --build-arg BUILD_NUMBER=${BUILD_NUMBER} \
-                              --build-arg BRANCH=${BRANCH}"
+                              --build-arg BRANCH=${BRANCH} \
+                              --build-arg RUNTIME_VERSION=${RUNTIME_VERSION} \
+                              --build-arg JAR_FILE=.pipeline/${ARTIFACT_NAME}"
             docker_build "${IMAGE_TAG}" "${LANGUAGE}" "${build_args}"
+
+            # build context 用完後清理臨時 JAR
+            rm -f "${jar_dest}"
             ;;
         *)
             echo "[cd] Branch '${BRANCH}' — skipping Docker build."

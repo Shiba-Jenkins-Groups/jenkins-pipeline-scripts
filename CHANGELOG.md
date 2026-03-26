@@ -7,6 +7,15 @@
 
 ---
 
+## [1.2.6] - 2026-03-26
+
+### Fixed
+- `cd.sh`：修復 Docker Build 產生的 image 內 `app.jar` 為目錄而非 JAR 檔的問題
+  - 根本原因：`build_args` 未傳入 `--build-arg JAR_FILE`，Dockerfile `COPY ${JAR_FILE} app.jar` 接到空字串，將整個 workspace 複製為目錄
+  - 修法：Docker Build 前將 JAR 從 `ARTIFACTS_ROOT` 複製至 `.pipeline/`（build context 內），並補傳 `--build-arg JAR_FILE` 與 `--build-arg RUNTIME_VERSION`；build 完成後清理臨時檔
+
+---
+
 ## [1.2.5] - 2026-03-26
 
 ### Fixed
@@ -105,7 +114,8 @@
 ### Docs
 - 新增 README：使用方式、目錄結構、語言偵測邏輯、版本管理說明
 
-[Unreleased]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.2.5...HEAD
+[Unreleased]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.2.6...HEAD
+[1.2.6]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.2.5...v1.2.6
 [1.2.5]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.2.4...v1.2.5
 [1.2.4]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.2.3...v1.2.4
 [1.2.3]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.2.2...v1.2.3
