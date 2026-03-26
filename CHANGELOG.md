@@ -7,6 +7,15 @@
 
 ---
 
+## [1.2.5] - 2026-03-26
+
+### Fixed
+- `ciPipeline.groovy`：`CD_ENABLED` 移出 `environment {}` 區塊，改在 Checkout stage 完成後以 script 設定
+  - 根本原因：`environment {}` 在 checkout 前評估，`GIT_BRANCH` 尚未設定，導致 regex 永遠不匹配，Harbor Push 被跳過
+  - 修法：`checkout scm` 後取 `env.GIT_BRANCH`，去除 `origin/` 前綴後比對 `develop|main|prod`
+
+---
+
 ## [1.2.4] - 2026-03-26
 
 ### Added
@@ -96,7 +105,8 @@
 ### Docs
 - 新增 README：使用方式、目錄結構、語言偵測邏輯、版本管理說明
 
-[Unreleased]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.2.4...HEAD
+[Unreleased]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.2.5...HEAD
+[1.2.5]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.2.4...v1.2.5
 [1.2.4]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.2.3...v1.2.4
 [1.2.3]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.2.2...v1.2.3
 [1.2.2]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.2.1...v1.2.2

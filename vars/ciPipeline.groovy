@@ -15,8 +15,6 @@ def call(Map config = [:]) {
 
         environment {
             GITHUB_CREDENTIALS  = credentials("${githubCredentials}")
-            // CD_ENABLED：develop / main / prod 自動啟用；其他 branch 跳過 Harbor Push 與 Deploy
-            CD_ENABLED          = (env.GIT_BRANCH ==~ /origin\/(develop|main|prod)/) ? 'true' : 'false'
         }
 
         stages {
@@ -24,6 +22,14 @@ def call(Map config = [:]) {
             stage('Checkout') {
                 steps {
                     checkout scm
+                    script {
+                        // checkout scm 完成後 GIT_BRANCH 才可用
+                        // 去除 origin/ 前綴後比對 develop / main / prod
+                        def branch = env.GIT_BRANCH?.replaceAll(/^origin\//, '') ?: ''
+                        // CD_ENABLED：develop / main / prod 啟用；其他 branch 跳過 Harbor Push 與 Deploy
+                        env.CD_ENABLED = (branch ==~ /(develop|main|prod)/) ? 'true' : 'false'
+                        echo "[checkout] GIT_BRANCH: ${env.GIT_BRANCH}, CD_ENABLED: ${env.CD_ENABLED}"
+                    }
                 }
             }
 
