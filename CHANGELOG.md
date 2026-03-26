@@ -20,6 +20,9 @@
 - `ciPipeline.groovy`：CD stage（Harbor Push / Smoke Test / Deploy）`when` 條件改為 `CD_ENABLED`（branch）+ `cdStages` flag 雙重把關
 - 向下相容：不傳任何 profile / stages 設定時，行為與 v1.3.0 完全一致（預設 `profile: 'full'`）
 
+### Fixed
+- `ciPipeline.groovy`：補齊 `build: false → archive` 自動 skip 的依賴推導；build 跳過時 target/ 目錄不存在，archive 繼續執行會 find 失敗
+
 ---
 
 ## [1.3.0] - 2026-03-26

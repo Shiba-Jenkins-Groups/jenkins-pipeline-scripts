@@ -36,6 +36,7 @@ def call(Map config = [:]) {
     // ── 4. 強制依賴推導（自動，不需手動設定）──────────────────────────────
     // 上游 stage 關閉時，自動關閉所有依賴的下游 stage
     if (!ciStages.build)        ciStages.test        = false
+    if (!ciStages.build)        ciStages.archive     = false
     if (!ciStages.archive)      ciStages.dockerBuild = false
     if (!ciStages.dockerBuild) {
         cdStages.harborPush = false
