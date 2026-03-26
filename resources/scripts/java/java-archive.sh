@@ -18,7 +18,11 @@ BUILD_NUMBER="${BUILD_NUMBER:?BUILD_NUMBER is required}"
 read_maven_info() {
     APP_NAME="$(./mvnw help:evaluate -Dexpression=project.artifactId -q -DforceStdout -B)"
     APP_VERSION="$(./mvnw help:evaluate -Dexpression=project.version -q -DforceStdout -B)"
-    RUNTIME_VERSION="$(./mvnw help:evaluate -Dexpression=java.version -q -DforceStdout -B 2>/dev/null || echo '17')"
+    # Maven help:evaluate 可能回傳 JVM 系統屬性（如 21.0.10）而非 pom.xml 定義的主版本號
+    # eclipse-temurin image tag 只支援主版本號（如 21），截取第一段確保相容
+    local raw_version
+    raw_version="$(./mvnw help:evaluate -Dexpression=java.version -q -DforceStdout -B 2>/dev/null || echo '17')"
+    RUNTIME_VERSION="${raw_version%%.*}"
 }
 
 read_gradle_info() {

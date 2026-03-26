@@ -7,6 +7,15 @@
 
 ---
 
+## [1.2.7] - 2026-03-26
+
+### Fixed
+- `java/java-archive.sh`：修復 Docker Build 時 base image tag 找不到的問題
+  - 根本原因：Maven `help:evaluate -Dexpression=java.version` 回傳 JVM 系統屬性（如 `21.0.10`）而非 pom.xml 定義的主版本號，導致 `eclipse-temurin:21.0.10-jre-jammy` 不存在
+  - 修法：截取主版本號（`${raw_version%%.*}`），確保傳入 Dockerfile 的 `RUNTIME_VERSION` 為 `21` 而非 `21.0.10`
+
+---
+
 ## [1.2.6] - 2026-03-26
 
 ### Fixed
@@ -114,7 +123,8 @@
 ### Docs
 - 新增 README：使用方式、目錄結構、語言偵測邏輯、版本管理說明
 
-[Unreleased]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.2.6...HEAD
+[Unreleased]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.2.7...HEAD
+[1.2.7]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.2.6...v1.2.7
 [1.2.6]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.2.5...v1.2.6
 [1.2.5]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.2.4...v1.2.5
 [1.2.4]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.2.3...v1.2.4
