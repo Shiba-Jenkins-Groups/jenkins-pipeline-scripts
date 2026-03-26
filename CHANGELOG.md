@@ -22,6 +22,7 @@
 
 ### Fixed
 - `ciPipeline.groovy`：補齊 `build: false → archive` 自動 skip 的依賴推導；build 跳過時 target/ 目錄不存在，archive 繼續執行會 find 失敗
+- `ciPipeline.groovy`：以 Sequential Stages 將 stage 分組為 `Continuous Integration（持續整合）` 與 `Continuous Delivery（持續交付）`，Stage View 可視化區分 CI / CD 邊界
 
 ---
 
