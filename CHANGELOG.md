@@ -7,6 +7,21 @@
 
 ---
 
+## [1.4.0] - 2026-03-26
+
+### Added
+- `ciPipeline.groovy`：新增 `profile` 參數，支援四種預定義 pipeline 規模（`full` / `ci-only` / `ci-cd` / `smoke`），統一由 Shared Library 維護，代表組織層策略選擇
+- `ciPipeline.groovy`：新增 `ciStages` / `cdStages` 參數，各專案可在 profile 基礎上針對個別 stage 做開關微調
+- `ciPipeline.groovy`：強制依賴推導——上游 stage 關閉時自動關閉所有下游 stage（build→test、archive→dockerBuild、dockerBuild→全 cdStages、harborPush→smokeTest）
+- `ciPipeline.groovy`：Pipeline 啟動時輸出推導後的 profile / ciStages / cdStages，方便 debug
+
+### Changed
+- `ciPipeline.groovy`：CI stage（Build / Test / Archive / Docker Build）`when` 條件改為讀取 `ciStages` flag
+- `ciPipeline.groovy`：CD stage（Harbor Push / Smoke Test / Deploy）`when` 條件改為 `CD_ENABLED`（branch）+ `cdStages` flag 雙重把關
+- 向下相容：不傳任何 profile / stages 設定時，行為與 v1.3.0 完全一致（預設 `profile: 'full'`）
+
+---
+
 ## [1.3.0] - 2026-03-26
 
 ### Added
@@ -135,7 +150,8 @@
 ### Docs
 - 新增 README：使用方式、目錄結構、語言偵測邏輯、版本管理說明
 
-[Unreleased]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.2.7...v1.3.0
 [1.2.7]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.2.6...v1.2.7
 [1.2.6]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.2.5...v1.2.6

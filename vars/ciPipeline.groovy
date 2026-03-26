@@ -1,7 +1,53 @@
 def call(Map config = [:]) {
-    def githubCredentials   = config.githubCredentials   ?: error('githubCredentials is required')
+    def githubCredentials = config.githubCredentials ?: error('githubCredentials is required')
     // harborCredentials：Harbor Robot Account Credential ID（Jenkins Credentials 中定義）
-    def harborCredentials   = config.harborCredentials   ?: error('harborCredentials is required')
+    def harborCredentials = config.harborCredentials ?: error('harborCredentials is required')
+
+    // ── 1. Profile 預設矩陣 ──────────────────────────────────────────────────
+    // 組織策略層：預定義 pipeline 規模，統一由 Shared Library 維護
+    def profiles = [
+        // full：跑完所有 stage，適用 main / prod 正式交付
+        'full'   : [ci: [build: true,  test: true, archive: true, dockerBuild: true],
+                    cd: [harborPush: true,  smokeTest: true,  deploy: true]],
+        // ci-only：僅 CI 階段（不含 dockerBuild），適用 PR 快速驗證、feature branch
+        'ci-only': [ci: [build: true,  test: true, archive: true, dockerBuild: false],
+                    cd: [harborPush: false, smokeTest: false, deploy: false]],
+        // ci-cd：CI + dockerBuild + harborPush，需要打包但不部署
+        'ci-cd'  : [ci: [build: true,  test: true, archive: true, dockerBuild: true],
+                    cd: [harborPush: true,  smokeTest: false, deploy: false]],
+        // smoke：完整 CI/CD + smokeTest，不 deploy，適用 staging 環境驗證
+        'smoke'  : [ci: [build: true,  test: true, archive: true, dockerBuild: true],
+                    cd: [harborPush: true,  smokeTest: true,  deploy: false]],
+    ]
+
+    // ── 2. 套用 profile（預設 full）──────────────────────────────────────────
+    def profileName = config.profile ?: 'full'
+    def base        = profiles[profileName] ?: profiles['full']
+
+    // 複製 profile 預設值（避免直接修改 profiles map）
+    Map ciStages = [:] + base.ci
+    Map cdStages = [:] + base.cd
+
+    // ── 3. 專案級覆蓋（ciStages / cdStages 參數）──────────────────────────
+    // 各專案可在 profile 基礎上針對個別 stage 做開關微調
+    if (config.ciStages instanceof Map) ciStages.putAll(config.ciStages)
+    if (config.cdStages instanceof Map) cdStages.putAll(config.cdStages)
+
+    // ── 4. 強制依賴推導（自動，不需手動設定）──────────────────────────────
+    // 上游 stage 關閉時，自動關閉所有依賴的下游 stage
+    if (!ciStages.build)        ciStages.test        = false
+    if (!ciStages.archive)      ciStages.dockerBuild = false
+    if (!ciStages.dockerBuild) {
+        cdStages.harborPush = false
+        cdStages.smokeTest  = false
+        cdStages.deploy     = false
+    }
+    if (!cdStages.harborPush)   cdStages.smokeTest   = false
+
+    // 初始化 log：Pipeline 啟動時輸出推導後的 stage 設定，方便 debug
+    echo "[ciPipeline] profile  : ${profileName}"
+    echo "[ciPipeline] ciStages : ${ciStages}"
+    echo "[ciPipeline] cdStages : ${cdStages}"
 
     pipeline {
         agent {
@@ -14,10 +60,12 @@ def call(Map config = [:]) {
         }
 
         environment {
-            GITHUB_CREDENTIALS  = credentials("${githubCredentials}")
+            GITHUB_CREDENTIALS = credentials("${githubCredentials}")
         }
 
         stages {
+
+            // ── 骨架 stage（永遠執行，不暴露 flag）────────────────────────
 
             stage('Checkout') {
                 steps {
@@ -26,7 +74,7 @@ def call(Map config = [:]) {
                         // checkout scm 完成後 GIT_BRANCH 才可用
                         // 去除 origin/ 前綴後比對 develop / main / prod
                         def branch = env.GIT_BRANCH?.replaceAll(/^origin\//, '') ?: ''
-                        // CD_ENABLED：develop / main / prod 啟用；其他 branch 跳過 Harbor Push 與 Deploy
+                        // CD_ENABLED：develop / main / prod 啟用；其他 branch 跳過 CD stage
                         env.CD_ENABLED = (branch ==~ /(develop|main|prod)/) ? 'true' : 'false'
                         echo "[checkout] GIT_BRANCH: ${env.GIT_BRANCH}, CD_ENABLED: ${env.CD_ENABLED}"
                     }
@@ -99,13 +147,19 @@ def call(Map config = [:]) {
                 }
             }
 
+            // ── CI stage（受 ciStages flag 控制）──────────────────────────
+
             stage('Build') {
+                // ciStages.build = false 時跳過
+                when { expression { ciStages.build } }
                 steps {
                     sh "bash .pipeline/scripts/${env.LANGUAGE}/${env.LANGUAGE}-build.sh"
                 }
             }
 
             stage('Test') {
+                // ciStages.test = false 時跳過（build: false 時依賴推導自動關閉）
+                when { expression { ciStages.test } }
                 steps {
                     sh "bash .pipeline/scripts/${env.LANGUAGE}/${env.LANGUAGE}-test.sh"
                 }
@@ -118,20 +172,31 @@ def call(Map config = [:]) {
             }
 
             stage('Archive') {
+                // ciStages.archive = false 時跳過
+                when { expression { ciStages.archive } }
                 steps {
                     sh "bash .pipeline/scripts/${env.LANGUAGE}/${env.LANGUAGE}-archive.sh"
                 }
             }
 
             stage('Docker Build') {
+                // ciStages.dockerBuild = false 時跳過（archive: false 時依賴推導自動關閉）
+                when { expression { ciStages.dockerBuild } }
                 steps {
                     sh 'bash .pipeline/scripts/cd.sh docker-build'
                 }
             }
 
+            // ── CD stage（受 CD_ENABLED branch 判斷 + cdStages flag 雙重把關）──
+
             stage('Harbor Push') {
                 when {
-                    expression { env.CD_ENABLED == 'true' }
+                    allOf {
+                        // branch 判斷（develop / main / prod）
+                        expression { env.CD_ENABLED == 'true' }
+                        // profile / 專案微調 flag
+                        expression { cdStages.harborPush }
+                    }
                 }
                 steps {
                     // Harbor Robot Account 憑證透過 withCredentials 注入環境變數
@@ -148,7 +213,11 @@ def call(Map config = [:]) {
 
             stage('Smoke Test') {
                 when {
-                    expression { env.CD_ENABLED == 'true' }
+                    allOf {
+                        expression { env.CD_ENABLED == 'true' }
+                        // harborPush: false 時依賴推導自動關閉
+                        expression { cdStages.smokeTest }
+                    }
                 }
                 steps {
                     // Harbor Push 後自動驗證 image 可正常啟動
@@ -160,7 +229,10 @@ def call(Map config = [:]) {
 
             stage('Deploy') {
                 when {
-                    expression { env.CD_ENABLED == 'true' }
+                    allOf {
+                        expression { env.CD_ENABLED == 'true' }
+                        expression { cdStages.deploy }
+                    }
                 }
                 steps {
                     sh 'bash .pipeline/scripts/cd.sh deploy'
