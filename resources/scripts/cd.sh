@@ -108,12 +108,17 @@ image_scan_if_needed() {
             local trivy_report="${WORKSPACE:-$(pwd)}/trivy-results.xml"
             local trivy_cache="${WORKSPACE:-$(pwd)}/.trivy-cache"
 
+            # Trivy 不支援 --format junit，需透過 template 輸出 JUnit XML
+            # template 路徑為 Trivy 安裝時內建，固定於 /usr/local/share/trivy/templates/junit.tpl
+            local trivy_template="/usr/local/share/trivy/templates/junit.tpl"
+
             echo "[cd] Running Trivy image scan: ${IMAGE_TAG} (branch: ${BRANCH}, exit-code: ${trivy_exit_code})"
             trivy image \
                 --exit-code "${trivy_exit_code}" \
                 --severity HIGH,CRITICAL \
                 --cache-dir "${trivy_cache}" \
-                --format junit \
+                --format template \
+                --template "@${trivy_template}" \
                 --output "${trivy_report}" \
                 "${IMAGE_TAG}"
             echo "[cd] Image scan completed: ${trivy_report}"

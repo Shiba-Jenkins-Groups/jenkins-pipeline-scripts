@@ -7,6 +7,15 @@
 
 ---
 
+## [1.6.1] - 2026-03-30
+
+### Fixed
+- `cd.sh`：修正 Trivy `--format junit` 不支援問題（Trivy v0.69.3 不存在 `junit` 格式）
+  - 改為 `--format template --template "@/usr/local/share/trivy/templates/junit.tpl"`（Trivy 安裝內建 template）
+  - 輸出格式與 Jenkins junit step 相容，行為不變
+
+---
+
 ## [1.6.0] - 2026-03-30
 
 ### Added
