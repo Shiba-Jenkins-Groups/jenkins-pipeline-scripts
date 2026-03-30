@@ -7,6 +7,29 @@
 
 ---
 
+## [1.6.0] - 2026-03-30
+
+### Added
+- `cd.sh`：新增 `image_scan_if_needed()` 與 `image-scan` stage 參數，整合 Trivy container image 掃描
+  - main branch：warn only（`--exit-code 0`），不阻斷 build
+  - prod branch：發現 HIGH/CRITICAL 時 fail build（`--exit-code 1`）
+  - develop 及其他 branch：自動跳過
+  - 輸出格式：JUnit XML（`trivy-results.xml`），供 Jenkins junit step 收集
+  - cache 存於 `${WORKSPACE}/.trivy-cache`，隨 `cleanWs` 自動清理
+- `ciPipeline.groovy`：新增 `Image Scan` stage（位於 Docker Build 之後、Harbor Push 之前）
+  - 所有 profile 加入 `imageScan` flag（`full` / `ci-cd` / `smoke`：true；`ci-only`：false）
+  - 依賴推導：`dockerBuild: false → imageScan: false`；`imageScan` 與 `harborPush` 為獨立 flag，互不阻斷
+  - stage post block 收集 `trivy-results.xml`（allowEmptyResults: true）
+- `ciPipeline.groovy`：`post { always }` 新增 `publishHTML` 發布兩份報告（`cleanWs` 之前執行）
+  - JaCoCo Coverage Report：`target/site/jacoco/index.html`（main/prod branch 才產生）
+  - OWASP Dependency-Check Report：`target/dependency-check-report.html`（Phase 2 預留，allowMissing: true）
+
+### Changed
+- `java/java-test.sh`：`run_coverage()` 實作完成，main/prod branch 執行 `mvnw verify`（包含 unit test + JaCoCo report），取代原先分別呼叫 `run_unit_test()` 再呼叫 `run_coverage()` 的設計，避免 Maven 重複執行
+- `java/java-test.sh`：執行邏輯重構為 `case` 分流——main/prod 執行 `run_coverage()`；develop 及其他執行 `run_unit_test()`
+
+---
+
 ## [1.5.0] - 2026-03-26
 
 ### Added
@@ -166,7 +189,8 @@
 ### Docs
 - 新增 README：使用方式、目錄結構、語言偵測邏輯、版本管理說明
 
-[Unreleased]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.4.1...v1.5.0
 [1.4.1]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/Shiba-Jenkins-Groups/jenkins-pipeline-scripts/compare/v1.3.0...v1.4.0

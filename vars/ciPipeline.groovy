@@ -6,20 +6,20 @@ def call(Map config = [:]) {
     // ── 1. Profile 預設矩陣 ──────────────────────────────────────────────────
     // 組織策略層：預定義 pipeline 規模，統一由 Shared Library 維護
     // ciStages：build / test / archive
-    // cdStages：dockerBuild / harborPush / smokeTest / deploy
+    // cdStages：dockerBuild / imageScan / harborPush / smokeTest / deploy
     def profiles = [
         // full：跑完所有 stage，適用 main / prod 正式交付
         'full'   : [ci: [build: true,  test: true, archive: true],
-                    cd: [dockerBuild: true,  harborPush: true,  smokeTest: true,  deploy: true]],
+                    cd: [dockerBuild: true,  imageScan: true,  harborPush: true,  smokeTest: true,  deploy: true]],
         // ci-only：僅 CI 階段，不含任何 CD stage，適用 PR 快速驗證、feature branch
         'ci-only': [ci: [build: true,  test: true, archive: true],
-                    cd: [dockerBuild: false, harborPush: false, smokeTest: false, deploy: false]],
-        // ci-cd：CI + Docker Build + Harbor Push，需要打包但不部署
+                    cd: [dockerBuild: false, imageScan: false, harborPush: false, smokeTest: false, deploy: false]],
+        // ci-cd：CI + Docker Build + Image Scan + Harbor Push，需要打包但不部署
         'ci-cd'  : [ci: [build: true,  test: true, archive: true],
-                    cd: [dockerBuild: true,  harborPush: true,  smokeTest: false, deploy: false]],
+                    cd: [dockerBuild: true,  imageScan: true,  harborPush: true,  smokeTest: false, deploy: false]],
         // smoke：完整 CI/CD + Smoke Test，不 deploy，適用 staging 環境驗證
         'smoke'  : [ci: [build: true,  test: true, archive: true],
-                    cd: [dockerBuild: true,  harborPush: true,  smokeTest: true,  deploy: false]],
+                    cd: [dockerBuild: true,  imageScan: true,  harborPush: true,  smokeTest: true,  deploy: false]],
     ]
 
     // ── 2. 套用 profile（預設 full）──────────────────────────────────────────
@@ -41,11 +41,13 @@ def call(Map config = [:]) {
     if (!ciStages.build)         ciStages.archive        = false
     if (!ciStages.archive)       cdStages.dockerBuild    = false
     if (!cdStages.dockerBuild) {
+        cdStages.imageScan  = false   // image 不存在時無法掃描
         cdStages.harborPush = false
         cdStages.smokeTest  = false
         cdStages.deploy     = false
     }
     if (!cdStages.harborPush)    cdStages.smokeTest      = false
+    // 注意：imageScan 與 harborPush 為獨立 flag，可各自關閉（不互相阻斷）
 
     // 初始化 log：Pipeline 啟動時輸出推導後的 stage 設定，方便 debug
     echo "[ciPipeline] profile  : ${profileName}"
@@ -209,6 +211,24 @@ def call(Map config = [:]) {
                         }
                     }
 
+                    stage('Image Scan') {
+                        // Trivy 掃描 Docker Build 產生的本地 image
+                        // main branch：warn only（exit-code 0）；prod：HIGH/CRITICAL 時 fail（exit-code 1）
+                        // develop branch：cd.sh 內部依 branch 自動跳過
+                        // cdStages.imageScan = false 時跳過（dockerBuild: false 時依賴推導自動關閉）
+                        when { expression { cdStages.imageScan } }
+                        steps {
+                            sh 'bash .pipeline/scripts/cd.sh image-scan'
+                        }
+                        post {
+                            always {
+                                // Trivy JUnit XML 報告（main/prod 才產生，allowEmptyResults 避免其他 branch fail）
+                                junit allowEmptyResults: true,
+                                      testResults: 'trivy-results.xml'
+                            }
+                        }
+                    }
+
                     stage('Harbor Push') {
                         when {
                             allOf {
@@ -266,6 +286,25 @@ def call(Map config = [:]) {
 
         post {
             always {
+                // JaCoCo Coverage HTML（main / prod branch 才產生，allowMissing 避免其他 branch fail）
+                // publishHTML 先於 cleanWs 執行，確保報告複製至 Jenkins 後再清理 workspace
+                publishHTML(target: [
+                    allowMissing          : true,
+                    alwaysLinkToLastBuild : false,
+                    keepAll               : true,
+                    reportDir             : 'target/site/jacoco',
+                    reportFiles           : 'index.html',
+                    reportName            : 'JaCoCo Coverage Report'
+                ])
+                // OWASP Dependency-Check HTML（Phase 2 預留，allowMissing: true 目前不會 fail）
+                publishHTML(target: [
+                    allowMissing          : true,
+                    alwaysLinkToLastBuild : false,
+                    keepAll               : true,
+                    reportDir             : 'target',
+                    reportFiles           : 'dependency-check-report.html',
+                    reportName            : 'OWASP Dependency-Check Report'
+                ])
                 cleanWs()
             }
             success {

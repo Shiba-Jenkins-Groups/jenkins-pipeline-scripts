@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # cd.sh — CD 入口
-# 用法：cd.sh [docker-build | harbor-push | deploy | all]
+# 用法：cd.sh [docker-build | image-scan | harbor-push | deploy | all]
 #   無參數或 all：依序執行全部
 #   指定參數：只執行該 stage（供 ciPipeline.groovy 拆分 stage 使用）
 
@@ -94,6 +94,36 @@ harbor_push_if_needed() {
     esac
 }
 
+# ── Image Scan（Trivy）────────────────────────────────────────────────────────
+image_scan_if_needed() {
+    case "${BRANCH}" in
+        main|prod)
+            # prod branch：發現 HIGH/CRITICAL 時 fail build（exit-code 1）
+            # main branch：僅警告輸出，不阻斷 build（exit-code 0）
+            local trivy_exit_code=0
+            [[ "${BRANCH}" == "prod" ]] && trivy_exit_code=1
+
+            # trivy-results.xml 輸出至 WORKSPACE 根目錄，供 ciPipeline.groovy junit step 收集
+            # trivy-cache 存於 WORKSPACE 下，隨 cleanWs 清理（避免額外 volume 掛載）
+            local trivy_report="${WORKSPACE:-$(pwd)}/trivy-results.xml"
+            local trivy_cache="${WORKSPACE:-$(pwd)}/.trivy-cache"
+
+            echo "[cd] Running Trivy image scan: ${IMAGE_TAG} (branch: ${BRANCH}, exit-code: ${trivy_exit_code})"
+            trivy image \
+                --exit-code "${trivy_exit_code}" \
+                --severity HIGH,CRITICAL \
+                --cache-dir "${trivy_cache}" \
+                --format junit \
+                --output "${trivy_report}" \
+                "${IMAGE_TAG}"
+            echo "[cd] Image scan completed: ${trivy_report}"
+            ;;
+        *)
+            echo "[cd] Branch '${BRANCH}' — skipping image scan."
+            ;;
+    esac
+}
+
 # ── Deploy ────────────────────────────────────────────────────────────────────
 deploy_if_needed() {
     case "${BRANCH}" in
@@ -110,11 +140,12 @@ deploy_if_needed() {
 # ── Stage 分派 ────────────────────────────────────────────────────────────────
 case "${STAGE}" in
     docker-build)  docker_build_if_needed ;;
+    image-scan)    image_scan_if_needed ;;
     harbor-push)   harbor_push_if_needed ;;
     deploy)        deploy_if_needed ;;
-    all)           docker_build_if_needed; harbor_push_if_needed; deploy_if_needed ;;
+    all)           docker_build_if_needed; image_scan_if_needed; harbor_push_if_needed; deploy_if_needed ;;
     *)
-        echo "[ERROR] Unknown stage: ${STAGE}. Use: docker-build | harbor-push | deploy | all" >&2
+        echo "[ERROR] Unknown stage: ${STAGE}. Use: docker-build | image-scan | harbor-push | deploy | all" >&2
         exit 1
         ;;
 esac

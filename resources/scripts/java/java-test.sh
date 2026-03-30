@@ -17,12 +17,12 @@ BRANCH="${BRANCH#origin/}"
 echo "[java-test] Branch: ${BRANCH}"
 
 # ── 各 branch 測試範圍 ────────────────────────────────────────────────────────
-# develop: Unit Test only
-# main:    Unit Test + Coverage (TODO) + Integration (TODO)
-# prod:    Unit Test + Coverage (TODO) + Integration (TODO) + Security (TODO)
-# 其他:    Unit Test only
+# develop / 其他：Unit Test only（快速反饋）
+# main：Coverage（包含 Unit Test）+ Integration（TODO）
+# prod：Coverage（包含 Unit Test）+ Integration（TODO）+ Security（TODO）
 
 run_unit_test() {
+    # develop / 其他 branch 使用，只跑 test phase，速度最快
     echo "[java-test] Running unit tests..."
     case "${BUILD_TOOL}" in
         maven)  cd "${WORKSPACE}" && ./mvnw test -B ;;
@@ -31,7 +31,14 @@ run_unit_test() {
 }
 
 run_coverage() {
-    echo "[java-test] TODO: Coverage (JaCoCo) not yet implemented."
+    # main / prod branch 使用：mvnw verify 包含 compile → test → JaCoCo report
+    # JaCoCo 覆蓋率門檻設定於 pom.xml <configuration><rules>，門檻不足時 Maven 自動 fail
+    # HTML 報告輸出：target/site/jacoco/index.html
+    echo "[java-test] Running coverage analysis (JaCoCo)..."
+    case "${BUILD_TOOL}" in
+        maven)  cd "${WORKSPACE}" && ./mvnw verify -B ;;
+        gradle) cd "${WORKSPACE}" && ./gradlew test jacocoTestReport jacocoTestCoverageVerification ;;
+    esac
 }
 
 run_integration_test() {
@@ -43,8 +50,7 @@ run_security_scan() {
 }
 
 # ── 執行 ──────────────────────────────────────────────────────────────────────
-run_unit_test
-
+# main / prod 用 run_coverage()（內部已包含 unit test），避免 Maven 重複執行
 case "${BRANCH}" in
     main)
         run_coverage
@@ -54,6 +60,10 @@ case "${BRANCH}" in
         run_coverage
         run_integration_test
         run_security_scan
+        ;;
+    *)
+        # develop 及 feature branch：快速 unit test
+        run_unit_test
         ;;
 esac
 
