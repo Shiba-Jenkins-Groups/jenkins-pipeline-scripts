@@ -7,6 +7,36 @@
 
 ---
 
+## [1.11.0] - 2026-07-13
+
+### Added
+- **`common/branch-policy.sh`：branch 政策單一真相表**（改善計畫 #3）
+  - `derive_branch_policy <branch>` 一次推導全部政策旗標：
+    `DO_DOCKER_BUILD / DO_SCAN / SCAN_EXIT_CODE / DO_PUSH / DO_DEPLOY /
+     DEPLOY_NAMESPACE / NODE_PORT / DEPLOY_INPUT_GATE / TEST_LEVEL`
+  - 雙模式：執行模式（Detect stage 印 KEY=VALUE 供 groovy 注入 env）＋
+    source 模式（`cd.sh all`、`{lang}-test.sh` standalone fallback 自行推導）
+  - branch 來源優先序：`GIT_BRANCH` > `BRANCH_NAME`（Multibranch 預留）> `BRANCH`；取不到即 fail
+  - 表內不變量：`DO_PUSH ⇒ DO_DOCKER_BUILD`、`DO_DEPLOY ⇒ DO_PUSH`、`DO_DEPLOY ⇒ ns/port 非空`
+
+### Changed
+- **政策消費端全面改讀旗標，刪除自帶 branch case**（行為與 v1.10.0 完全一致，純集中化）
+  - `ciPipeline.groovy`：`CD_ENABLED` 退役；Docker Build / Image Scan / Harbor Push /
+    Smoke Test / Deploy 的 `when` 改讀 `DO_*` 旗標（profile flag 雙重把關不變）；
+    Deploy 人工閘改由 `DEPLOY_INPUT_GATE` 控制（groovy 不再出現 branch 字面值）
+  - `cd.sh`：四個 `*_if_needed()` 改旗標閘；Trivy exit-code 改讀 `SCAN_EXIT_CODE`；
+    deploy namespace / NodePort 改讀政策旗標；旗標未注入時 fallback 自行推導
+  - `java-test.sh` / `go-test.sh`：branch case 改為 `TEST_LEVEL` 檔位（unit / coverage）
+  - `java-test.sh`：移除 `run_security_scan()` 空殼（Security 由 Phase 2 v1.7.x 以獨立旗標實作）
+  - Stage View 呈現變化：政策不啟用的 stage 由「執行後內部跳過」改為「stage 直接 skip（灰色）」，
+    實際行為不變、視覺更真實
+- README：CD 開關／測試範圍兩節改為政策單一真相表；目錄結構補 go / smoke-test / version.sh
+- 註：roadmap「移除 develop 暫時開關」項——v1.8.0 後 develop 的 Harbor Push / Deploy
+  已是 k3s dev namespace 正式交付鏈，本版**保留現行為**；若仍要關閉，
+  現在只需改 branch-policy.sh 表中兩個值（此即本次集中化的價值）
+
+---
+
 ## [1.10.0] - 2026-07-13
 
 ### Added

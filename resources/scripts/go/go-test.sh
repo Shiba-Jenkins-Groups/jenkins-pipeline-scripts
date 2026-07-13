@@ -16,10 +16,15 @@ cd "${WORKSPACE}"
 echo "[go-test] Branch: ${BRANCH}"
 echo "[go-test] Test packages: ${GO_TEST_PKGS}"
 
-# ── 各 branch 測試範圍 ────────────────────────────────────────────────────────
-# develop / 其他：go vet + unit test（快速反饋）
-# main / prod：go vet + unit test + coverage 總覽
+# ── 測試檔位（TEST_LEVEL）─────────────────────────────────────────────────────
+# 檔位由 branch-policy.sh 單一真相表決定（unit / coverage），本檔不自帶 branch case
 # 註：-race 需要 CGO + gcc，agent 未裝 C toolchain，race 檢測由開發機本地執行
+if [[ -z "${TEST_LEVEL:-}" ]]; then
+    # shellcheck source=../common/branch-policy.sh
+    source "${SCRIPT_DIR}/common/branch-policy.sh"
+    derive_branch_policy "${BRANCH}"
+fi
+echo "[go-test] Test level: ${TEST_LEVEL}"
 
 run_unit_test() {
     echo "[go-test] Running go vet..."
@@ -41,8 +46,8 @@ run_coverage() {
     go tool cover -func="${WORKSPACE}/coverage.out" | tail -1
 }
 
-case "${BRANCH}" in
-    main|prod)
+case "${TEST_LEVEL}" in
+    coverage)
         run_coverage
         ;;
     *)

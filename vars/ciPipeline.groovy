@@ -79,14 +79,8 @@ def call(Map config = [:]) {
                     stage('Checkout') {
                         steps {
                             checkout scm
-                            script {
-                                // checkout scm 完成後 GIT_BRANCH 才可用
-                                // 去除 origin/ 前綴後比對 develop / main / prod
-                                def branch = env.GIT_BRANCH?.replaceAll(/^origin\//, '') ?: ''
-                                // CD_ENABLED：develop / main / prod 啟用；其他 branch 跳過 CD stage
-                                env.CD_ENABLED = (branch ==~ /(develop|main|prod)/) ? 'true' : 'false'
-                                echo "[checkout] GIT_BRANCH: ${env.GIT_BRANCH}, CD_ENABLED: ${env.CD_ENABLED}"
-                            }
+                            // branch 政策旗標統一由 Detect stage 的 branch-policy.sh 推導
+                            echo "[checkout] GIT_BRANCH: ${env.GIT_BRANCH}"
                         }
                     }
 
@@ -104,6 +98,7 @@ def call(Map config = [:]) {
                                     'scripts/common/git-tag.sh',
                                     'scripts/common/archive-base.sh',
                                     'scripts/common/version.sh',
+                                    'scripts/common/branch-policy.sh',
                                     'scripts/go/go-env.sh',
                                     'scripts/go/go-build.sh',
                                     'scripts/go/go-test.sh',
@@ -148,8 +143,10 @@ def call(Map config = [:]) {
                     stage('Detect') {
                         steps {
                             script {
+                                // detect.sh：語言偵測；branch-policy.sh：branch 政策旗標（單一真相表）
+                                // 兩者皆以 KEY=VALUE 輸出，統一解析後注入 env，供 when 條件與下游腳本讀取
                                 def output = sh(
-                                    script: 'bash .pipeline/scripts/detect.sh',
+                                    script: 'bash .pipeline/scripts/detect.sh && bash .pipeline/scripts/common/branch-policy.sh',
                                     returnStdout: true
                                 ).trim()
                                 output.split('\n').each { line ->
@@ -159,6 +156,8 @@ def call(Map config = [:]) {
                                     }
                                 }
                                 echo "[detect] Language: ${env.LANGUAGE}, BuildTool: ${env.BUILD_TOOL}"
+                                echo "[detect] Policy: DO_DOCKER_BUILD=${env.DO_DOCKER_BUILD}, DO_SCAN=${env.DO_SCAN}(exit=${env.SCAN_EXIT_CODE}), " +
+                                     "DO_PUSH=${env.DO_PUSH}, DO_DEPLOY=${env.DO_DEPLOY}(ns=${env.DEPLOY_NAMESPACE}), TEST_LEVEL=${env.TEST_LEVEL}"
                             }
                         }
                     }
@@ -206,13 +205,19 @@ def call(Map config = [:]) {
 
             // ── Continuous Delivery（持續交付）群組 ────────────────────────
             // 交付流程：容器化 → 推送至 registry → 健康驗證 → 部署
-            // Docker Build 僅受 flag 控制；Harbor Push 以後受 CD_ENABLED（branch）+ flag 雙重把關
+            // 各 stage 受「profile flag（cdStages）＋ branch 政策旗標（branch-policy.sh）」雙重把關
+            // 政策旗標由 Detect stage 推導注入 env；此處只讀，不自帶 branch 判斷
             stage('Continuous Delivery（持續交付）') {
                 stages {
 
                     stage('Docker Build') {
                         // cdStages.dockerBuild = false 時跳過（archive: false 時依賴推導自動關閉）
-                        when { expression { cdStages.dockerBuild } }
+                        when {
+                            allOf {
+                                expression { cdStages.dockerBuild }
+                                expression { env.DO_DOCKER_BUILD == 'true' }
+                            }
+                        }
                         steps {
                             sh 'bash .pipeline/scripts/cd.sh docker-build'
                         }
@@ -220,10 +225,14 @@ def call(Map config = [:]) {
 
                     stage('Image Scan') {
                         // Trivy 掃描 Docker Build 產生的本地 image
-                        // main branch：warn only（exit-code 0）；prod：HIGH/CRITICAL 時 fail（exit-code 1）
-                        // develop branch：cd.sh 內部依 branch 自動跳過
+                        // exit-code 由政策表 SCAN_EXIT_CODE 決定：main=0（warn only）；prod=1（HIGH/CRITICAL fail）
                         // cdStages.imageScan = false 時跳過（dockerBuild: false 時依賴推導自動關閉）
-                        when { expression { cdStages.imageScan } }
+                        when {
+                            allOf {
+                                expression { cdStages.imageScan }
+                                expression { env.DO_SCAN == 'true' }
+                            }
+                        }
                         steps {
                             sh 'bash .pipeline/scripts/cd.sh image-scan'
                         }
@@ -233,8 +242,8 @@ def call(Map config = [:]) {
                     stage('Harbor Push') {
                         when {
                             allOf {
-                                // branch 判斷（develop / main / prod）
-                                expression { env.CD_ENABLED == 'true' }
+                                // branch 政策（branch-policy.sh 推導）
+                                expression { env.DO_PUSH == 'true' }
                                 // profile / 專案微調 flag
                                 expression { cdStages.harborPush }
                             }
@@ -255,7 +264,8 @@ def call(Map config = [:]) {
                     stage('Smoke Test') {
                         when {
                             allOf {
-                                expression { env.CD_ENABLED == 'true' }
+                                // Smoke Test 驗證的是已 push 的 image，故跟隨 DO_PUSH 政策
+                                expression { env.DO_PUSH == 'true' }
                                 // harborPush: false 時依賴推導自動關閉
                                 expression { cdStages.smokeTest }
                             }
@@ -271,17 +281,16 @@ def call(Map config = [:]) {
                     stage('Deploy') {
                         when {
                             allOf {
-                                expression { env.CD_ENABLED == 'true' }
+                                expression { env.DO_DEPLOY == 'true' }
                                 expression { cdStages.deploy }
                             }
                         }
                         steps {
                             script {
-                                // prod branch 需人工確認後才執行部署（防止誤觸）
-                                def branch = env.GIT_BRANCH?.replaceAll(/^origin\//, '') ?: ''
-                                if (branch == 'prod') {
-                                    input message: "Deploy ${env.JOB_NAME} #${env.BUILD_NUMBER} to PROD namespace?",
-                                          ok: 'Deploy to PROD'
+                                // 人工確認閘由政策表 DEPLOY_INPUT_GATE 決定（prod=true，防止誤觸）
+                                if (env.DEPLOY_INPUT_GATE == 'true') {
+                                    input message: "Deploy ${env.JOB_NAME} #${env.BUILD_NUMBER} to ${env.DEPLOY_NAMESPACE} namespace?",
+                                          ok: "Deploy to ${env.DEPLOY_NAMESPACE}"
                                 }
                             }
                             // KUBECONFIG 由 Jenkins Secret File credential（ID: k3s-kubeconfig）注入

@@ -26,6 +26,16 @@ fi
 
 BRANCH="${BRANCH:-${GIT_BRANCH:-unknown}}"
 BRANCH="${BRANCH#origin/}"
+
+# ── branch 政策旗標 ───────────────────────────────────────────────────────────
+# Pipeline 情境：Detect stage 已推導並注入 env（DO_* / SCAN_EXIT_CODE / ...）
+# standalone / all 情境：旗標未注入時自行推導（單一真相仍在 branch-policy.sh）
+if [[ -z "${DO_DOCKER_BUILD:-}" ]]; then
+    # shellcheck source=common/branch-policy.sh
+    source "${SCRIPT_DIR}/common/branch-policy.sh"
+    derive_branch_policy "${BRANCH}"
+fi
+
 APP_NAME="${APP_NAME:?APP_NAME is required}"
 APP_VERSION="${APP_VERSION:?APP_VERSION is required}"
 BUILD_NUMBER="${BUILD_NUMBER:?BUILD_NUMBER is required}"
@@ -42,116 +52,111 @@ echo "[cd] Image: ${IMAGE_TAG}"
 
 # ── Docker Build ──────────────────────────────────────────────────────────────
 docker_build_if_needed() {
-    case "${BRANCH}" in
-        develop|main|prod)
-            # JAR 存放於 ARTIFACTS_ROOT，需複製至 .pipeline/（Docker build context 內）
-            # 才能被 Dockerfile 的 COPY ${JAR_FILE} app.jar 正確引用
-            local jar_source="${ARTIFACTS_ROOT}/${APP_NAME}/release/${ARTIFACT_NAME}"
-            local jar_dest="${WORKSPACE}/.pipeline/${ARTIFACT_NAME}"
+    # 政策旗標由 branch-policy.sh 單一真相表決定，本函數不自帶 branch case
+    if [[ "${DO_DOCKER_BUILD}" != "true" ]]; then
+        echo "[cd] Branch '${BRANCH}' — skipping Docker build (DO_DOCKER_BUILD=${DO_DOCKER_BUILD})."
+        return 0
+    fi
 
-            # JAR 存在性前置檢查：提前報錯，避免 cp 失敗後只剩 bash 原始訊息
-            if [[ ! -f "${jar_source}" ]]; then
-                report_error "DOCKER" "001" "JAR not found: ${jar_source}. Check Archive stage output."
-                exit 1
-            fi
+    # JAR 存放於 ARTIFACTS_ROOT，需複製至 .pipeline/（Docker build context 內）
+    # 才能被 Dockerfile 的 COPY ${JAR_FILE} app.jar 正確引用
+    local jar_source="${ARTIFACTS_ROOT}/${APP_NAME}/release/${ARTIFACT_NAME}"
+    local jar_dest="${WORKSPACE}/.pipeline/${ARTIFACT_NAME}"
 
-            echo "[cd] Copying JAR to build context: ${jar_source}"
-            cp "${jar_source}" "${jar_dest}"
+    # JAR 存在性前置檢查：提前報錯，避免 cp 失敗後只剩 bash 原始訊息
+    if [[ ! -f "${jar_source}" ]]; then
+        report_error "DOCKER" "001" "JAR not found: ${jar_source}. Check Archive stage output."
+        exit 1
+    fi
 
-            local build_args="--build-arg APP_NAME=${APP_NAME} \
-                              --build-arg APP_VERSION=${APP_VERSION} \
-                              --build-arg BUILD_NUMBER=${BUILD_NUMBER} \
-                              --build-arg BRANCH=${BRANCH} \
-                              --build-arg RUNTIME_VERSION=${RUNTIME_VERSION} \
-                              --build-arg JAR_FILE=.pipeline/${ARTIFACT_NAME} \
-                              --build-arg ARTIFACT_FILE=.pipeline/${ARTIFACT_NAME}"
-            # ARTIFACT_FILE：語言中立的通用名（Dockerfile-go 使用）；JAR_FILE 保留 Java 向下相容
-            docker_build "${IMAGE_TAG}" "${LANGUAGE}" "${build_args}"
+    echo "[cd] Copying JAR to build context: ${jar_source}"
+    cp "${jar_source}" "${jar_dest}"
 
-            # build context 用完後清理臨時 JAR
-            rm -f "${jar_dest}"
-            ;;
-        *)
-            echo "[cd] Branch '${BRANCH}' — skipping Docker build."
-            ;;
-    esac
+    local build_args="--build-arg APP_NAME=${APP_NAME} \
+                      --build-arg APP_VERSION=${APP_VERSION} \
+                      --build-arg BUILD_NUMBER=${BUILD_NUMBER} \
+                      --build-arg BRANCH=${BRANCH} \
+                      --build-arg RUNTIME_VERSION=${RUNTIME_VERSION} \
+                      --build-arg JAR_FILE=.pipeline/${ARTIFACT_NAME} \
+                      --build-arg ARTIFACT_FILE=.pipeline/${ARTIFACT_NAME}"
+    # ARTIFACT_FILE：語言中立的通用名（Dockerfile-go 使用）；JAR_FILE 保留 Java 向下相容
+    docker_build "${IMAGE_TAG}" "${LANGUAGE}" "${build_args}"
+
+    # build context 用完後清理臨時 JAR
+    rm -f "${jar_dest}"
 }
 
 # ── Harbor Push ───────────────────────────────────────────────────────────────
 harbor_push_if_needed() {
-    case "${BRANCH}" in
-        develop|main|prod)
-            local registry="${HARBOR_REGISTRY:-localhost:9290}"
-            local harbor_image="${registry}/${APP_NAME}/${APP_NAME}:${BRANCH}-${APP_VERSION}-${BUILD_NUMBER}"
+    if [[ "${DO_PUSH}" != "true" ]]; then
+        echo "[cd] Branch '${BRANCH}' — skipping Harbor push (DO_PUSH=${DO_PUSH})."
+        return 0
+    fi
 
-            # Harbor credentials 由 ciPipeline.groovy withCredentials 注入
-            # docker login 失敗時包裝業務層說明，避免只看到 docker daemon 原始訊息
-            echo "${HARBOR_PASS}" | docker login "${registry}" \
-                --username "${HARBOR_USER}" \
-                --password-stdin \
-                || { report_error "HARBOR" "001" "docker login failed for ${registry}. Check harbor credentials in Jenkins (ID: harbor-robot-*)."; exit 1; }
+    local registry="${HARBOR_REGISTRY:-localhost:9290}"
+    local harbor_image="${registry}/${APP_NAME}/${APP_NAME}:${BRANCH}-${APP_VERSION}-${BUILD_NUMBER}"
 
-            echo "[cd] Tagging: ${IMAGE_TAG} → ${harbor_image}"
-            docker tag "${IMAGE_TAG}" "${harbor_image}"
+    # Harbor credentials 由 ciPipeline.groovy withCredentials 注入
+    # docker login 失敗時包裝業務層說明，避免只看到 docker daemon 原始訊息
+    echo "${HARBOR_PASS}" | docker login "${registry}" \
+        --username "${HARBOR_USER}" \
+        --password-stdin \
+        || { report_error "HARBOR" "001" "docker login failed for ${registry}. Check harbor credentials in Jenkins (ID: harbor-robot-*)."; exit 1; }
 
-            echo "[cd] Pushing: ${harbor_image}"
-            docker push "${harbor_image}"
+    echo "[cd] Tagging: ${IMAGE_TAG} → ${harbor_image}"
+    docker tag "${IMAGE_TAG}" "${harbor_image}"
 
-            docker logout "${registry}"
-            echo "[cd] Harbor push completed: ${harbor_image}"
-            ;;
-        *)
-            echo "[cd] Branch '${BRANCH}' — skipping Harbor push."
-            ;;
-    esac
+    echo "[cd] Pushing: ${harbor_image}"
+    docker push "${harbor_image}"
+
+    docker logout "${registry}"
+    echo "[cd] Harbor push completed: ${harbor_image}"
 }
 
 # ── Image Scan（Trivy）────────────────────────────────────────────────────────
 image_scan_if_needed() {
-    case "${BRANCH}" in
-        main|prod)
-            # prod branch：發現 HIGH/CRITICAL 時 fail build（exit-code 1）
-            # main branch：僅警告輸出，不阻斷 build（exit-code 0）
-            local trivy_exit_code=0
-            [[ "${BRANCH}" == "prod" ]] && trivy_exit_code=1
+    if [[ "${DO_SCAN}" != "true" ]]; then
+        echo "[cd] Branch '${BRANCH}' — skipping image scan (DO_SCAN=${DO_SCAN})."
+        return 0
+    fi
 
-            # trivy-results.xml 輸出至 WORKSPACE 根目錄，供 ciPipeline.groovy junit step 收集
-            # trivy-cache 存於 WORKSPACE 下，隨 cleanWs 清理（避免額外 volume 掛載）
-            local trivy_report="${WORKSPACE:-$(pwd)}/trivy-results.xml"
-            local trivy_cache="${WORKSPACE:-$(pwd)}/.trivy-cache"
+    # SCAN_EXIT_CODE 由政策表決定：0＝僅警告不阻斷（main）；1＝HIGH/CRITICAL 即 fail（prod）
+    local trivy_exit_code="${SCAN_EXIT_CODE}"
 
-            # Trivy 不支援 --format junit，需透過 template 輸出 JUnit XML
-            # template 路徑為 Trivy 安裝時內建，固定於 /usr/local/share/trivy/templates/junit.tpl
-            local trivy_template="/usr/local/share/trivy/templates/junit.tpl"
+    # trivy-results.xml 輸出至 WORKSPACE 根目錄，供 ciPipeline.groovy junit step 收集
+    # trivy-cache 存於 WORKSPACE 下，隨 cleanWs 清理（避免額外 volume 掛載）
+    local trivy_report="${WORKSPACE:-$(pwd)}/trivy-results.xml"
+    local trivy_cache="${WORKSPACE:-$(pwd)}/.trivy-cache"
 
-            echo "[cd] Running Trivy image scan: ${IMAGE_TAG} (branch: ${BRANCH}, exit-code: ${trivy_exit_code})"
-            trivy image \
-                --exit-code "${trivy_exit_code}" \
-                --severity HIGH,CRITICAL \
-                --cache-dir "${trivy_cache}" \
-                --format template \
-                --template "@${trivy_template}" \
-                --output "${trivy_report}" \
-                "${IMAGE_TAG}"
-            echo "[cd] Image scan completed: ${trivy_report}"
-            ;;
-        *)
-            echo "[cd] Branch '${BRANCH}' — skipping image scan."
-            ;;
-    esac
+    # Trivy 不支援 --format junit，需透過 template 輸出 JUnit XML
+    # template 路徑為 Trivy 安裝時內建，固定於 /usr/local/share/trivy/templates/junit.tpl
+    local trivy_template="/usr/local/share/trivy/templates/junit.tpl"
+
+    echo "[cd] Running Trivy image scan: ${IMAGE_TAG} (branch: ${BRANCH}, exit-code: ${trivy_exit_code})"
+    trivy image \
+        --exit-code "${trivy_exit_code}" \
+        --severity HIGH,CRITICAL \
+        --cache-dir "${trivy_cache}" \
+        --format template \
+        --template "@${trivy_template}" \
+        --output "${trivy_report}" \
+        "${IMAGE_TAG}"
+    echo "[cd] Image scan completed: ${trivy_report}"
 }
 
 # ── Deploy（kubectl apply to k3s）─────────────────────────────────────────────
 deploy_if_needed() {
-    local namespace
-    case "${BRANCH}" in
-        develop) namespace="dev"  ;;
-        prod)    namespace="prod" ;;
-        *)
-            echo "[cd] Branch '${BRANCH}' — skipping deploy."
-            return 0
-            ;;
-    esac
+    if [[ "${DO_DEPLOY}" != "true" ]]; then
+        echo "[cd] Branch '${BRANCH}' — skipping deploy (DO_DEPLOY=${DO_DEPLOY})."
+        return 0
+    fi
+
+    # namespace / NodePort 由政策表決定；DO_DEPLOY=true 時兩者必為非空（表內不變量）
+    local namespace="${DEPLOY_NAMESPACE}"
+    if [[ -z "${namespace}" ]] || [[ -z "${NODE_PORT:-}" ]]; then
+        report_error "DEPLOY" "004" "DO_DEPLOY=true but DEPLOY_NAMESPACE/NODE_PORT empty. Check branch-policy.sh table."
+        exit 1
+    fi
 
     # k8s/ 目錄由各專案提供，包含 deployment.yaml / service.yaml（含 envsubst 佔位符）
     if [[ ! -d "${WORKSPACE}/k8s" ]]; then
@@ -170,8 +175,8 @@ deploy_if_needed() {
     # HARBOR_IMAGE 格式：<registry>/<app>/<app>:<branch>-<version>-<build>
     export HARBOR_IMAGE="${k3s_registry}/${APP_NAME}/${APP_NAME}:${BRANCH}-${APP_VERSION}-${BUILD_NUMBER}"
     export NAMESPACE="${namespace}"
+    # NODE_PORT 由政策表提供（develop=30090 / prod=30091），此處僅確保 export 供 envsubst 使用
     export NODE_PORT
-    [[ "${BRANCH}" == "prod" ]] && NODE_PORT="30091" || NODE_PORT="30090"
 
     echo "[cd] Deploying to namespace: ${namespace}"
     echo "[cd] Image: ${HARBOR_IMAGE}"

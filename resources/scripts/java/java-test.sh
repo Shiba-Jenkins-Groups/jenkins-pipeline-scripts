@@ -16,10 +16,15 @@ BRANCH="${BRANCH#origin/}"
 
 echo "[java-test] Branch: ${BRANCH}"
 
-# ── 各 branch 測試範圍 ────────────────────────────────────────────────────────
-# develop / 其他：Unit Test only（快速反饋）
-# main：Coverage（包含 Unit Test）+ Integration（TODO）
-# prod：Coverage（包含 Unit Test）+ Integration（TODO）+ Security（TODO）
+# ── 測試檔位（TEST_LEVEL）─────────────────────────────────────────────────────
+# 檔位由 branch-policy.sh 單一真相表決定（unit / coverage），本檔不自帶 branch case
+# Pipeline 情境：Detect stage 已注入 env；standalone 情境：自行推導
+if [[ -z "${TEST_LEVEL:-}" ]]; then
+    # shellcheck source=../common/branch-policy.sh
+    source "${SCRIPT_DIR}/common/branch-policy.sh"
+    derive_branch_policy "${BRANCH}"
+fi
+echo "[java-test] Test level: ${TEST_LEVEL}"
 
 run_unit_test() {
     # develop / 其他 branch 使用，只跑 test phase，速度最快
@@ -45,24 +50,16 @@ run_integration_test() {
     echo "[java-test] TODO: Integration tests not yet implemented."
 }
 
-run_security_scan() {
-    echo "[java-test] TODO: Security scan (OWASP) not yet implemented."
-}
-
 # ── 執行 ──────────────────────────────────────────────────────────────────────
-# main / prod 用 run_coverage()（內部已包含 unit test），避免 Maven 重複執行
-case "${BRANCH}" in
-    main)
+# coverage 檔位用 run_coverage()（內部已包含 unit test），避免 Maven 重複執行
+# Security scan（OWASP / gitleaks）由 Phase 2（v1.7.x）以獨立政策旗標實作，不在測試檔位內
+case "${TEST_LEVEL}" in
+    coverage)
         run_coverage
         run_integration_test
-        ;;
-    prod)
-        run_coverage
-        run_integration_test
-        run_security_scan
         ;;
     *)
-        # develop 及 feature branch：快速 unit test
+        # unit 檔位（develop / feature branch）：快速 unit test
         run_unit_test
         ;;
 esac

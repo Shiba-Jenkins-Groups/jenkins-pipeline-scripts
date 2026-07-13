@@ -33,28 +33,23 @@ jenkins-pipeline-scripts/
     ├── scripts/
     │   ├── detect.sh              # 語言 / Build Tool 自動偵測
     │   ├── ci.sh                  # CI 入口
-    │   ├── cd.sh                  # CD 入口（開關控制）
+    │   ├── cd.sh                  # CD 入口（依政策旗標執行）
+    │   ├── smoke-test.sh          # Smoke Test 入口（分派至各語言）
     │   ├── common/
     │   │   ├── error-handler.sh   # 共用錯誤處理（trap ERR）
     │   │   ├── docker.sh          # Docker Build 共通
     │   │   ├── git-tag.sh         # Git Tag 共通
-    │   │   └── archive-base.sh    # release / backup 搬移共通
-    │   ├── java/
-    │   │   ├── java-env.sh        # JDK 多版本自動切換
-    │   │   ├── java-build.sh      # Maven / Gradle 建置
-    │   │   ├── java-test.sh       # 測試（依 branch 決定範圍）
-    │   │   └── java-archive.sh    # JAR 版本管理
-    │   ├── node/
-    │   │   ├── node-build.sh      # Node.js 建置（nvm 版本切換）
-    │   │   ├── node-test.sh       # Node.js 測試
-    │   │   └── node-archive.sh    # ZIP 版本管理
-    │   └── python/
-    │       ├── python-build.sh    # ⏳ TODO
-    │       ├── python-test.sh     # ⏳ TODO
-    │       └── python-archive.sh  # ⏳ TODO
+    │   │   ├── archive-base.sh    # release / backup 搬移共通
+    │   │   ├── version.sh         # 跨語言版本號解析（單一版本契約）
+    │   │   └── branch-policy.sh   # branch 政策單一真相表（旗標推導）
+    │   ├── go/                    # go-env / build / test / archive / smoke-test
+    │   ├── java/                  # java-env / build / test / archive / smoke-test
+    │   ├── node/                  # build / test / archive / smoke-test
+    │   └── python/                # build / test / archive / smoke-test（⏳ 佔位）
     └── dockerfiles/
+        ├── Dockerfile-go          # Go 預設容器 image（debian bookworm-slim）
         ├── Dockerfile-java        # Java 預設容器 image
-        ├── Dockerfile-node        # ⏳ TODO
+        ├── Dockerfile-node        # Node 預設容器 image
         └── Dockerfile-python      # ⏳ TODO
 ```
 
@@ -85,35 +80,31 @@ Checkout → Load Scripts → Detect → Build → Test → Archive → Docker B
 | Load Scripts | 透過 `libraryResource()` 將 scripts 寫入 Agent `.pipeline/` |
 | Detect | 偵測語言、Build Tool、appName |
 | Build | 依語言執行建置 |
-| Test | 依 branch 決定測試範圍 |
+| Test | 依 `TEST_LEVEL` 政策旗標決定測試檔位 |
 | Archive | 產出物命名、搬移至 release / backup |
-| Docker Build | 建置 Docker image（Harbor Push / Deploy 由 `CD_ENABLED` 控制）|
+| Docker Build | 建置 Docker image（是否執行由政策旗標控制）|
 
 ---
 
-## CD 開關
+## Branch 政策（單一真相表）
 
-`cd.sh` 依 branch 決定執行哪些 CD 步驟（預設 `CD_ENABLED=false`，目前不執行）：
+所有「哪個 branch 做什麼」集中在 **`scripts/common/branch-policy.sh`**；
+Detect stage 推導旗標注入 env，`ciPipeline.groovy` 的 `when` 與各腳本只讀旗標。
+**改政策＝只改 branch-policy.sh 一處。**
 
-| Branch | Docker Build | Harbor Push | Deploy |
-|--------|-------------|-------------|--------|
-| develop | ✅ | ❌ | ❌ |
-| main | ✅ | ⏳ TODO | ❌ |
-| prod | ✅ | ⏳ TODO | ⏳ TODO |
-| 其他 | ❌ | ❌ | ❌ |
+| 旗標 | develop | main | prod | 其他 |
+|------|---------|------|------|------|
+| DO_DOCKER_BUILD | true | true | true | false |
+| DO_SCAN（Trivy）| false | true | true | false |
+| SCAN_EXIT_CODE | 0 | 0（warn）| 1（fail）| 0 |
+| DO_PUSH（Harbor）| true | true | true | false |
+| DO_DEPLOY（k3s）| true | false | true | false |
+| DEPLOY_NAMESPACE / NODE_PORT | dev / 30090 | — | prod / 30091 | — |
+| DEPLOY_INPUT_GATE（人工閘）| false | false | true | false |
+| TEST_LEVEL | unit | coverage | coverage | unit |
 
----
-
-## 測試範圍
-
-`java-test.sh` 依 branch 決定執行哪些測試：
-
-| Branch | Unit Test | Coverage | Integration | Security |
-|--------|-----------|----------|-------------|----------|
-| develop | ✅ | ❌ | ❌ | ❌ |
-| main | ✅ | ⏳ TODO | ⏳ TODO | ❌ |
-| prod | ✅ | ⏳ TODO | ⏳ TODO | ⏳ TODO |
-| 其他 | ✅ | ❌ | ❌ | ❌ |
+> Integration（TODO）附掛於 coverage 檔位；Security scan（gitleaks / OWASP）
+> 由 Phase 2（v1.7.x）以獨立政策旗標實作。
 
 ---
 
