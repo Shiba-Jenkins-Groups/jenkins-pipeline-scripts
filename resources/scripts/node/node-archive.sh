@@ -2,13 +2,12 @@
 # node/node-archive.sh — Node.js 版本管理（zip）
 # 流程：讀取 package.json 取得 appName/appVersion/nodeVersion
 #       → 打包 zip（排除 node_modules/.git/logs 等）
-#       → archive_artifact → 寫 build.env → 打 Git Tag
+#       → 上傳 Nexus → 寫 build.env → 打 Git Tag
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 source "${SCRIPT_DIR}/common/error-handler.sh"
-source "${SCRIPT_DIR}/common/archive-base.sh"
 source "${SCRIPT_DIR}/common/git-tag.sh"
 source "${SCRIPT_DIR}/common/version.sh"
 source "${SCRIPT_DIR}/common/nexus-upload.sh"
@@ -88,10 +87,7 @@ zip -r "${ARTIFACT_PATH}" . \
 
 echo "[node-archive] zip created: ${ARTIFACT_PATH}"
 
-# ── 存入 release/backup（#4a 過渡雙寫：權威副本在 Nexus，本地輪替 4b 退役）────
-archive_artifact "${APP_NAME}" "${ARTIFACT_PATH}"
-
-# ── 上傳 Nexus raw-artifacts（版本化路徑＝防覆蓋防競態）──────────────────────
+# ── 上傳 Nexus raw-artifacts（#4b 起單一真相：版本化路徑＝防覆蓋防競態）──────
 NEXUS_ARTIFACT_URL="$(nexus_upload_artifact "${APP_NAME}" "${BRANCH}" "${BASE_VERSION}" "${BUILD_NUMBER}" "${ARTIFACT_PATH}")"
 # staging 檔保留供 Docker Build 精確取用（拋棄式 agent，/tmp 隨容器回收，不需 rm）
 

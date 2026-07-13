@@ -113,7 +113,6 @@ def call(Map config = [:]) {
                                     'scripts/common/error-handler.sh',
                                     'scripts/common/docker.sh',
                                     'scripts/common/git-tag.sh',
-                                    'scripts/common/archive-base.sh',
                                     'scripts/common/version.sh',
                                     'scripts/common/branch-policy.sh',
                                     'scripts/common/nexus-upload.sh',

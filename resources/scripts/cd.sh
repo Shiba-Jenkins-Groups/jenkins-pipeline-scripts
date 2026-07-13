@@ -43,7 +43,6 @@ BUILD_NUMBER="${BUILD_NUMBER:?BUILD_NUMBER is required}"
 ARTIFACT_NAME="${ARTIFACT_NAME:-}"
 RUNTIME_VERSION="${RUNTIME_VERSION:-17}"
 LANGUAGE="${LANGUAGE:-java}"
-ARTIFACTS_ROOT="${ARTIFACTS_ROOT:-/var/jenkins_home/artifacts}"
 
 IMAGE_TAG="${APP_NAME}:${APP_VERSION}-${BUILD_NUMBER}"
 
@@ -62,10 +61,9 @@ docker_build_if_needed() {
     # 產出物需複製至 .pipeline/（Docker build context 內）
     # 才能被 Dockerfile 的 COPY ${JAR_FILE} app.jar 正確引用
     #
-    # 取檔優先序（改善計畫 #4a：精確取「本 build」產出物，殺 release/ 跨 job 競態）：
+    # 取檔優先序（#4b 起 release/ 共享單槽已退役，僅兩來源，皆無＝loud fail）：
     #   ① ARTIFACT_LOCAL     — 本 build 於 agent 內的 staging 檔（零網路，同 run 不可能被他 job 動到）
     #   ② NEXUS_ARTIFACT_URL — 權威保管庫（raw-artifacts）版本化路徑下載
-    #   ③ release/ 共享單槽  — 過渡 fallback（多 job 併行有競態，4b 階段退役）
     local jar_dest="${WORKSPACE}/.pipeline/${ARTIFACT_NAME}"
 
     if [[ -n "${ARTIFACT_LOCAL:-}" ]] && [[ -f "${ARTIFACT_LOCAL}" ]]; then
@@ -75,14 +73,8 @@ docker_build_if_needed() {
         echo "[cd] Downloading artifact from Nexus: ${NEXUS_ARTIFACT_URL}"
         nexus_download_artifact "${NEXUS_ARTIFACT_URL}" "${jar_dest}"
     else
-        local jar_source="${ARTIFACTS_ROOT}/${APP_NAME}/release/${ARTIFACT_NAME}"
-        echo "[cd] [WARN] Falling back to shared release/ slot (race-prone; deprecated by #4a): ${jar_source}"
-        # JAR 存在性前置檢查：提前報錯，避免 cp 失敗後只剩 bash 原始訊息
-        if [[ ! -f "${jar_source}" ]]; then
-            report_error "DOCKER" "001" "JAR not found: ${jar_source}. Check Archive stage output."
-            exit 1
-        fi
-        cp "${jar_source}" "${jar_dest}"
+        report_error "DOCKER" "001" "No artifact source: ARTIFACT_LOCAL and NEXUS_ARTIFACT_URL both unavailable. Check Archive stage output (build.env)."
+        exit 1
     fi
 
     local build_args="--build-arg APP_NAME=${APP_NAME} \

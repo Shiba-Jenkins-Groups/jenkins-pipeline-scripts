@@ -7,6 +7,24 @@
 
 ---
 
+## [1.15.0] - 2026-07-14
+
+### Removed
+- **本地 release/backup 輪替退役——4b 收斂階段（改善計畫 #4，單一真相在 Nexus）**
+  - 刪除 `common/archive-base.sh`（release→backup 輪替、MAX_BACKUPS 手工保留）；
+    三語言 `{lang}-archive.sh` 移除 `archive_artifact` 雙寫，只上傳 Nexus
+  - `cd.sh` 取檔鏈移除 ③ release/ 共享單槽 fallback：僅
+    `ARTIFACT_LOCAL`（同 run staging）→ `NEXUS_ARTIFACT_URL`（權威下載），
+    兩者皆無＝loud fail（DOCKER-001）；`ARTIFACTS_ROOT` 變數一併移除
+  - `ciPipeline.groovy` Load Scripts 清單移除 `archive-base.sh`
+  - 宿主機 `builds/` 目錄不再被寫入（實體目錄清除由 Shiba 另行決定）
+
+### Changed
+- Nexus retention 定案：cleanup policy `lastBlobUpdated > 90d`（D2 修訂，60d → 90d），
+  全 repo 單一政策起步；main/prod per-path 永久保留待 UI 確認 regex 支援度
+
+---
+
 ## [1.14.0] - 2026-07-14
 
 ### Added

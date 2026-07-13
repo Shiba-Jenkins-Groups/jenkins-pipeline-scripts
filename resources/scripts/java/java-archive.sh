@@ -5,7 +5,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 source "${SCRIPT_DIR}/common/error-handler.sh"
-source "${SCRIPT_DIR}/common/archive-base.sh"
 source "${SCRIPT_DIR}/common/git-tag.sh"
 source "${SCRIPT_DIR}/common/version.sh"
 source "${SCRIPT_DIR}/common/nexus-upload.sh"
@@ -97,10 +96,7 @@ fi
 ARTIFACT_PATH="/tmp/${ARTIFACT_NAME}"
 cp "${SOURCE_JAR}" "${ARTIFACT_PATH}"
 
-# ── 存入 release/backup（#4a 過渡雙寫：權威副本在 Nexus，本地輪替 4b 退役）────
-archive_artifact "${APP_NAME}" "${ARTIFACT_PATH}"
-
-# ── 上傳 Nexus raw-artifacts（版本化路徑＝防覆蓋防競態）──────────────────────
+# ── 上傳 Nexus raw-artifacts（#4b 起單一真相：版本化路徑＝防覆蓋防競態）──────
 NEXUS_ARTIFACT_URL="$(nexus_upload_artifact "${APP_NAME}" "${BRANCH}" "${BASE_VERSION}" "${BUILD_NUMBER}" "${ARTIFACT_PATH}")"
 # staging 檔保留供 Docker Build 精確取用（拋棄式 agent，/tmp 隨容器回收，不需 rm）
 
