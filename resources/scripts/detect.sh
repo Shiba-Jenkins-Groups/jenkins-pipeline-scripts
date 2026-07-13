@@ -7,7 +7,11 @@ set -euo pipefail
 WORKSPACE="${WORKSPACE:-$(pwd)}"
 cd "${WORKSPACE}"
 
-if [[ -f "pom.xml" ]]; then
+# go.mod 優先：Go 專案可能同時帶前端工具檔（package.json），有 go.mod 即視為 Go 專案
+if [[ -f "go.mod" ]]; then
+    LANGUAGE=go
+    BUILD_TOOL=go
+elif [[ -f "pom.xml" ]]; then
     LANGUAGE=java
     BUILD_TOOL=maven
 elif [[ -f "build.gradle" ]]; then
@@ -24,7 +28,7 @@ elif [[ -f "requirements.txt" ]] || [[ -f "pyproject.toml" ]]; then
     LANGUAGE=python
     BUILD_TOOL=pip
 else
-    echo "[ERROR] Cannot detect project language. No pom.xml / build.gradle / package.json / requirements.txt found." >&2
+    echo "[ERROR] Cannot detect project language. No go.mod / pom.xml / build.gradle / package.json / requirements.txt found." >&2
     exit 1
 fi
 

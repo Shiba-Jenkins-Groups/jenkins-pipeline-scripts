@@ -1,0 +1,38 @@
+# Dockerfile-go — Go binary 通用 runtime image
+# base 用 debian slim（glibc）：Go 1.26 linux/arm64 產出的 ELF 帶 glibc loader（PIE 預設），
+# 即使 CGO_ENABLED=0 也無法在 alpine（musl）執行——同 Dockerfile-java 捨 alpine 的教訓
+ARG RUNTIME_VERSION=bookworm-slim
+FROM debian:${RUNTIME_VERSION}
+
+ARG APP_NAME
+ARG APP_VERSION
+ARG BRANCH
+ARG BUILD_NUMBER
+ARG GIT_TAG_NAME
+# ARTIFACT_FILE：cd.sh 複製至 .pipeline/ 的 release binary（通用命名，JAR_FILE 為 Java 專用舊名）
+ARG ARTIFACT_FILE
+
+LABEL maintainer="shiba-dev" \
+      app.name="${APP_NAME}" \
+      app.version="${APP_VERSION}" \
+      app.branch="${BRANCH}" \
+      app.build="${BUILD_NUMBER}" \
+      app.tag="${GIT_TAG_NAME}"
+
+# curl：smoke test 健康檢查用；tzdata：TZ 生效；ca-certificates：對外 HTTPS
+RUN apt-get update && apt-get install -y --no-install-recommends curl tzdata ca-certificates \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY ${ARTIFACT_FILE} /app/app
+RUN chmod +x /app/app
+
+ENV APP_NAME=${APP_NAME} \
+    APP_VERSION=${APP_VERSION} \
+    BRANCH=${BRANCH} \
+    TZ=Asia/Taipei
+
+EXPOSE 8080
+
+ENTRYPOINT ["/app/app"]

@@ -7,6 +7,34 @@
 
 ---
 
+## [1.9.0] - 2026-07-13
+
+### Added
+- **Go 語言支援**（首個適用專案：shiba-go-ditch-api-project）
+  - `detect.sh` / `ci.sh`：`go.mod` 偵測（優先於 package.json——Go 專案可能帶前端工具檔）
+  - `scripts/go/go-env.sh`：讀取專案根目錄 `go-pipeline.env` 宣告
+    （`GO_MAIN_PKG` 多 main 專案入口、`GO_TEST_PKGS` 測試範圍、`GO_LDFLAGS`）
+  - `scripts/go/go-build.sh`：`go build ./...` 全量驗證 ＋ `CGO_ENABLED=0` 產出 artifact binary
+  - `scripts/go/go-test.sh`：branch 分級——develop/其他＝`go vet`+unit test；main/prod＝＋coverage 總覽
+    （`-race` 需 CGO+gcc，agent 未裝 C toolchain，race 檢測留在開發機）
+  - `scripts/go/go-archive.sh`：版本來源 `VERSION` 檔 > `CHANGELOG.md` `## [x.y.z]` > `git describe`；
+    命名同 Java 慣例（binary 無副檔名）；build.env / git tag 流程共用 common/
+  - `scripts/go/go-smoke-test.sh`：`smoke-test.env` 的 `SMOKE_*` 鍵設定腳本層
+    （health path / port / timeout），其他鍵以 `-e` 注入容器
+  - `dockerfiles/Dockerfile-go`：base 用 `debian:bookworm-slim`（glibc）——
+    Go 1.26 linux/arm64 ELF 帶 glibc loader（PIE 預設），即使 `CGO_ENABLED=0` 也無法跑 alpine（musl）
+  - `ciPipeline.groovy`：Load Scripts 清單加入 go 腳本組與 Dockerfile-go
+
+### Changed
+- `cd.sh`：docker build 增傳 `--build-arg ARTIFACT_FILE=...`（語言中立通用名；
+  `JAR_FILE` 保留 Java 向下相容）
+
+### Infra（jenkins-infra 同步事項）
+- Agent Dockerfile 加入 Go 1.26.5（pinned、arch 自動偵測；`GOTOOLCHAIN=auto`；
+  `GOPROXY` 走官方 proxy——Nexus 尚無 go proxy repo，建立 go-group 後改指 Nexus）
+
+---
+
 ## [1.8.2] - 2026-04-15
 
 ### Changed

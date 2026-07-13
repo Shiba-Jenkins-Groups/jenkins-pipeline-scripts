@@ -63,7 +63,9 @@ docker_build_if_needed() {
                               --build-arg BUILD_NUMBER=${BUILD_NUMBER} \
                               --build-arg BRANCH=${BRANCH} \
                               --build-arg RUNTIME_VERSION=${RUNTIME_VERSION} \
-                              --build-arg JAR_FILE=.pipeline/${ARTIFACT_NAME}"
+                              --build-arg JAR_FILE=.pipeline/${ARTIFACT_NAME} \
+                              --build-arg ARTIFACT_FILE=.pipeline/${ARTIFACT_NAME}"
+            # ARTIFACT_FILE：語言中立的通用名（Dockerfile-go 使用）；JAR_FILE 保留 Java 向下相容
             docker_build "${IMAGE_TAG}" "${LANGUAGE}" "${build_args}"
 
             # build context 用完後清理臨時 JAR

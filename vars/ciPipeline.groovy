@@ -103,6 +103,11 @@ def call(Map config = [:]) {
                                     'scripts/common/docker.sh',
                                     'scripts/common/git-tag.sh',
                                     'scripts/common/archive-base.sh',
+                                    'scripts/go/go-env.sh',
+                                    'scripts/go/go-build.sh',
+                                    'scripts/go/go-test.sh',
+                                    'scripts/go/go-archive.sh',
+                                    'scripts/go/go-smoke-test.sh',
                                     'scripts/java/java-env.sh',
                                     'scripts/java/java-build.sh',
                                     'scripts/java/java-test.sh',
@@ -124,6 +129,7 @@ def call(Map config = [:]) {
                                 }
 
                                 def dockerfiles = [
+                                    'dockerfiles/Dockerfile-go',
                                     'dockerfiles/Dockerfile-java',
                                     'dockerfiles/Dockerfile-node',
                                     'dockerfiles/Dockerfile-python',
