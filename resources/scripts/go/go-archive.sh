@@ -9,6 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 source "${SCRIPT_DIR}/common/error-handler.sh"
 source "${SCRIPT_DIR}/common/archive-base.sh"
 source "${SCRIPT_DIR}/common/git-tag.sh"
+source "${SCRIPT_DIR}/common/version.sh"
 source "${SCRIPT_DIR}/go/go-env.sh"
 
 WORKSPACE="${WORKSPACE:-$(pwd)}"
@@ -20,19 +21,9 @@ cd "${WORKSPACE}"
 # ── appName：go.mod module path 最後一段 ─────────────────────────────────────
 APP_NAME="$(basename "$(go list -m)")"
 
-# ── appVersion：VERSION > CHANGELOG.md > git describe > 0.0.0 ────────────────
-read_app_version() {
-    if [[ -f "${WORKSPACE}/VERSION" ]]; then
-        head -1 "${WORKSPACE}/VERSION" | tr -d ' v'
-    elif [[ -f "${WORKSPACE}/CHANGELOG.md" ]] \
-        && grep -m1 -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+[^]]*\]' "${WORKSPACE}/CHANGELOG.md" > /dev/null; then
-        grep -m1 -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+[^]]*\]' "${WORKSPACE}/CHANGELOG.md" \
-            | sed -E 's/^## \[([^]]+)\]/\1/'
-    else
-        git describe --tags --abbrev=0 2>/dev/null | tr -d 'v' || echo "0.0.0"
-    fi
-}
-APP_VERSION="$(read_app_version)"
+# ── appVersion：統一契約 VERSION > CHANGELOG.md > git describe > 0.0.0 ──────
+# Go 無原生 version 欄位（native 傳空），優先序由 common/version.sh 統一維護
+APP_VERSION="$(resolve_app_version go "")"
 
 # RUNTIME_VERSION：runtime base 是 debian slim（對應 Dockerfile-go ARG 預設；
 # Go 1.26 linux/arm64 ELF 帶 glibc loader，musl/alpine 不可用）

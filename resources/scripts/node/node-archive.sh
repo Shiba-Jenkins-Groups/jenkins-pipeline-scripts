@@ -10,6 +10,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 source "${SCRIPT_DIR}/common/error-handler.sh"
 source "${SCRIPT_DIR}/common/archive-base.sh"
 source "${SCRIPT_DIR}/common/git-tag.sh"
+source "${SCRIPT_DIR}/common/version.sh"
 
 WORKSPACE="${WORKSPACE:-$(pwd)}"
 BUILD_TOOL="${BUILD_TOOL:-npm}"
@@ -23,7 +24,9 @@ cd "${WORKSPACE}"
 # 使用 python3 確保在 nvm 切換前也能可靠解析
 # 分三次呼叫避免 IFS read 只讀單行的問題（`read` 每次只讀到第一個換行符）
 APP_NAME="$(python3 -c "import json; print(json.load(open('package.json')).get('name','unknown-app'))")"
-APP_VERSION="$(python3 -c "import json; print(json.load(open('package.json')).get('version','0.0.1'))")"
+# 統一版本契約：VERSION 檔（若存在）覆蓋 package.json version；否則沿用 package.json（行為不變）
+NATIVE_VERSION="$(python3 -c "import json; print(json.load(open('package.json')).get('version','0.0.1'))")"
+APP_VERSION="$(resolve_app_version node "${NATIVE_VERSION}")"
 NODE_VERSION="$(python3 -c "
 import json, re
 pkg = json.load(open('package.json'))

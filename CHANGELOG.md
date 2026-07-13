@@ -7,6 +7,26 @@
 
 ---
 
+## [1.10.0] - 2026-07-13
+
+### Added
+- **`common/version.sh`：跨語言統一的應用程式版本號解析（單一版本契約）**
+  - `resolve_app_version <language> <native_version>`：優先序
+    `VERSION 檔 > 語言原生（呼叫端傳入）> CHANGELOG.md > git describe > 0.0.0`
+  - 專案根目錄放一行版本號的 `VERSION` 檔即為所有語言的統一權威來源（opt-in，最高優先）
+  - 未放 `VERSION` 檔＝行為與舊版完全一致（Java 走 pom.xml、Node 走 package.json、Go 走 CHANGELOG/git）
+  - 收斂原本散落 `java-archive.sh` / `node-archive.sh` / `go-archive.sh` 的三套 inline 版本邏輯（DRY / OCP）
+
+### Changed
+- `java-archive.sh` / `node-archive.sh` / `go-archive.sh`：APP_VERSION 改由 `resolve_app_version` 統一解析
+  - `go-archive.sh` 移除 inline `read_app_version()`（優先序不變，改由 `common/version.sh` 維護）
+- `ciPipeline.groovy`：Load Scripts 清單加入 `scripts/common/version.sh`
+- **版本策略文件收斂為 `@main` 單一真相**：README / CLAUDE.md 移除過期版本表與 `@v1.2.x` 引用範例
+  - 變更歷史的單一真相＝本 CHANGELOG；git tag `vX.Y.Z` 僅供歷史審計
+  - `config/system/jenkins.yaml` `defaultVersion` 由 `v1.2.1` 更新為 `main`（fallback 對齊實際策略）
+
+---
+
 ## [1.9.0] - 2026-07-13
 
 ### Added

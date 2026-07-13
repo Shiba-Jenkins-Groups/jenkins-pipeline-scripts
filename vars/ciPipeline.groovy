@@ -103,6 +103,7 @@ def call(Map config = [:]) {
                                     'scripts/common/docker.sh',
                                     'scripts/common/git-tag.sh',
                                     'scripts/common/archive-base.sh',
+                                    'scripts/common/version.sh',
                                     'scripts/go/go-env.sh',
                                     'scripts/go/go-build.sh',
                                     'scripts/go/go-test.sh',

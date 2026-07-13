@@ -7,6 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 source "${SCRIPT_DIR}/common/error-handler.sh"
 source "${SCRIPT_DIR}/common/archive-base.sh"
 source "${SCRIPT_DIR}/common/git-tag.sh"
+source "${SCRIPT_DIR}/common/version.sh"
 
 WORKSPACE="${WORKSPACE:-$(pwd)}"
 BUILD_TOOL="${BUILD_TOOL:-maven}"
@@ -36,6 +37,10 @@ case "${BUILD_TOOL}" in
     maven)  read_maven_info ;;
     gradle) read_gradle_info ;;
 esac
+
+# 統一版本契約：VERSION 檔（若存在）覆蓋 pom.xml；否則沿用 pom.xml 版本（行為不變）
+# APP_NAME / RUNTIME_VERSION 仍由 pom.xml 決定（version.sh 只負責 APP_VERSION）
+APP_VERSION="$(resolve_app_version java "${APP_VERSION}")"
 
 export APP_NAME APP_VERSION RUNTIME_VERSION
 

@@ -11,12 +11,15 @@ Jenkins Shared Library，統一管理所有專案的 CI/CD 流程。
 在專案根目錄的 `Jenkinsfile` 加入以下內容即可：
 
 ```groovy
-@Library('jenkins-pipeline@v1.2.3') _
+@Library('jenkins-pipeline@main') _
 
 ciPipeline(
-    githubCredentials: 'github-credentials'
+    githubCredentials: 'github-credentials',
+    harborCredentials: 'harbor-robot-<project>'
 )
 ```
+
+> 版本策略：`@main` 單一真相，各專案永遠追蹤最新 main（升級＝commit 到 main，無需改 Jenkinsfile）。
 
 ---
 
@@ -157,28 +160,18 @@ Checkout → Load Scripts → Detect → Build → Test → Archive → Docker B
 
 ## 版本管理
 
-本 Library 以 **git tag** 作為版本號，不使用 branch 區隔：
+**策略：`@main` 單一真相**（1-developer 環境）。各專案永遠引用 `@main`，升級＝commit 到 main。
 
 ```bash
-# 發布新版本
-git tag v1.2.3 -m "v1.2.3 - 說明"
-git push origin v1.2.3
+# 1. 更新 CHANGELOG.md（變更歷史的單一真相）
+# 2. commit 到 main → 所有專案下次 build 自動取得最新版
+# 3. （選用）打 audit tag，僅供歷史查閱，不用於引用
+git tag vX.Y.Z -m "vX.Y.Z - 說明" && git push origin main --tags
 ```
 
-各專案在 Jenkinsfile 指定版本：
-
-```groovy
-@Library('jenkins-pipeline@v1.2.3') _
-```
-
-| 版本 | 說明 |
-|------|------|
-| v1.0.0 | 初始版本（Java CI 全流程）|
-| v1.1.0 | 新增 java-env.sh（JDK 多版本自動切換）|
-| v1.2.0 | Node.js CI scripts 實作（build / test / archive）|
-| v1.2.1 | fix node-archive.sh parsing and zip exclude |
-| v1.2.2 | fix Dockerfile-java base image（alpine → jammy，修復 ARM64 build 失敗）|
-| v1.2.3 | fix java-env.sh 未在 ciPipeline stage 架構中正確載入 |
+- 各專案 Jenkinsfile 引用 `@Library('jenkins-pipeline@main') _`，**無需**手動更新版本號。
+- 變更歷史見 [`CHANGELOG.md`](./CHANGELOG.md)（本 README 不再重列版本表，避免多處漂移）。
+- 應用程式（各專案）版本號由 `common/version.sh` 統一解析（`VERSION` 檔 > 語言原生 > CHANGELOG > git）。
 
 ---
 
