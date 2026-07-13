@@ -7,6 +7,25 @@
 
 ---
 
+## [1.12.0] - 2026-07-13
+
+### Changed
+- **語言擴充點收斂（OCP）**（改善計畫 #1）——新增語言由「改 5 處」降為
+  「LANGUAGES 清單加一個字串＋依慣例放好檔案」
+  - `ci.sh`：刪除 `detect_language()` / `detect_build_tool()` 重複實作
+    （與 detect.sh 兩份邏輯遲早 drift），改委派 `detect.sh` 單一真相；
+    語言分派 case 改為慣例迴圈 `{lang}/{lang}-{build,test,archive}.sh`
+  - `ciPipeline.groovy` Load Scripts：26 行硬列清單改慣例載入——
+    `LANGUAGES` × `{build,test,archive,smoke-test}.sh` ＋ `Dockerfile-{lang}`；
+    語言特例檔（`go-env.sh` / `java-env.sh`）收斂至 `LANG_EXTRAS` map
+  - 缺檔策略採 **fail**（`libraryResource` 直接拋錯）：缺檔＝結構錯誤，不靜默跳過
+
+### 驗證
+- 本地：慣例清單 ↔ 檔案樹雙向 1:1 比對（無缺檔、無漏載）、ci.sh 委派／順序／
+  go.mod 優先權／偵測失敗非零退出（7 tests）；groovy 2.4.21 編譯通過
+
+---
+
 ## [1.11.0] - 2026-07-13
 
 ### Added

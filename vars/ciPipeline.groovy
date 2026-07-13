@@ -89,50 +89,40 @@ def call(Map config = [:]) {
                             script {
                                 // Shared Library scripts 在 Controller，Agent 無法直接存取
                                 // 用 libraryResource() 讀取後寫入 Agent workspace 的 .pipeline/
-                                def scripts = [
+                                //
+                                // 慣例載入（OCP）：新增語言＝LANGUAGES 加一個字串＋依慣例放好檔案
+                                //   scripts/{lang}/{lang}-{build,test,archive,smoke-test}.sh
+                                //   dockerfiles/Dockerfile-{lang}
+                                // 慣例之外的語言特例檔以 LANG_EXTRAS 收斂
+                                // 缺檔＝結構錯誤：libraryResource() 直接 fail，不靜默跳過
+                                def LANGUAGES   = ['go', 'java', 'node', 'python']
+                                def LANG_STEPS  = ['build', 'test', 'archive', 'smoke-test']
+                                def LANG_EXTRAS = [go: ['go-env.sh'], java: ['java-env.sh']]
+
+                                def resources = [
                                     'scripts/detect.sh',
                                     'scripts/ci.sh',
                                     'scripts/cd.sh',
+                                    'scripts/smoke-test.sh',
                                     'scripts/common/error-handler.sh',
                                     'scripts/common/docker.sh',
                                     'scripts/common/git-tag.sh',
                                     'scripts/common/archive-base.sh',
                                     'scripts/common/version.sh',
                                     'scripts/common/branch-policy.sh',
-                                    'scripts/go/go-env.sh',
-                                    'scripts/go/go-build.sh',
-                                    'scripts/go/go-test.sh',
-                                    'scripts/go/go-archive.sh',
-                                    'scripts/go/go-smoke-test.sh',
-                                    'scripts/java/java-env.sh',
-                                    'scripts/java/java-build.sh',
-                                    'scripts/java/java-test.sh',
-                                    'scripts/java/java-archive.sh',
-                                    'scripts/node/node-build.sh',
-                                    'scripts/node/node-test.sh',
-                                    'scripts/node/node-archive.sh',
-                                    'scripts/node/node-smoke-test.sh',
-                                    'scripts/python/python-build.sh',
-                                    'scripts/python/python-test.sh',
-                                    'scripts/python/python-archive.sh',
-                                    'scripts/python/python-smoke-test.sh',
-                                    'scripts/smoke-test.sh',
-                                    'scripts/java/java-smoke-test.sh',
                                 ]
-                                scripts.each { path ->
-                                    def content = libraryResource(path)
-                                    writeFile file: ".pipeline/${path}", text: content
+                                for (lang in LANGUAGES) {
+                                    for (step in LANG_STEPS) {
+                                        resources << "scripts/${lang}/${lang}-${step}.sh".toString()
+                                    }
+                                    for (extra in (LANG_EXTRAS[lang] ?: [])) {
+                                        resources << "scripts/${lang}/${extra}".toString()
+                                    }
+                                    resources << "dockerfiles/Dockerfile-${lang}".toString()
                                 }
 
-                                def dockerfiles = [
-                                    'dockerfiles/Dockerfile-go',
-                                    'dockerfiles/Dockerfile-java',
-                                    'dockerfiles/Dockerfile-node',
-                                    'dockerfiles/Dockerfile-python',
-                                ]
-                                dockerfiles.each { path ->
-                                    def content = libraryResource(path)
-                                    writeFile file: ".pipeline/${path}", text: content
+                                for (path in resources) {
+                                    writeFile file: ".pipeline/${path}", text: libraryResource(path)
                                 }
 
                                 sh 'find .pipeline/scripts -name "*.sh" -exec chmod +x {} +'
