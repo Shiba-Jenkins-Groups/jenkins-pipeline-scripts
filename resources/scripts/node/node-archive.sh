@@ -11,6 +11,7 @@ source "${SCRIPT_DIR}/common/error-handler.sh"
 source "${SCRIPT_DIR}/common/archive-base.sh"
 source "${SCRIPT_DIR}/common/git-tag.sh"
 source "${SCRIPT_DIR}/common/version.sh"
+source "${SCRIPT_DIR}/common/nexus-upload.sh"
 
 WORKSPACE="${WORKSPACE:-$(pwd)}"
 BUILD_TOOL="${BUILD_TOOL:-npm}"
@@ -87,9 +88,12 @@ zip -r "${ARTIFACT_PATH}" . \
 
 echo "[node-archive] zip created: ${ARTIFACT_PATH}"
 
-# ── 存入 release/backup ───────────────────────────────────────────────────────
+# ── 存入 release/backup（#4a 過渡雙寫：權威副本在 Nexus，本地輪替 4b 退役）────
 archive_artifact "${APP_NAME}" "${ARTIFACT_PATH}"
-rm -f "${ARTIFACT_PATH}"
+
+# ── 上傳 Nexus raw-artifacts（版本化路徑＝防覆蓋防競態）──────────────────────
+NEXUS_ARTIFACT_URL="$(nexus_upload_artifact "${APP_NAME}" "${BRANCH}" "${BASE_VERSION}" "${BUILD_NUMBER}" "${ARTIFACT_PATH}")"
+# staging 檔保留供 Docker Build 精確取用（拋棄式 agent，/tmp 隨容器回收，不需 rm）
 
 # ── 寫入 build.env（供後續 Docker Build stage 讀取）─────────────────────────
 mkdir -p "${WORKSPACE}/.pipeline"
@@ -101,6 +105,8 @@ NODE_VERSION=${NODE_VERSION}
 BRANCH=${BRANCH}
 BUILD_NUMBER=${BUILD_NUMBER}
 ARTIFACT_NAME=${ARTIFACT_NAME}
+ARTIFACT_LOCAL=${ARTIFACT_PATH}
+NEXUS_ARTIFACT_URL=${NEXUS_ARTIFACT_URL}
 EOF
 echo "[node-archive] build.env written."
 

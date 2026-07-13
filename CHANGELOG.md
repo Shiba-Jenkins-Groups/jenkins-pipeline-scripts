@@ -7,6 +7,35 @@
 
 ---
 
+## [1.14.0] - 2026-07-14
+
+### Added
+- **Artifact 歸家 Nexus——4a 雙寫階段（改善計畫 #4）**
+  - 新增 `common/nexus-upload.sh`：raw hosted repo（`raw-artifacts`）上傳/下載；
+    路徑契約 `{app}/{branch}/{version}-{build}-{sha7}/{filename}`（sha7 抗 #6
+    Multibranch buildNumber 歸零撞路徑）；憑證一律經 netrc 暫存檔（0600＋用畢即刪），
+    不進 argv/URL（不重蹈 git-tag.sh 憑證拼 URL，見 #8）
+  - 三語言 `{lang}-archive.sh`：本地 release/backup 輪替照舊＋上傳 Nexus（雙寫）；
+    staging 檔不再 rm（拋棄式 agent 隨容器回收），`build.env` 新增
+    `ARTIFACT_LOCAL`／`NEXUS_ARTIFACT_URL` 兩欄
+  - `ciPipeline.groovy`：新增選用參數 `nexusCredentials`（預設 `nexus-ci-deploy`，
+    全專案共用部署帳號，各專案 Jenkinsfile 零改動）；environment 注入
+    `NEXUS_CRED_USR/PSW`；Load Scripts 清單納入 `nexus-upload.sh`
+
+### Changed
+- **`cd.sh` Docker Build 取檔改精確取「本 build」產出物**（競態根治）：
+  優先序 `ARTIFACT_LOCAL`（agent 內 staging）→ `NEXUS_ARTIFACT_URL`（權威庫下載）→
+  `release/` 共享單槽（過渡 fallback，帶 WARN；4b 退役）——
+  同 app 多 job 併行不再互相擊落（develop #61 vs main #5 實證之根治）
+
+### 前置需求（Shiba 手動閘，commit 前完成）
+- Nexus：raw hosted repo `raw-artifacts`（Disable redeploy）＋部署帳號 privileges
+  **browse/read/add/edit**（無 delete；edit 為 HTTP PUT 上傳必需——add 只覆蓋 POST，
+  防覆蓋由 Disable redeploy 政策把關）✅ 已完成並實證（PUT=201／重傳=400）
+- Jenkins：usernamePassword credential `nexus-ci-deploy` ⏳
+
+---
+
 ## [1.13.0] - 2026-07-13
 
 ### Added

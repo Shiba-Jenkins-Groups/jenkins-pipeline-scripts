@@ -2,6 +2,9 @@ def call(Map config = [:]) {
     def githubCredentials = config.githubCredentials ?: error('githubCredentials is required')
     // harborCredentials：Harbor Robot Account Credential ID（Jenkins Credentials 中定義）
     def harborCredentials = config.harborCredentials ?: error('harborCredentials is required')
+    // nexusCredentials：Nexus 部署帳號 Credential ID（改善計畫 #4a artifact 上傳）
+    // 與 harbor 的 per-project robot 不同：全專案共用單一部署帳號，故給預設值免改各專案 Jenkinsfile
+    def nexusCredentials = config.nexusCredentials ?: 'nexus-ci-deploy'
 
     // ── 1. Profile 預設矩陣 ──────────────────────────────────────────────────
     // 組織策略層：預定義 pipeline 規模，統一由 Shared Library 維護
@@ -66,6 +69,9 @@ def call(Map config = [:]) {
 
         environment {
             GITHUB_CREDENTIALS = credentials("${githubCredentials}")
+            // usernamePassword 型 credential 自動展開 NEXUS_CRED_USR / NEXUS_CRED_PSW，
+            // 供 nexus-upload.sh（Archive 上傳／cd.sh 下載）使用
+            NEXUS_CRED = credentials("${nexusCredentials}")
         }
 
         stages {
@@ -110,6 +116,7 @@ def call(Map config = [:]) {
                                     'scripts/common/archive-base.sh',
                                     'scripts/common/version.sh',
                                     'scripts/common/branch-policy.sh',
+                                    'scripts/common/nexus-upload.sh',
                                 ]
                                 for (lang in LANGUAGES) {
                                     for (step in LANG_STEPS) {
