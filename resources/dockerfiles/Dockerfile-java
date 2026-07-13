@@ -1,6 +1,9 @@
+# REGISTRY_PREFIX：base image 來源前綴（預設空＝Docker Hub 直抓）
+# 本地環境由 cd.sh 傳入 Harbor proxy-cache，例：localhost:9290/dockerhub-proxy/library/
+ARG REGISTRY_PREFIX=""
 ARG RUNTIME_VERSION=17
 # jammy（Ubuntu 22.04）支援 amd64 + arm64，alpine 不含 arm64 manifest（M1 不相容）
-FROM eclipse-temurin:${RUNTIME_VERSION}-jre-jammy
+FROM ${REGISTRY_PREFIX}eclipse-temurin:${RUNTIME_VERSION}-jre-jammy
 
 ARG APP_NAME
 ARG APP_VERSION

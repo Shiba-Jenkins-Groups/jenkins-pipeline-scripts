@@ -7,6 +7,27 @@
 
 ---
 
+## [1.13.0] - 2026-07-13
+
+### Added
+- **base image 經 registry 快取（改善計畫 #9，build-arg 注入式）**
+  - `Dockerfile-go` / `Dockerfile-java`：新增 `ARG REGISTRY_PREFIX=""`，
+    `FROM ${REGISTRY_PREFIX}<image>`——**預設空＝Docker Hub 直抓，行為不變**；
+    本地環境由 agent env 提供 Harbor proxy-cache 前綴（如 `localhost:9290/dockerhub-proxy/library/`）
+  - `cd.sh`：docker build 增傳 `--build-arg REGISTRY_PREFIX=${REGISTRY_PREFIX:-}`
+  - node / python Dockerfile 為 TODO 佔位，未納入（實作時比照）
+
+### Fixed
+- `docker.sh` `tag_base_image()`：`shiba/base/` 別名改以「邏輯名」（去除來源前綴）組成——
+  原邏輯以 `cut -d:` 切 tag，registry 帶 port（`localhost:9290/...`）時會把 port 冒號
+  誤判為 tag 分隔；別名維持 `shiba/base/{image}:{tag}` 不隨來源改變，tag 來源用實際名
+
+### 啟用條件（agent env `REGISTRY_PREFIX` 尚未設定，現階段 no-op）
+- 待 Harbor `dockerhub-proxy` proxy-cache project 驗證可用後，
+  於 agent Dockerfile 加 `ENV REGISTRY_PREFIX=...` 並 rebuild（jenkins-infra 側）
+
+---
+
 ## [1.12.0] - 2026-07-13
 
 ### Changed

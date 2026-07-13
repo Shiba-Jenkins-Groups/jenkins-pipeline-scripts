@@ -1,8 +1,11 @@
 # Dockerfile-go — Go binary 通用 runtime image
 # base 用 debian slim（glibc）：Go 1.26 linux/arm64 產出的 ELF 帶 glibc loader（PIE 預設），
 # 即使 CGO_ENABLED=0 也無法在 alpine（musl）執行——同 Dockerfile-java 捨 alpine 的教訓
+# REGISTRY_PREFIX：base image 來源前綴（預設空＝Docker Hub 直抓）
+# 本地環境由 cd.sh 傳入 Harbor proxy-cache，例：localhost:9290/dockerhub-proxy/library/
+ARG REGISTRY_PREFIX=""
 ARG RUNTIME_VERSION=bookworm-slim
-FROM debian:${RUNTIME_VERSION}
+FROM ${REGISTRY_PREFIX}debian:${RUNTIME_VERSION}
 
 ARG APP_NAME
 ARG APP_VERSION

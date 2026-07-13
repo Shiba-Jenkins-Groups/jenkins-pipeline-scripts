@@ -63,13 +63,25 @@ tag_base_image() {
         runtime_version="$(echo "${build_args}" | grep -oE 'RUNTIME_VERSION=[^ ]+' | cut -d= -f2)"
     fi
 
-    # 將 Dockerfile 變數替換為實際版本號
-    local base_image="${from_template//\$\{RUNTIME_VERSION\}/${runtime_version}}"
+    # REGISTRY_PREFIX：build_args 傳入值優先，否則取環境變數（空＝Docker Hub 直抓）
+    local registry_prefix="${REGISTRY_PREFIX:-}"
+    if echo "${build_args}" | grep -q "REGISTRY_PREFIX="; then
+        registry_prefix="$(echo "${build_args}" | grep -oE 'REGISTRY_PREFIX=[^ ]*' | cut -d= -f2-)"
+    fi
+
+    # 實際 image（可能含 registry 前綴，docker tag 的來源）
+    local base_image="${from_template//\$\{REGISTRY_PREFIX\}/${registry_prefix}}"
+    base_image="${base_image//\$\{RUNTIME_VERSION\}/${runtime_version}}"
+
+    # 邏輯名（不含來源前綴）：別名以邏輯名組成，避免 registry 帶 port 時
+    # cut -d: 誤切（localhost:9290/... 的 port 冒號會被當成 tag 分隔）
+    local base_image_logical="${from_template//\$\{REGISTRY_PREFIX\}/}"
+    base_image_logical="${base_image_logical//\$\{RUNTIME_VERSION\}/${runtime_version}}"
 
     # 拆解 image name 與 tag，建立 shiba/base/ 別名
     local image_name image_tag alias_tag
-    image_name="$(echo "${base_image}" | cut -d: -f1 | awk -F/ '{print $NF}')"
-    image_tag="$(echo "${base_image}" | cut -d: -f2-)"
+    image_name="$(echo "${base_image_logical}" | cut -d: -f1 | awk -F/ '{print $NF}')"
+    image_tag="$(echo "${base_image_logical}" | cut -d: -f2-)"
     alias_tag="shiba/base/${image_name}:${image_tag}"
 
     echo "[docker] Tagging base: ${base_image} → ${alias_tag}"
