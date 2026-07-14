@@ -35,10 +35,11 @@ fi
 
 echo "[dep-check] OWASP dependency-check ${DC_VERSION}（failBuildOnCVSS=${CVSS}；NVD DB 快取於 m2）..."
 
-# nvdApiKey 由 env 帶入（Jenkins 已於 console mask 該值）；report HTML+JSON 落 target/
-#   → ciPipeline 已 publishHTML target/dependency-check-report.html
+# NVD API key：user property 是 nvd.api.key（非 nvdApiKey——後者是 pom 設定元素名，命令列會被靜默忽略
+#   → 退回 keyless 慢速同步）。key 由 Jenkins credential 綁定注入 NVD_API_KEY（console 自動 mask）。
+# report HTML+JSON 落 target/ → ciPipeline 已 publishHTML target/dependency-check-report.html
 ./mvnw -B org.owasp:dependency-check-maven:"${DC_VERSION}":check \
-    -DnvdApiKey="${NVD_API_KEY:-}" \
+    -Dnvd.api.key="${NVD_API_KEY:-}" \
     -DfailBuildOnCVSS="${CVSS}" \
     -Dformats=HTML,JSON
 
