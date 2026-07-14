@@ -7,6 +7,19 @@
 
 ---
 
+## [1.17.0] - 2026-07-14
+
+### Added
+- **秘密掃描 gitleaks（Security Phase 2 v1.7.0）**
+  - 新增 CI 階段「Secret Scan」（置 Build 前 fail fast）：`common/secret-scan.sh` 用 `gitleaks git` 掃 git 歷史
+  - `branch-policy.sh` 新增旗標 `DO_SECRET_SCAN` / `SECRET_SCAN_EXIT_CODE`（全 branch true/1——秘密洩漏處處 critical，feature 也擋；獨立於 Trivy 的 DO_SCAN）
+  - `--redact`：報告與 log 遮罩秘密實際值（找到秘密的報告不二次曝露）；產出 `gitleaks-report.json`（ciPipeline 已 archive）
+  - 專案可放 `.gitleaks.toml`（自訂規則）／`.gitleaksignore`（豁免已知誤判），gitleaks 自動採用
+  - 前置：agent `gitleaks` 8.30.1 加 SHA256 checksum 驗證（jenkins-infra；供應鏈硬化）
+  - 本地實測（agent image）：含秘密 repo→exit 1（private-key/github-pat）、報告 redact 無明文、clean repo→exit 0
+
+---
+
 ## [1.16.0] - 2026-07-14
 
 ### Changed

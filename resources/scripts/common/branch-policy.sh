@@ -33,18 +33,21 @@ derive_branch_policy() {
 
     case "${branch}" in
         develop)
+            DO_SECRET_SCAN=true; SECRET_SCAN_EXIT_CODE=1
             DO_DOCKER_BUILD=true;  DO_SCAN=false; SCAN_EXIT_CODE=0
             DO_PUSH=true;  DO_DEPLOY=true;  DEPLOY_NAMESPACE=dev;  NODE_PORT=30090
             DEPLOY_INPUT_GATE=false
             TEST_LEVEL=unit
             ;;
         main)
+            DO_SECRET_SCAN=true; SECRET_SCAN_EXIT_CODE=1
             DO_DOCKER_BUILD=true;  DO_SCAN=true;  SCAN_EXIT_CODE=0
             DO_PUSH=true;  DO_DEPLOY=false; DEPLOY_NAMESPACE="";   NODE_PORT=""
             DEPLOY_INPUT_GATE=false
             TEST_LEVEL=coverage
             ;;
         prod)
+            DO_SECRET_SCAN=true; SECRET_SCAN_EXIT_CODE=1
             DO_DOCKER_BUILD=true;  DO_SCAN=true;  SCAN_EXIT_CODE=1
             DO_PUSH=true;  DO_DEPLOY=true;  DEPLOY_NAMESPACE=prod; NODE_PORT=30091
             DEPLOY_INPUT_GATE=true
@@ -52,6 +55,8 @@ derive_branch_policy() {
             ;;
         *)
             # feature / PR branch：只做 CI（build + unit test + archive），不進任何交付步驟
+            # 但秘密掃描仍全 branch 執行（秘密洩漏處處 critical，feature 也擋）
+            DO_SECRET_SCAN=true; SECRET_SCAN_EXIT_CODE=1
             DO_DOCKER_BUILD=false; DO_SCAN=false; SCAN_EXIT_CODE=0
             DO_PUSH=false; DO_DEPLOY=false; DEPLOY_NAMESPACE="";   NODE_PORT=""
             DEPLOY_INPUT_GATE=false
@@ -59,12 +64,15 @@ derive_branch_policy() {
             ;;
     esac
 
+    export DO_SECRET_SCAN SECRET_SCAN_EXIT_CODE
     export DO_DOCKER_BUILD DO_SCAN SCAN_EXIT_CODE DO_PUSH DO_DEPLOY
     export DEPLOY_NAMESPACE NODE_PORT DEPLOY_INPUT_GATE TEST_LEVEL
 }
 
 print_branch_policy() {
     # 只印 KEY=VALUE（stdout 契約，供 groovy 解析）；診斷訊息一律走 stderr
+    echo "DO_SECRET_SCAN=${DO_SECRET_SCAN}"
+    echo "SECRET_SCAN_EXIT_CODE=${SECRET_SCAN_EXIT_CODE}"
     echo "DO_DOCKER_BUILD=${DO_DOCKER_BUILD}"
     echo "DO_SCAN=${DO_SCAN}"
     echo "SCAN_EXIT_CODE=${SCAN_EXIT_CODE}"

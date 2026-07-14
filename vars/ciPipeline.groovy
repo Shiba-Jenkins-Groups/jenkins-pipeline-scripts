@@ -116,6 +116,7 @@ def call(Map config = [:]) {
                                     'scripts/common/version.sh',
                                     'scripts/common/branch-policy.sh',
                                     'scripts/common/nexus-upload.sh',
+                                    'scripts/common/secret-scan.sh',
                                 ]
                                 for (lang in LANGUAGES) {
                                     for (step in LANG_STEPS) {
@@ -152,7 +153,7 @@ def call(Map config = [:]) {
                                     }
                                 }
                                 echo "[detect] Language: ${env.LANGUAGE}, BuildTool: ${env.BUILD_TOOL}"
-                                echo "[detect] Policy: DO_DOCKER_BUILD=${env.DO_DOCKER_BUILD}, DO_SCAN=${env.DO_SCAN}(exit=${env.SCAN_EXIT_CODE}), " +
+                                echo "[detect] Policy: DO_SECRET_SCAN=${env.DO_SECRET_SCAN}(exit=${env.SECRET_SCAN_EXIT_CODE}), DO_DOCKER_BUILD=${env.DO_DOCKER_BUILD}, DO_SCAN=${env.DO_SCAN}(exit=${env.SCAN_EXIT_CODE}), " +
                                      "DO_PUSH=${env.DO_PUSH}, DO_DEPLOY=${env.DO_DEPLOY}(ns=${env.DEPLOY_NAMESPACE}), TEST_LEVEL=${env.TEST_LEVEL}"
                             }
                         }
@@ -165,6 +166,15 @@ def call(Map config = [:]) {
             // 程式碼整合與驗證：編譯 → 測試 → 打包成 artifact
             stage('Continuous Integration（持續整合）') {
                 stages {
+
+                    stage('Secret Scan') {
+                        // gitleaks 秘密掃描（Security Phase 2）；DO_SECRET_SCAN 由 branch-policy 決定（全 branch）
+                        // 置於 Build 前 fail fast：發現秘密即擋，不浪費後續 build/test
+                        when { expression { env.DO_SECRET_SCAN == 'true' } }
+                        steps {
+                            sh "bash .pipeline/scripts/common/secret-scan.sh"
+                        }
+                    }
 
                     stage('Build') {
                         // ciStages.build = false 時跳過
