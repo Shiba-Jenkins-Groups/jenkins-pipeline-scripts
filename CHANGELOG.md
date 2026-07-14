@@ -7,6 +7,19 @@
 
 ---
 
+## [1.18.0] - 2026-07-14
+
+### Added
+- **OWASP Dependency-Check 第三方依賴 CVE 掃描（Security Phase 2 v1.7.1）**
+  - 新增 CI 階段「Dependency Scan」（Test 後、Archive 前）：`common/dependency-check.sh` 用 `dependency-check-maven` 12.2.2
+  - `branch-policy.sh` 新增 `DO_DEP_SCAN` / `DEP_SCAN_CVSS`：main **warn**（`failBuildOnCVSS=11` 只報告）／prod **fail**（CVSS≥7）；develop/feature 不掃
+  - 僅 Java/Maven（腳本內 guard）；Node/Go 跳過（依賴 CVE 掃描屬另一分析器，暫不做）
+  - NVD API key 由 Jenkins credential `nvd-api-key` 綁定注入（`-DnvdApiKey`；console 自動 mask）
+  - NVD DB 自動持久化於 Maven localRepository（`jenkins-agent-cache` volume，沿用 #5，免建新 volume）；首次同步較慢
+  - 報告 `target/dependency-check-report.html`（ciPipeline 已 publishHTML）
+
+---
+
 ## [1.17.0] - 2026-07-14
 
 ### Added

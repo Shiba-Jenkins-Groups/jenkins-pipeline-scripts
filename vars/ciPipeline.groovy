@@ -117,6 +117,7 @@ def call(Map config = [:]) {
                                     'scripts/common/branch-policy.sh',
                                     'scripts/common/nexus-upload.sh',
                                     'scripts/common/secret-scan.sh',
+                                    'scripts/common/dependency-check.sh',
                                 ]
                                 for (lang in LANGUAGES) {
                                     for (step in LANG_STEPS) {
@@ -153,7 +154,7 @@ def call(Map config = [:]) {
                                     }
                                 }
                                 echo "[detect] Language: ${env.LANGUAGE}, BuildTool: ${env.BUILD_TOOL}"
-                                echo "[detect] Policy: DO_SECRET_SCAN=${env.DO_SECRET_SCAN}(exit=${env.SECRET_SCAN_EXIT_CODE}), DO_DOCKER_BUILD=${env.DO_DOCKER_BUILD}, DO_SCAN=${env.DO_SCAN}(exit=${env.SCAN_EXIT_CODE}), " +
+                                echo "[detect] Policy: DO_SECRET_SCAN=${env.DO_SECRET_SCAN}(exit=${env.SECRET_SCAN_EXIT_CODE}), DO_DEP_SCAN=${env.DO_DEP_SCAN}(cvss=${env.DEP_SCAN_CVSS}), DO_DOCKER_BUILD=${env.DO_DOCKER_BUILD}, DO_SCAN=${env.DO_SCAN}(exit=${env.SCAN_EXIT_CODE}), " +
                                      "DO_PUSH=${env.DO_PUSH}, DO_DEPLOY=${env.DO_DEPLOY}(ns=${env.DEPLOY_NAMESPACE}), TEST_LEVEL=${env.TEST_LEVEL}"
                             }
                         }
@@ -195,6 +196,19 @@ def call(Map config = [:]) {
                                 // 語言中立報告契約（#2）：各語言 test 腳本統一產 JUnit 至 reports/junit/
                                 junit allowEmptyResults: true,
                                       testResults: 'reports/junit/*.xml'
+                            }
+                        }
+                    }
+
+                    stage('Dependency Scan') {
+                        // OWASP Dependency-Check（第三方依賴 CVE，Security Phase 2）
+                        // DO_DEP_SCAN 由 branch-policy 決定（main warn / prod fail）；語言 guard 在腳本內（僅 java/maven）
+                        // 置 Archive 前：prod 依賴含高危 CVE 時擋在打 tag／發佈 artifact 之前
+                        when { expression { env.DO_DEP_SCAN == 'true' } }
+                        steps {
+                            // NVD API key 由 credential 綁定注入 env（console 自動 mask）
+                            withCredentials([string(credentialsId: 'nvd-api-key', variable: 'NVD_API_KEY')]) {
+                                sh "bash .pipeline/scripts/common/dependency-check.sh"
                             }
                         }
                     }
