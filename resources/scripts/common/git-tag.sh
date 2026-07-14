@@ -39,16 +39,33 @@ resolve_git_tag() {
 
 push_git_tag() {
     local tag="${1}"
-    local credentials_usr="${GITHUB_CREDENTIALS_USR}"
-    local credentials_psw="${GITHUB_CREDENTIALS_PSW}"
     local remote_url
     remote_url="$(git remote get-url origin)"
 
-    # 注入 credentials 到 remote URL
-    local auth_url
-    auth_url="$(echo "${remote_url}" | sed "s|https://|https://${credentials_usr}:${credentials_psw}@|")"
-
     git tag "${tag}"
-    git push "${auth_url}" "${tag}"
+
+    # 憑證以 GIT_ASKPASS 提供（走 env，不塞進 URL）——避免 token 洩漏於
+    # `ps` 的 command args（世界可讀，Jenkins console mask 不涵蓋）與 git push 失敗訊息。
+    local askpass
+    askpass="$(mktemp)"
+    # 函數返回時清掉臨時 askpass（含失敗路徑）
+    # shellcheck disable=SC2064
+    trap "rm -f '${askpass}'" RETURN
+    cat > "${askpass}" <<'ASKPASS_EOF'
+#!/usr/bin/env bash
+# git 依 prompt 詢問 Username/Password；各自回對應 env（值不出現在 args）
+case "${1}" in
+    Username*) printf '%s' "${GIT_ASKPASS_USER}" ;;
+    Password*) printf '%s' "${GIT_ASKPASS_PASS}" ;;
+esac
+ASKPASS_EOF
+    chmod +x "${askpass}"
+
+    GIT_ASKPASS="${askpass}" \
+    GIT_ASKPASS_USER="${GITHUB_CREDENTIALS_USR}" \
+    GIT_ASKPASS_PASS="${GITHUB_CREDENTIALS_PSW}" \
+    GIT_TERMINAL_PROMPT=0 \
+        git push "${remote_url}" "${tag}"
+
     echo "[git-tag] Pushed tag: ${tag}"
 }

@@ -182,8 +182,9 @@ def call(Map config = [:]) {
                         }
                         post {
                             always {
+                                // 語言中立報告契約（#2）：各語言 test 腳本統一產 JUnit 至 reports/junit/
                                 junit allowEmptyResults: true,
-                                      testResults: '**/target/surefire-reports/*.xml'
+                                      testResults: 'reports/junit/*.xml'
                             }
                         }
                     }
@@ -321,14 +322,15 @@ def call(Map config = [:]) {
                 archiveArtifacts artifacts: 'gitleaks-report.json',
                                  allowEmptyArchive: true
 
-                // JaCoCo Coverage HTML（main / prod branch 才產生，allowMissing 避免其他 branch fail）
+                // 語言中立 Coverage HTML 契約（#2）：各語言 test 腳本統一產至 reports/coverage/index.html
+                // （Java=JaCoCo、Go=go tool cover）；coverage 檔位才產生，allowMissing 避免其他 branch fail
                 publishHTML(target: [
                     allowMissing          : true,
                     alwaysLinkToLastBuild : false,
                     keepAll               : true,
-                    reportDir             : 'target/site/jacoco',
+                    reportDir             : 'reports/coverage',
                     reportFiles           : 'index.html',
-                    reportName            : 'JaCoCo Coverage Report'
+                    reportName            : 'Coverage Report'
                 ])
                 // OWASP Dependency-Check HTML（Phase 2 預留，allowMissing: true 目前不會 fail）
                 publishHTML(target: [

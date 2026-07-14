@@ -88,6 +88,25 @@ run_security_scan() {
     echo "[node-test] TODO: Security scan (npm audit / Snyk) not yet implemented."
 }
 
+# 語言中立報告契約（#2）：best-effort 蒐集專案測試產物到統一路徑
+#   Node 測試框架／reporter 依專案而定（jest-junit / mocha reporter…）；有則搬、無則留空，
+#   groovy junit allowEmptyResults / publishHTML allowMissing 容錯。
+collect_reports() {
+    cd "${WORKSPACE}"
+    mkdir -p reports/junit reports/coverage
+    # 常見 JUnit 輸出（用 find 較 glob 穩健，避免未匹配 glob 問題）
+    find . -path ./reports -prune -o \
+        \( -name 'junit.xml' -o -name 'test-results.xml' -o -path '*/test-results/*.xml' \) -print 2>/dev/null \
+        | while read -r xml; do cp "${xml}" reports/junit/ 2>/dev/null || true; done
+    # 常見 coverage HTML（jest / nyc / c8）
+    if [[ -f coverage/lcov-report/index.html ]]; then
+        cp -r coverage/lcov-report/. reports/coverage/ 2>/dev/null || true
+    elif [[ -f coverage/index.html ]]; then
+        cp -r coverage/. reports/coverage/ 2>/dev/null || true
+    fi
+    echo "[node-test] Reports collected (best-effort) → reports/junit ($(find reports/junit -name '*.xml' 2>/dev/null | wc -l | tr -d ' ') xml)"
+}
+
 # ── 依 branch 決定執行範圍 ────────────────────────────────────────────────────
 run_unit_test
 
@@ -102,5 +121,7 @@ case "${BRANCH}" in
         run_security_scan
         ;;
 esac
+
+collect_reports
 
 echo "[node-test] Test completed."

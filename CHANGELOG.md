@@ -7,6 +7,25 @@
 
 ---
 
+## [1.16.0] - 2026-07-14
+
+### Changed
+- **報告路徑契約化（語言中立，改善計畫 #2）**：`ciPipeline.groovy` 不再硬編 Maven 路徑
+  - Test stage `junit` 由 `**/target/surefire-reports/*.xml` 改讀 `reports/junit/*.xml`
+  - Coverage `publishHTML` 由 `target/site/jacoco` 改讀 `reports/coverage/index.html`（reportName 中立化）
+  - 各語言 test 腳本統一把產物搬到契約路徑：
+    - Java：`collect_reports` 搬 surefire/test-results → `reports/junit`、JaCoCo → `reports/coverage`
+    - Go：改用 `gotestsum` 產 JUnit XML → `reports/junit`（測試失敗仍寫檔）、`go tool cover -html` → `reports/coverage`
+    - Node：best-effort 蒐集常見 junit/coverage 產物（reporter 依專案，`allowEmptyResults` 容錯）
+  - 前置：agent image 裝 `gotestsum` 1.13.0（jenkins-infra；pinned 比照 Trivy/gitleaks）
+
+### Security
+- **`git-tag.sh` 憑證改走 `GIT_ASKPASS`（改善計畫 #8）**：`push_git_tag` 不再把 `user:token` 拼進 remote URL
+  - 避免 token 洩漏於 `ps` 命令列 args（Jenkins console mask 不涵蓋）與 git push 失敗訊息
+  - 憑證以 env 傳給臨時 askpass script，URL 為純網址；函數返回時清理臨時檔
+
+---
+
 ## [1.15.0] - 2026-07-14
 
 ### Removed

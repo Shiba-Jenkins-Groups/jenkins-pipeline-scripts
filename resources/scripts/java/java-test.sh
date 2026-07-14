@@ -50,6 +50,24 @@ run_integration_test() {
     echo "[java-test] TODO: Integration tests not yet implemented."
 }
 
+# 語言中立報告契約（#2）：把 Maven/Gradle 產物搬到統一路徑，groovy 只認 reports/
+#   JUnit XML → reports/junit/    Coverage HTML → reports/coverage/
+collect_reports() {
+    cd "${WORKSPACE}"
+    mkdir -p reports/junit reports/coverage
+    # surefire（Maven）／test-results（Gradle）JUnit XML
+    find . -path ./reports -prune -o \
+        \( -path '*/surefire-reports/*.xml' -o -path '*/test-results/*/*.xml' \) -print 2>/dev/null \
+        | while read -r xml; do cp "${xml}" reports/junit/ 2>/dev/null || true; done
+    # JaCoCo HTML（coverage 檔位才有；index.html + 資源）
+    if [[ -d target/site/jacoco ]]; then
+        cp -r target/site/jacoco/. reports/coverage/ 2>/dev/null || true
+    elif [[ -d build/reports/jacoco/test/html ]]; then
+        cp -r build/reports/jacoco/test/html/. reports/coverage/ 2>/dev/null || true
+    fi
+    echo "[java-test] Reports collected → reports/junit ($(find reports/junit -name '*.xml' | wc -l | tr -d ' ') xml), reports/coverage"
+}
+
 # ── 執行 ──────────────────────────────────────────────────────────────────────
 # coverage 檔位用 run_coverage()（內部已包含 unit test），避免 Maven 重複執行
 # Security scan（OWASP / gitleaks）由 Phase 2（v1.7.x）以獨立政策旗標實作，不在測試檔位內
@@ -63,5 +81,7 @@ case "${TEST_LEVEL}" in
         run_unit_test
         ;;
 esac
+
+collect_reports
 
 echo "[java-test] Test completed."
