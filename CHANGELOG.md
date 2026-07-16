@@ -7,6 +7,35 @@
 
 ---
 
+## [1.20.0] - 2026-07-17
+
+### Added
+- **基礎設施 image 弱點掃描（掃描常態化 A）**
+  - `vars/infraScanPipeline.groovy`：新 pipeline 入口，週期性掃描**不屬於任何專案交付物**的 image
+  - `resources/scripts/common/infra-scan.sh`：Trivy 掃描實作，預設清單＝
+    agent image ＋ Harbor 全組件（由運行中容器動態取得，避免版本寫死後與現況脫節）
+  - 排程 `H 3 * * 1`（每週一凌晨；H＝散列避免同時觸發），可由 `infraScanPipeline(cron: '...')` 覆寫
+  - **政策純 warn**（`--exit-code 0`）：掃的是基礎設施非交付物，fail 沒有「該擋下這次 build」
+    的意義；掃到弱點 → junit 發布 → **UNSTABLE 為預期**（與 app image 同型）
+  - 單一 image 掃描失敗不中斷其餘（`set -uo pipefail`，不用 `-e`）
+  - 報告路徑契約化（同 #2）：`reports/infra-scan/*.xml`
+
+### Notes
+- **為何獨立於 `ciPipeline`**：掃描對象無 branch／Checkout／Build／Deploy 概念，
+  也不該套用 branch-policy——硬塞進 ciPipeline 會違反 SRP
+- **掃描分工（三者互補、不重疊）**：
+  | 機制 | 對象 | 時機 |
+  |------|------|------|
+  | `cd.sh` | 各專案 app image | build 當下掃一次 |
+  | Harbor `auto_scan` | Harbor 內既有 app image | 持續重掃（新 CVE 出現才會發現）|
+  | **本 pipeline** | **基礎設施 image** | **每週排程（先前完全無覆蓋）** |
+  | `agent/rebuild.sh`（jenkins-infra）| agent image | rebuild 當下 |
+- **pin 與掃描是一組的**：base image 已 pin（tag＋digest）擋上游投毒，
+  代價是 CVE 不會自動修 → 無掃描即「凍結在某個已知漏洞狀態」
+- 對應 `jenkins-config` v1.11.0（job 宣告）、`jenkins-infra` v1.14.0（rebuild.sh）
+
+---
+
 ## [1.19.0] - 2026-07-16
 
 ### Changed
