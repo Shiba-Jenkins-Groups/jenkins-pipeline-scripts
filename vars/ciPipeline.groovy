@@ -153,9 +153,20 @@ def call(Map config = [:]) {
                                         env[parts[0].trim()] = parts[1].trim()
                                     }
                                 }
+
+                                // NodePort 不再由 branch-policy.sh 提供（避免所有專案撞用同一固定值）
+                                // 改由各專案 Jenkinsfile 的 devNodePort/prodNodePort 參數依 DEPLOY_NAMESPACE 決定
+                                if (env.DO_DEPLOY == 'true') {
+                                    if (env.DEPLOY_NAMESPACE == 'dev') {
+                                        env.NODE_PORT = (config.devNodePort ?: error('ciPipeline: devNodePort is required when DEPLOY_NAMESPACE=dev')).toString()
+                                    } else if (env.DEPLOY_NAMESPACE == 'prod') {
+                                        env.NODE_PORT = (config.prodNodePort ?: error('ciPipeline: prodNodePort is required when DEPLOY_NAMESPACE=prod')).toString()
+                                    }
+                                }
+
                                 echo "[detect] Language: ${env.LANGUAGE}, BuildTool: ${env.BUILD_TOOL}"
                                 echo "[detect] Policy: DO_SECRET_SCAN=${env.DO_SECRET_SCAN}(exit=${env.SECRET_SCAN_EXIT_CODE}), DO_DEP_SCAN=${env.DO_DEP_SCAN}(cvss=${env.DEP_SCAN_CVSS}), DO_DOCKER_BUILD=${env.DO_DOCKER_BUILD}, DO_SCAN=${env.DO_SCAN}(exit=${env.SCAN_EXIT_CODE}), " +
-                                     "DO_PUSH=${env.DO_PUSH}, DO_DEPLOY=${env.DO_DEPLOY}(ns=${env.DEPLOY_NAMESPACE}), TEST_LEVEL=${env.TEST_LEVEL}"
+                                     "DO_PUSH=${env.DO_PUSH}, DO_DEPLOY=${env.DO_DEPLOY}(ns=${env.DEPLOY_NAMESPACE}, port=${env.NODE_PORT}), TEST_LEVEL=${env.TEST_LEVEL}"
                             }
                         }
                     }
