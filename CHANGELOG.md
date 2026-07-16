@@ -7,6 +7,21 @@
 
 ---
 
+## [1.19.0] - 2026-07-16
+
+### Changed
+- **develop 補 Trivy image scan（資安修復 S-4）**
+  - `branch-policy.sh`：develop 的 `DO_SCAN` `false`→`true`，`SCAN_EXIT_CODE` 維持 `0`（warn 檔位）
+  - 修補盲區：develop 的 `DO_PUSH` / `DO_DEPLOY` 皆為 `true`（v1.8.0 起為正式 k3s dev 交付鏈），
+    但部署到 k3s dev 的 image 先前完全跳過 Trivy 掃描
+  - warn 檔位不擋 dev 交付；Trivy 報告經 `ciPipeline.groovy` 的 junit 發布，
+    掃到漏洞即 **UNSTABLE**（與 main 同型，非失敗）
+  - 政策矩陣註解同步更新
+  - 驗證：claude-project develop **#74** —— Detect 顯示 `DO_SCAN=true(exit=0)`、
+    Image Scan 實際執行（不再 skipped）、Deploy rollout 成功、最終 UNSTABLE（Trivy warn 基線，符合預期）
+
+---
+
 ## [1.18.0] - 2026-07-14
 
 ### Added
