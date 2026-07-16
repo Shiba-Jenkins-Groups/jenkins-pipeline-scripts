@@ -13,7 +13,7 @@
 # | DO_PUSH           | true    | true     | true     | false |
 # | DO_DEPLOY         | true    | false    | true     | false |
 # | DEPLOY_NAMESPACE  | dev     | —        | prod     | —     |
-# | NODE_PORT         | 30090   | —        | 30091    | —     |
+# | NODE_PORT         | ""(見③) | —        | ""(見③)  | —     |
 # | DEPLOY_INPUT_GATE | false   | false    | true     | false |
 # | TEST_LEVEL        | unit    | coverage | coverage | unit  |
 #
@@ -21,6 +21,8 @@
 #   DO_PUSH=true   ⇒ DO_DOCKER_BUILD=true（push 的是本次 build 的 image）
 #   DO_DEPLOY=true ⇒ DO_PUSH=true（k3s 拉的是 pushed image）
 #   DO_DEPLOY=true ⇒ DEPLOY_NAMESPACE / NODE_PORT 非空
+#   ③ NODE_PORT 不再由本表決定：改由各專案 Jenkinsfile 的 devNodePort/prodNodePort
+#     參數提供（避免所有專案撞用同一固定值），見 ciPipeline.groovy Detect stage
 #
 # 使用方式：
 #   1. 執行模式（Detect stage）：印出 KEY=VALUE 供 ciPipeline.groovy 解析注入 env
@@ -36,7 +38,7 @@ derive_branch_policy() {
             DO_SECRET_SCAN=true; SECRET_SCAN_EXIT_CODE=1
             DO_DEP_SCAN=false; DEP_SCAN_CVSS=11
             DO_DOCKER_BUILD=true;  DO_SCAN=true; SCAN_EXIT_CODE=0
-            DO_PUSH=true;  DO_DEPLOY=true;  DEPLOY_NAMESPACE=dev;  NODE_PORT=30090
+            DO_PUSH=true;  DO_DEPLOY=true;  DEPLOY_NAMESPACE=dev;  NODE_PORT=""
             DEPLOY_INPUT_GATE=false
             TEST_LEVEL=unit
             ;;
@@ -52,7 +54,7 @@ derive_branch_policy() {
             DO_SECRET_SCAN=true; SECRET_SCAN_EXIT_CODE=1
             DO_DEP_SCAN=true; DEP_SCAN_CVSS=7
             DO_DOCKER_BUILD=true;  DO_SCAN=true;  SCAN_EXIT_CODE=1
-            DO_PUSH=true;  DO_DEPLOY=true;  DEPLOY_NAMESPACE=prod; NODE_PORT=30091
+            DO_PUSH=true;  DO_DEPLOY=true;  DEPLOY_NAMESPACE=prod; NODE_PORT=""
             DEPLOY_INPUT_GATE=true
             TEST_LEVEL=coverage
             ;;
