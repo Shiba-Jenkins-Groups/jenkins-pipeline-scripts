@@ -8,8 +8,8 @@
 # | 旗標              | develop | main     | prod     | 其他  |
 # |-------------------|---------|----------|----------|-------|
 # | DO_DOCKER_BUILD   | true    | true     | true     | false |
-# | DO_SCAN           | false   | true     | true     | false |
-# | SCAN_EXIT_CODE    | 0       | 0(warn)  | 1(fail)  | 0     |
+# | DO_SCAN           | true    | true     | true     | false |
+# | SCAN_EXIT_CODE    | 0(warn) | 0(warn)  | 1(fail)  | 0     |
 # | DO_PUSH           | true    | true     | true     | false |
 # | DO_DEPLOY         | true    | false    | true     | false |
 # | DEPLOY_NAMESPACE  | dev     | —        | prod     | —     |
@@ -35,7 +35,7 @@ derive_branch_policy() {
         develop)
             DO_SECRET_SCAN=true; SECRET_SCAN_EXIT_CODE=1
             DO_DEP_SCAN=false; DEP_SCAN_CVSS=11
-            DO_DOCKER_BUILD=true;  DO_SCAN=false; SCAN_EXIT_CODE=0
+            DO_DOCKER_BUILD=true;  DO_SCAN=true; SCAN_EXIT_CODE=0
             DO_PUSH=true;  DO_DEPLOY=true;  DEPLOY_NAMESPACE=dev;  NODE_PORT=30090
             DEPLOY_INPUT_GATE=false
             TEST_LEVEL=unit
