@@ -182,13 +182,17 @@ deploy_if_needed() {
     # HARBOR_IMAGE 格式：<registry>/<app>/<app>:<branch>-<version>-<build>
     export HARBOR_IMAGE="${k3s_registry}/${APP_NAME}/${APP_NAME}:${BRANCH}-${APP_VERSION}-${BUILD_NUMBER}"
     export NAMESPACE="${namespace}"
-    # NODE_PORT 由政策表提供（develop=30090 / prod=30091），此處僅確保 export 供 envsubst 使用
+    # NODE_PORT 由呼叫端（ciPipeline.groovy 的 devNodePort/prodNodePort 參數）提供，此處僅確保 export 供 envsubst 使用
     export NODE_PORT
+    # TTL 回收依據：ttl-janitor CronJob 讀此 annotation 判斷 Deployment 存活時間（見 k8s-ops/ttl-janitor）
+    export DEPLOY_TIMESTAMP
+    DEPLOY_TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
     echo "[cd] Deploying to namespace: ${namespace}"
     echo "[cd] Image: ${HARBOR_IMAGE}"
+    echo "[cd] Deploy timestamp: ${DEPLOY_TIMESTAMP}"
 
-    # envsubst 替換 manifest 佔位符（${APP_NAME} / ${HARBOR_IMAGE} / ${NAMESPACE} / ${NODE_PORT}）
+    # envsubst 替換 manifest 佔位符（${APP_NAME} / ${HARBOR_IMAGE} / ${NAMESPACE} / ${NODE_PORT} / ${DEPLOY_TIMESTAMP}）
     # 產生渲染後的臨時 manifest，避免污染原始 k8s/ 目錄
     local rendered="${WORKSPACE}/.pipeline/k8s-rendered"
     mkdir -p "${rendered}"
