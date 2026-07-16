@@ -164,9 +164,15 @@ def call(Map config = [:]) {
                                     }
                                 }
 
+                                // build tags 依部署環境注入（如 develop→devseed：dev 專屬 admin token）。
+                                // 專案未宣告 devBuildTags 即不帶 tag；prod／main 分支一律不帶（編譯期隔離）。
+                                if (env.DO_DEPLOY == 'true' && env.DEPLOY_NAMESPACE == 'dev' && config.devBuildTags) {
+                                    env.GO_BUILD_TAGS = config.devBuildTags.toString()
+                                }
+
                                 echo "[detect] Language: ${env.LANGUAGE}, BuildTool: ${env.BUILD_TOOL}"
                                 echo "[detect] Policy: DO_SECRET_SCAN=${env.DO_SECRET_SCAN}(exit=${env.SECRET_SCAN_EXIT_CODE}), DO_DEP_SCAN=${env.DO_DEP_SCAN}(cvss=${env.DEP_SCAN_CVSS}), DO_DOCKER_BUILD=${env.DO_DOCKER_BUILD}, DO_SCAN=${env.DO_SCAN}(exit=${env.SCAN_EXIT_CODE}), " +
-                                     "DO_PUSH=${env.DO_PUSH}, DO_DEPLOY=${env.DO_DEPLOY}(ns=${env.DEPLOY_NAMESPACE}, port=${env.NODE_PORT}), TEST_LEVEL=${env.TEST_LEVEL}"
+                                     "DO_PUSH=${env.DO_PUSH}, DO_DEPLOY=${env.DO_DEPLOY}(ns=${env.DEPLOY_NAMESPACE}, port=${env.NODE_PORT}), TEST_LEVEL=${env.TEST_LEVEL}, GO_BUILD_TAGS=${env.GO_BUILD_TAGS ?: '(none)'}"
                             }
                         }
                     }
