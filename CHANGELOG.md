@@ -7,6 +7,19 @@
 
 ---
 
+## [1.21.0] - 2026-07-19
+
+### Added（cd.sh：per-namespace overlay ＋換 pod 前 DB 快照）
+
+- **per-namespace overlay**：`deploy_if_needed()` 新增選配步驟——若專案 workspace 存在
+  `k8s/<namespace>/*.yaml`，於渲染 base manifest 之後再疊上去（同檔名覆寫／新檔名新增），
+  只在該 namespace 部署時生效。未建此目錄的專案零行為變更。供 shiba-go-ditch-api-project
+  的 prod-only PVC/Recreate 覆寫使用。
+- **換 pod 前 DB 快照（S9）**：`kubectl apply` 前，若 `namespace=prod` 且專案的
+  `${APP_NAME}-data` PVC 已存在，對舊 pod 執行 `kubectl exec sqlite3 VACUUM INTO` 快照
+  並 `kubectl cp` 取出至 `.pipeline/db-snapshots/`；任一步失敗即拒絕繼續部署。未建立此
+  PVC 的專案／namespace 完全不觸發。
+
 ## [1.20.0] - 2026-07-17
 
 ### Added

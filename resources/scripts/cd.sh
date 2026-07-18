@@ -200,6 +200,39 @@ deploy_if_needed() {
         envsubst < "${f}" > "${rendered}/$(basename "${f}")"
     done
 
+    # per-namespace overlay（選配）：專案可放 k8s/<namespace>/*.yaml 蓋掉同檔名 base manifest
+    # 或新增檔案——只在該 namespace 部署時生效，其餘專案未建此目錄即無影響（零行為變更）。
+    if [[ -d "${WORKSPACE}/k8s/${namespace}" ]]; then
+        for f in "${WORKSPACE}/k8s/${namespace}/"*.yaml; do
+            [[ -e "${f}" ]] || continue
+            envsubst < "${f}" > "${rendered}/$(basename "${f}")"
+        done
+    fi
+
+    # S9：換 pod 前 DB 快照（只在 prod 且該專案的 PVC 已存在時執行——PVC 不存在代表
+    # 該專案未走本 PVC 模式或尚未 cutover，其餘專案/場景完全不受影響）。
+    # 這是 Recreate 策略做不到、只有 pipeline 能做的事：只有它知道「我正要換 pod 了」，
+    # 補掉「image 可回滾但 DB 不可逆」的回滾不對稱——真出事的回滾路徑是還原 DB，不是換 image。
+    if [[ "${namespace}" == "prod" ]] && kubectl get pvc "${APP_NAME}-data" -n "${namespace}" >/dev/null 2>&1; then
+        local old_pod
+        old_pod="$(kubectl get pod -n "${namespace}" -l "app=${APP_NAME}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+        if [[ -n "${old_pod}" ]]; then
+            echo "[cd] S9：換 pod 前對 ${old_pod} 做 DB 一致性快照（VACUUM INTO）"
+            local snap_name="${APP_NAME}-predeploy-${DEPLOY_TIMESTAMP//:/}.db"
+            local snap_dir="${WORKSPACE}/.pipeline/db-snapshots"
+            mkdir -p "${snap_dir}"
+            kubectl exec -n "${namespace}" "${old_pod}" -- \
+                sqlite3 /app/data/db/app/shiba-go-ditch-api.db "VACUUM INTO '/tmp/${snap_name}'" \
+                || { report_error "DEPLOY" "005" "S9 換 pod 前 DB 快照失敗，拒絕繼續部署（避免無快照就換 pod）。"; exit 1; }
+            kubectl cp "${namespace}/${old_pod}:/tmp/${snap_name}" "${snap_dir}/${snap_name}" \
+                || { report_error "DEPLOY" "005" "S9 快照 kubectl cp 取出失敗，拒絕繼續部署。"; exit 1; }
+            kubectl exec -n "${namespace}" "${old_pod}" -- rm -f "/tmp/${snap_name}" || true
+            echo "[cd] 快照已存至 ${snap_dir}/${snap_name}"
+        else
+            echo "[cd] S9：PVC 已存在但無運行中 pod，跳過快照（首次上線場景，無舊資料可拍）"
+        fi
+    fi
+
     # KUBECONFIG 由 ciPipeline.groovy withCredentials(file) 注入至環境變數
     kubectl apply -f "${rendered}/" -n "${namespace}" \
         || { report_error "DEPLOY" "002" "kubectl apply failed for namespace ${namespace}."; exit 1; }
