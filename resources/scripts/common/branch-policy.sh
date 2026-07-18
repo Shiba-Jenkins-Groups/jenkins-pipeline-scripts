@@ -10,6 +10,7 @@
 # | DO_DOCKER_BUILD   | true    | true     | true     | false |
 # | DO_SCAN           | true    | true     | true     | false |
 # | SCAN_EXIT_CODE    | 0(warn) | 0(warn)  | 1(fail)  | 0     |
+# | GO_VULN_EXIT_CODE | 0(warn) | 0(warn)  | 1(fail)  | 0     |
 # | DO_PUSH           | true    | true     | true     | false |
 # | DO_DEPLOY         | true    | false    | true     | false |
 # | DEPLOY_NAMESPACE  | dev     | —        | prod     | —     |
@@ -37,7 +38,7 @@ derive_branch_policy() {
         develop)
             DO_SECRET_SCAN=true; SECRET_SCAN_EXIT_CODE=1
             DO_DEP_SCAN=false; DEP_SCAN_CVSS=11
-            DO_DOCKER_BUILD=true;  DO_SCAN=true; SCAN_EXIT_CODE=0
+            DO_DOCKER_BUILD=true;  DO_SCAN=true; SCAN_EXIT_CODE=0; GO_VULN_EXIT_CODE=0
             DO_PUSH=true;  DO_DEPLOY=true;  DEPLOY_NAMESPACE=dev;  NODE_PORT=""
             DEPLOY_INPUT_GATE=false
             TEST_LEVEL=unit
@@ -45,7 +46,7 @@ derive_branch_policy() {
         main)
             DO_SECRET_SCAN=true; SECRET_SCAN_EXIT_CODE=1
             DO_DEP_SCAN=true; DEP_SCAN_CVSS=11
-            DO_DOCKER_BUILD=true;  DO_SCAN=true;  SCAN_EXIT_CODE=0
+            DO_DOCKER_BUILD=true;  DO_SCAN=true;  SCAN_EXIT_CODE=0; GO_VULN_EXIT_CODE=0
             DO_PUSH=true;  DO_DEPLOY=false; DEPLOY_NAMESPACE="";   NODE_PORT=""
             DEPLOY_INPUT_GATE=false
             TEST_LEVEL=coverage
@@ -53,7 +54,7 @@ derive_branch_policy() {
         prod)
             DO_SECRET_SCAN=true; SECRET_SCAN_EXIT_CODE=1
             DO_DEP_SCAN=true; DEP_SCAN_CVSS=7
-            DO_DOCKER_BUILD=true;  DO_SCAN=true;  SCAN_EXIT_CODE=1
+            DO_DOCKER_BUILD=true;  DO_SCAN=true;  SCAN_EXIT_CODE=1; GO_VULN_EXIT_CODE=1
             DO_PUSH=true;  DO_DEPLOY=true;  DEPLOY_NAMESPACE=prod; NODE_PORT=""
             DEPLOY_INPUT_GATE=true
             TEST_LEVEL=coverage
@@ -63,7 +64,7 @@ derive_branch_policy() {
             # 但秘密掃描仍全 branch 執行（秘密洩漏處處 critical，feature 也擋）
             DO_SECRET_SCAN=true; SECRET_SCAN_EXIT_CODE=1
             DO_DEP_SCAN=false; DEP_SCAN_CVSS=11
-            DO_DOCKER_BUILD=false; DO_SCAN=false; SCAN_EXIT_CODE=0
+            DO_DOCKER_BUILD=false; DO_SCAN=false; SCAN_EXIT_CODE=0; GO_VULN_EXIT_CODE=0
             DO_PUSH=false; DO_DEPLOY=false; DEPLOY_NAMESPACE="";   NODE_PORT=""
             DEPLOY_INPUT_GATE=false
             TEST_LEVEL=unit
@@ -72,7 +73,7 @@ derive_branch_policy() {
 
     export DO_SECRET_SCAN SECRET_SCAN_EXIT_CODE
     export DO_DEP_SCAN DEP_SCAN_CVSS
-    export DO_DOCKER_BUILD DO_SCAN SCAN_EXIT_CODE DO_PUSH DO_DEPLOY
+    export DO_DOCKER_BUILD DO_SCAN SCAN_EXIT_CODE GO_VULN_EXIT_CODE DO_PUSH DO_DEPLOY
     export DEPLOY_NAMESPACE NODE_PORT DEPLOY_INPUT_GATE TEST_LEVEL
 }
 
@@ -85,6 +86,7 @@ print_branch_policy() {
     echo "DO_DOCKER_BUILD=${DO_DOCKER_BUILD}"
     echo "DO_SCAN=${DO_SCAN}"
     echo "SCAN_EXIT_CODE=${SCAN_EXIT_CODE}"
+    echo "GO_VULN_EXIT_CODE=${GO_VULN_EXIT_CODE}"
     echo "DO_PUSH=${DO_PUSH}"
     echo "DO_DEPLOY=${DO_DEPLOY}"
     echo "DEPLOY_NAMESPACE=${DEPLOY_NAMESPACE}"

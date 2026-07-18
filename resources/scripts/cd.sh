@@ -219,32 +219,13 @@ deploy_if_needed() {
         done
     fi
 
-    # S9：換 pod 前 DB 快照（只在 prod 且該專案的 PVC 已存在時執行——PVC 不存在代表
-    # 該專案未走本 PVC 模式或尚未 cutover，其餘專案/場景完全不受影響）。
-    # 這是 Recreate 策略做不到、只有 pipeline 能做的事：只有它知道「我正要換 pod 了」，
-    # 補掉「image 可回滾但 DB 不可逆」的回滾不對稱——真出事的回滾路徑是還原 DB，不是換 image。
-    if [[ "${namespace}" == "prod" ]] && kubectl get pvc "${APP_NAME}-data" -n "${namespace}" >/dev/null 2>&1; then
-        local old_pod
-        old_pod="$(kubectl get pod -n "${namespace}" -l "app=${APP_NAME}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
-        if [[ -n "${old_pod}" ]]; then
-            echo "[cd] S9：換 pod 前對 ${old_pod} 做 DB 一致性快照（VACUUM INTO）"
-            local snap_name="${APP_NAME}-predeploy-${DEPLOY_TIMESTAMP//:/}.db"
-            local snap_dir="${WORKSPACE}/.pipeline/db-snapshots"
-            mkdir -p "${snap_dir}"
-            # 走 app 內建 snapshot 子命令（modernc.org/sqlite 純 Go driver），
-            # 不再依賴容器內裝 sqlite3 CLI——省一個套件也省一個 CVE 面
-            # （2026-07-19：prod Image Scan 閘擋下 CVE-2025-7458 libsqlite3-0/sqlite3）。
-            kubectl exec -n "${namespace}" "${old_pod}" -- \
-                /app/app snapshot /app/data/db/app/shiba-go-ditch-api.db "/tmp/${snap_name}" \
-                || { report_error "DEPLOY" "005" "S9 換 pod 前 DB 快照失敗，拒絕繼續部署（避免無快照就換 pod）。"; exit 1; }
-            kubectl cp "${namespace}/${old_pod}:/tmp/${snap_name}" "${snap_dir}/${snap_name}" \
-                || { report_error "DEPLOY" "005" "S9 快照 kubectl cp 取出失敗，拒絕繼續部署。"; exit 1; }
-            kubectl exec -n "${namespace}" "${old_pod}" -- rm -f "/tmp/${snap_name}" || true
-            echo "[cd] 快照已存至 ${snap_dir}/${snap_name}"
-        else
-            echo "[cd] S9：PVC 已存在但無運行中 pod，跳過快照（首次上線場景，無舊資料可拍）"
-        fi
-    fi
+    # 【S9 換 pod 前 DB 快照已於 2026-07-19 移除】
+    # 原本在此對 prod PVC 內的 SQLite 做 VACUUM INTO，補「image 可回滾但 DB 不可逆」的缺口。
+    # 移除原因有二：(1) 架構回退後真資料不再進 pod（pod＝驗證閘、跑空庫），這裡無資料可快照；
+    # (2) 它寫死了某個專案的 DB 檔名與路徑，本就不該長在跨專案的共用 library 裡（SRP）。
+    # 該責任已轉生到專案端「換版的原子單元」：shiba-go-ditch-api-project 的
+    # scripts/prod_app.sh deploy（快照→停舊→起新→身分斷言→失敗自動回滾）。
+    # ⚠ 未來若有專案要讓 pipeline 直接部署「有狀態」的生產 pod，快照這件事必須先補回來。
 
     # KUBECONFIG 由 ciPipeline.groovy withCredentials(file) 注入至環境變數
     kubectl apply -f "${rendered}/" -n "${namespace}" \

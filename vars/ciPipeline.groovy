@@ -164,6 +164,14 @@ def call(Map config = [:]) {
                                     }
                                 }
 
+                                // 人工確認閘的專案級覆蓋（deployInputGate: false 可關掉 prod 那道 input）。
+                                // 適用情境：pod 部署本身不碰生產（只是驗證閘），真正動生產是管線之外
+                                // 的另一道人工步驟——此時管線內的 input 守的是一個不碰生產的步驟，
+                                // 只剩「發版時要坐等點按鈕」的摩擦。未宣告即沿用政策表預設（prod=true）。
+                                if (config.containsKey('deployInputGate')) {
+                                    env.DEPLOY_INPUT_GATE = config.deployInputGate.toString()
+                                }
+
                                 // build tags 依部署環境注入（如 develop→devseed：dev 專屬 admin token）。
                                 // 專案未宣告 devBuildTags 即不帶 tag；prod／main 分支一律不帶（編譯期隔離）。
                                 if (env.DO_DEPLOY == 'true' && env.DEPLOY_NAMESPACE == 'dev' && config.devBuildTags) {

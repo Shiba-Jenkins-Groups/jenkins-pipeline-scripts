@@ -7,6 +7,41 @@
 
 ---
 
+## [1.22.0] - 2026-07-19
+
+### Added（Go 專案弱點掃描：govulncheck）
+
+- **`go-test.sh` 接入 `govulncheck ./...`**（`go vet` 之後、跑測試之前）。為何在這裡而不在
+  Dependency Scan stage：那個 stage 跑 OWASP Dependency-Check（只實作 java/maven），且政策
+  上只在 main/prod 開——對 Go 等於空轉，弱點要到發版當天才由 Trivy 掃 binary 間接抓到
+  （2026-07-19 實例：`x/crypto`／`x/net` 的 HIGH CVE 一路綠到 prod 發版才被擋，把發版日
+  變成修依賴日）。放這裡＝**每個 branch 都跑，訊號最早出現**。
+- **`branch-policy.sh` 新增 `GO_VULN_EXIT_CODE`**（develop/main=0 警告、prod=1 阻斷），
+  比照既有 `SCAN_EXIT_CODE` 的 warn/fail 慣例。刻意不在 develop 就 fail：govulncheck 也會
+  回報**標準庫**弱點，那綁 agent 的 Go 版本，新 CVE 一落地會讓所有 Go 專案的 build 一起紅。
+  要收緊成 develop 即 fail，改該表 develop 那行為 1 即可。
+- **agent image 加裝 govulncheck v1.1.4**（`docker-compose/agent/Dockerfile`；無預編發行檔，
+  官方安裝方式即 `go install`）。⚠ **agent image 重建前**，`go-test.sh` 會印大字警告並跳過
+  ——是「沒有檢查」不是「沒有弱點」，刻意不靜默略過。
+
+### Added（`ciPipeline`：`deployInputGate` 專案級覆蓋）
+
+- 專案可宣告 `deployInputGate: false` 關掉 prod 的人工確認 `input`。適用於「pod 部署本身
+  不碰生產（只是驗證閘），真正動生產是管線之外的另一道人工步驟」的專案——此時管線內的
+  input 守著一個不碰生產的步驟，只剩「發版要坐等點按鈕」的摩擦。未宣告即沿用政策表
+  預設（prod=true），其他專案零影響。
+
+### Removed（`cd.sh`：S9 換 pod 前 DB 快照）
+
+- 移除原因有二：(1) 使用它的專案已於同日回退架構，真資料不再進 pod（pod＝驗證閘、跑空庫），
+  這裡無資料可快照；(2) 它**寫死了某個專案的 DB 檔名與路徑**，本就不該長在跨專案的共用
+  library 裡（SRP）。該責任已轉生到專案端「換版的原子單元」
+  （`shiba-go-ditch-api-project` 的 `scripts/prod_app.sh deploy`）。
+- ⚠ 未來若有專案要讓 pipeline 直接部署**有狀態**的生產 pod，快照這件事必須先補回來——
+  「image 可回滾但 DB 不可逆」的回滾不對稱依然成立。
+
+---
+
 ## [1.21.3] - 2026-07-19
 
 ### Added（cd.sh：Image Scan 支援專案級 `.trivyignore`）
