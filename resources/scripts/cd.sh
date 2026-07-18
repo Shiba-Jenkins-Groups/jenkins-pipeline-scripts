@@ -221,8 +221,11 @@ deploy_if_needed() {
             local snap_name="${APP_NAME}-predeploy-${DEPLOY_TIMESTAMP//:/}.db"
             local snap_dir="${WORKSPACE}/.pipeline/db-snapshots"
             mkdir -p "${snap_dir}"
+            # 走 app 內建 snapshot 子命令（modernc.org/sqlite 純 Go driver），
+            # 不再依賴容器內裝 sqlite3 CLI——省一個套件也省一個 CVE 面
+            # （2026-07-19：prod Image Scan 閘擋下 CVE-2025-7458 libsqlite3-0/sqlite3）。
             kubectl exec -n "${namespace}" "${old_pod}" -- \
-                sqlite3 /app/data/db/app/shiba-go-ditch-api.db "VACUUM INTO '/tmp/${snap_name}'" \
+                /app/app snapshot /app/data/db/app/shiba-go-ditch-api.db "/tmp/${snap_name}" \
                 || { report_error "DEPLOY" "005" "S9 換 pod 前 DB 快照失敗，拒絕繼續部署（避免無快照就換 pod）。"; exit 1; }
             kubectl cp "${namespace}/${old_pod}:/tmp/${snap_name}" "${snap_dir}/${snap_name}" \
                 || { report_error "DEPLOY" "005" "S9 快照 kubectl cp 取出失敗，拒絕繼續部署。"; exit 1; }

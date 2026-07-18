@@ -7,6 +7,15 @@
 
 ---
 
+## [1.21.2] - 2026-07-19
+
+### Fixed（cd.sh：S9 DB 快照改走 app 內建 snapshot 子命令，不裝 sqlite3 CLI）
+
+- prod branch Image Scan（Trivy）閘擋下 **CRITICAL CVE-2025-7458**（`libsqlite3-0`/`sqlite3`）——
+  來源是 S9 為了在容器內跑 `sqlite3 ... VACUUM INTO` 而加裝的 sqlite3 CLI 套件。
+  改由應用端 `/app/app snapshot <db-path> <dest-path>` 子命令執行同一段 VACUUM INTO
+  （Go 端本來就帶 modernc.org/sqlite 純 Go driver，不必額外裝套件）。
+
 ## [1.21.1] - 2026-07-19
 
 ### Fixed（git-tag.sh：prod 手動 tag 抓不到——checkout 預設 noTags）
