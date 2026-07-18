@@ -7,6 +7,17 @@
 
 ---
 
+## [1.21.3] - 2026-07-19
+
+### Added（cd.sh：Image Scan 支援專案級 `.trivyignore`）
+
+- **`image_scan_if_needed` 加 `--ignorefile` 選配**：專案可在 repo 根目錄放
+  `.trivyignore`（Trivy 原生格式，逐條 CVE + `exp:` 到期日）記錄「目前無可用
+  修補、已查證 Debian security-tracker」的豁免項目；不存在此檔的專案零行為變更。
+  用於 shiba-go-ditch-api-project prod 首次冒煙：base image（debian:bookworm-slim）
+  尚有 20 筆 HIGH/CRITICAL CVE 官方尚未回補（postponed/no-dsa/minor issue），
+  非該專案能修，逐條查證後豁免。
+
 ## [1.21.2] - 2026-07-19
 
 ### Fixed（cd.sh：S9 DB 快照改走 app 內建 snapshot 子命令，不裝 sqlite3 CLI）

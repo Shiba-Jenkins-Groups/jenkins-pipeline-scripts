@@ -139,6 +139,15 @@ image_scan_if_needed() {
     # template 路徑為 Trivy 安裝時內建，固定於 /usr/local/share/trivy/templates/junit.tpl
     local trivy_template="/usr/local/share/trivy/templates/junit.tpl"
 
+    # 專案可選擇性放 WORKSPACE 根目錄 .trivyignore（逐條記錄「目前無可用修補」理由＋
+    # 到期日）——不存在則不加 --ignorefile，其餘專案零行為變更。
+    local ignore_args=()
+    local trivy_ignorefile="${WORKSPACE:-$(pwd)}/.trivyignore"
+    if [[ -f "${trivy_ignorefile}" ]]; then
+        echo "[cd] 套用 .trivyignore（${trivy_ignorefile}）"
+        ignore_args=(--ignorefile "${trivy_ignorefile}")
+    fi
+
     echo "[cd] Running Trivy image scan: ${IMAGE_TAG} (branch: ${BRANCH}, exit-code: ${trivy_exit_code})"
     trivy image \
         --exit-code "${trivy_exit_code}" \
@@ -147,6 +156,7 @@ image_scan_if_needed() {
         --format template \
         --template "@${trivy_template}" \
         --output "${trivy_report}" \
+        "${ignore_args[@]}" \
         "${IMAGE_TAG}"
     echo "[cd] Image scan completed: ${trivy_report}"
 }
