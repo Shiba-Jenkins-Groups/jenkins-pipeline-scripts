@@ -7,6 +7,18 @@
 
 ---
 
+## [1.21.1] - 2026-07-19
+
+### Fixed（git-tag.sh：prod 手動 tag 抓不到——checkout 預設 noTags）
+
+- **`resolve_git_tag` prod 分支 fetch tags**：Jenkins checkout 預設 `Fetching without tags`，
+  導致剛 push 的手動 tag 在 build workspace 本地看不到，`git describe --tags --exact-match HEAD`
+  永遠找不到而 fail（S5 prod 冒煙首次上線實測踩坑：v0.67.0 tag 已 push 仍報
+  `requires a manual git tag`）。新增 `fetch_git_tags()`（沿用 `push_git_tag` 的
+  GIT_ASKPASS 憑證模式）在 `git describe` 前先 `git fetch --tags --force`。
+  同步修正 `push_git_tag`：prod 路徑此時 tag 已因上述 fetch 存在於本地，`git tag` 前
+  先判斷 ref 是否已存在，避免 `fatal: tag already exists`。
+
 ## [1.21.0] - 2026-07-19
 
 ### Added（cd.sh：per-namespace overlay ＋換 pod 前 DB 快照）
