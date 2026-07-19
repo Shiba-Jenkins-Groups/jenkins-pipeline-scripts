@@ -164,6 +164,12 @@ def call(Map config = [:]) {
                                     }
                                 }
 
+                                // 驗證後即撤（deployTeardown: true）：k3d pod 只是 CI/CD 驗證閘的專案，
+                                // 部署並通過 health 檢查後即刪除 Service/Deployment，不留到 TTL 到期。
+                                // 預設 false——其他專案的 k3d deployment 可能是常駐開發環境
+                                // （實測 claude-project 的已存活 108 天），一律撤除會毀掉別人的環境。
+                                env.DEPLOY_TEARDOWN = (config.deployTeardown ?: false).toString()
+
                                 // 人工確認閘的專案級覆蓋（deployInputGate: false 可關掉 prod 那道 input）。
                                 // 適用情境：pod 部署本身不碰生產（只是驗證閘），真正動生產是管線之外
                                 // 的另一道人工步驟——此時管線內的 input 守的是一個不碰生產的步驟，

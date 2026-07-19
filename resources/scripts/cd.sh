@@ -245,7 +245,58 @@ deploy_if_needed() {
             exit 1
         }
 
+    # ── 驗證閘：NodePort 上的 health 端點必須回 200 ────────────────────────────
+    # rollout status 只證明 readinessProbe 過（叢集內部視角）；這一步多驗 Service→Pod 的
+    # 對外接線。對「部署後即撤」的專案而言這是最後一次能驗證的機會，故不可省。
+    # health 路徑沿用專案既有的 smoke-test.env 契約（SMOKE_HEALTH_PATH），不另立新設定。
+    local health_path=""
+    if [[ -f "${WORKSPACE}/smoke-test.env" ]]; then
+        health_path="$(grep -E '^SMOKE_HEALTH_PATH=' "${WORKSPACE}/smoke-test.env" | tail -1 | cut -d= -f2- | tr -d '"'"'"'')"
+    fi
+    if [[ -n "${health_path}" ]]; then
+        # agent 在 jenkins-network 上，經 host.docker.internal 打 k3d 發佈到 host 的 NodePort
+        local probe_url="http://host.docker.internal:${NODE_PORT}${health_path}"
+        echo "[cd] 驗證部署後對外可用性：${probe_url}"
+        local ok=0
+        for _ in $(seq 1 10); do
+            if curl -sf -m 5 -o /dev/null "${probe_url}"; then ok=1; break; fi
+            sleep 3
+        done
+        if [[ "${ok}" != "1" ]]; then
+            report_error "DEPLOY" "006" "部署後 ${probe_url} 未回 200：pod 起來了但 Service 對外接線不通。資源保留供查錯（不執行 teardown）。"
+            kubectl get svc,pods -n "${namespace}" -l "app=${APP_NAME}" >&2 || true
+            exit 1
+        fi
+        echo "[cd] ✅ 對外 health 檢查通過"
+    else
+        echo "[cd] 專案未宣告 smoke-test.env 的 SMOKE_HEALTH_PATH ⇒ 僅以 rollout status（readinessProbe）為準"
+    fi
+
     echo "[cd] Deploy complete: http://localhost:${NODE_PORT}"
+
+    # ── 驗證後即撤（DEPLOY_TEARDOWN=true 的專案）──────────────────────────────
+    # 適用於「k3d pod 只是 CI/CD 驗證閘、不是執行體」的專案：image 能起來、對外接線通，
+    # 這個 pod 的任務就結束了。續留只是佔資源並讓 NodePort 一直對區網開著。
+    #
+    # ⚠ 只在**驗證成功**時撤：失敗路徑上面已 exit，資源刻意留著供查錯——
+    #   把失敗現場一起刪掉等於銷毀唯一的證據。
+    # ⚠ ttl-janitor 不因此退場，它變成**失敗／中斷路徑的兜底**：那些情況不會走到這裡，
+    #   留下的資源仍需要有人回收（見 k8s-ops/ttl-janitor）。兩者互補不重疊。
+    # ⚠ 預設關閉：其他專案的 k3d deployment 可能是常駐開發環境而非驗證閘
+    #   （實測 claude-project 的 dev deployment 已存活 108 天且無 last-deploy annotation），
+    #   一律撤除會直接毀掉別人的環境。故由各專案 Jenkinsfile 明確 opt-in。
+    if [[ "${DEPLOY_TEARDOWN:-false}" == "true" ]]; then
+        echo "[cd] DEPLOY_TEARDOWN=true ⇒ 驗證已通過，回收本次驗證用資源"
+        # 先 Service 後 Deployment：與 ttl-janitor 同序——先斷流量入口，
+        # Deployment 留到最後當「刪除未完成」的重試錨點（Service 刪失敗就不動 Deployment）。
+        if kubectl delete service "${APP_NAME}" -n "${namespace}" --ignore-not-found; then
+            kubectl delete deployment "${APP_NAME}" -n "${namespace}" --ignore-not-found \
+                || echo "[cd] WARN: deployment 刪除失敗，ttl-janitor 會在 TTL 到期後接手"
+        else
+            echo "[cd] WARN: service 刪除失敗，保留 deployment 當重試錨點；ttl-janitor 會接手"
+        fi
+        echo "[cd] ✅ 驗證閘生命週期結束（CI/CD 完成）"
+    fi
 }
 
 # ── Stage 分派 ────────────────────────────────────────────────────────────────

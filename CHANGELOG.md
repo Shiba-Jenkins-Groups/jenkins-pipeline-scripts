@@ -7,6 +7,35 @@
 
 ---
 
+## [1.24.0] - 2026-07-19
+
+### Added（`deployTeardown`：驗證通過即撤除 k3d 資源）
+
+- 適用於「k3d pod 只是 CI/CD 驗證閘、不是執行體」的專案：image 起得來、NodePort 上 health
+  回 200，這個 pod 的任務就結束了。續留到 TTL 到期（dev 72h／prod 168h）只是佔資源，
+  並讓 NodePort 一直對區網開著。專案於 Jenkinsfile 宣告 `deployTeardown: true` 啟用。
+- **預設 false**：其他專案的 k3d deployment 可能是**常駐開發環境**而非驗證閘——實測
+  claude-project 的 dev deployment 已存活 **108 天**且無 `last-deploy` annotation
+  （ttl-janitor 視為手動建立而不動它）。一律撤除會直接毀掉別人的環境。
+- **只在驗證成功時撤**：失敗路徑先行 `exit`，資源刻意留著供查錯——把失敗現場一起刪掉
+  等於銷毀唯一的證據。
+- **ttl-janitor 不退場，改為失敗／中斷路徑的兜底**：那些情況走不到 teardown，留下的資源
+  仍需要有人回收。兩者互補不重疊。
+- 刪除順序與 ttl-janitor 一致（先 Service 後 Deployment）：先斷流量入口，Deployment
+  留作「刪除未完成」的重試錨點。
+
+### Added（部署後對外可用性驗證）
+
+- `rollout status` 只證明 readinessProbe 過（**叢集內部**視角）；新增一步在 NodePort 上
+  打 health 端點，多驗 Service→Pod 的**對外接線**。對啟用 teardown 的專案而言，這是資源被
+  回收前最後一次能驗證的機會，故不可省。
+- health 路徑沿用專案既有的 `smoke-test.env` 契約（`SMOKE_HEALTH_PATH`），不另立新設定；
+  未宣告者僅以 rollout status 為準（並明確印出採用哪種模式，不靜默略過）。
+- 連通路徑已實測：agent 於 jenkins-network 經 `host.docker.internal:<NodePort>` 可達
+  （dev 30092／prod 30093 皆回 200）。
+
+---
+
 ## [1.23.0] - 2026-07-19
 
 ### Changed（Harbor image 命名改階層式：`<app>/<branch>/<version>:<build>`）
