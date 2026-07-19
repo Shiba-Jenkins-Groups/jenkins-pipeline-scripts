@@ -316,9 +316,17 @@ def call(Map config = [:]) {
                             //   在 stage 內讀進 env（env 跨 cleanWs 存活）並存檔，收尾才有東西可印。
                             script {
                                 if (fileExists('image-ref.txt')) {
-                                    def props = readProperties file: 'image-ref.txt'
-                                    env.BUILT_IMAGE_REF = props.IMAGE_REF ?: ''
-                                    env.BUILT_IMAGE_DIGEST = props.IMAGE_DIGEST ?: ''
+                                    // ⚠ 用 readFile 自行解析，**不要用 readProperties**——後者屬
+                                    //   pipeline-utility-steps plugin，本 Jenkins 未安裝，會拋
+                                    //   NoSuchMethodError 讓整個 Harbor Push stage 變紅
+                                    //   （2026-07-20 build #28 實證）。readFile 是內建步驟。
+                                    def props = [:]
+                                    readFile('image-ref.txt').split('\n').each { line ->
+                                        int i = line.indexOf('=')
+                                        if (i > 0) { props[line.substring(0, i).trim()] = line.substring(i + 1).trim() }
+                                    }
+                                    env.BUILT_IMAGE_REF = props['IMAGE_REF'] ?: ''
+                                    env.BUILT_IMAGE_DIGEST = props['IMAGE_DIGEST'] ?: ''
                                     // 讓 build 列表一眼看到版本，不必點進 console
                                     currentBuild.description = env.BUILT_IMAGE_REF
                                     archiveArtifacts artifacts: 'image-ref.txt', allowEmptyArchive: true
