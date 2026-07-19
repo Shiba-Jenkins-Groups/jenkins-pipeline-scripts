@@ -91,6 +91,26 @@ echo "[go-archive] build.env written."
 GIT_TAG_NAME="$(resolve_git_tag "${BRANCH}" "${BUILD_NUMBER}")"
 export GIT_TAG_NAME
 echo "[go-archive] git tag: ${GIT_TAG_NAME}"
+
+# ── 發版版本一致性：CHANGELOG（image 命名來源）⟷ 人工 git tag（發版意圖）──────
+# 兩者是各自獨立解析的：APP_VERSION 走 common/version.sh（本專案無 VERSION 檔 ⇒ 取
+# CHANGELOG 首個 SemVer），GIT_TAG_NAME 走 git-tag.sh 的 exact-match 人工 tag。
+# 沒有交叉核對時可以靜默分歧——例如 merge 到 prod 時忘了 bump CHANGELOG 卻照常打了
+# v0.67.5：image 會被推進 prod/0.67.4 這個 repo 的新 build 號，裡面裝的卻是 0.67.5 的碼。
+# 之後 Harbor 路徑、prod_app.sh status 顯示的 APP_VERSION、git tag 三者互相矛盾，
+# build-once-promote 的追溯性就被汙染了（2026-07-20 稽核 N5）。
+# 只在 prod 這種帶 vX.Y.Z 語意 tag 的分支檢查；ci-dev-N／ci-main-N 不帶版本語意，跳過。
+if [[ "${GIT_TAG_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+    if [[ "${GIT_TAG_NAME}" != "v${APP_VERSION}" ]]; then
+        report_error "ARCHIVE" "010" \
+            "發版版本不一致：git tag=${GIT_TAG_NAME}，但版本來源解析為 ${APP_VERSION}（期望 tag 為 v${APP_VERSION}）。
+     兩者必須一致，否則 image 命名／執行期 APP_VERSION／git tag 會互相矛盾。
+     多半是 merge 時忘了更新 CHANGELOG.md 首個 ## [x.y.z]，或 tag 打錯版號。"
+        exit 1
+    fi
+    echo "[go-archive] ✅ 版本一致性：git tag ${GIT_TAG_NAME} ⟷ APP_VERSION ${APP_VERSION}"
+fi
+
 push_git_tag "${GIT_TAG_NAME}"
 
 echo "[go-archive] Archive completed."

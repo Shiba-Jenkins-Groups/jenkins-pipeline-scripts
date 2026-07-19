@@ -120,6 +120,10 @@ harbor_push_if_needed() {
 
     docker logout "${registry}"
     echo "[cd] Harbor push completed: ${harbor_image}"
+
+    # 把「這次產出哪一顆」寫成產出物，讓收尾摘要與 archiveArtifacts 有東西可交（見 docker.sh）。
+    # 寫檔失敗不得讓已成功的 push 變成紅的——產出物是便利性，不是交付條件。
+    write_image_ref_file "${harbor_image}" || echo "[cd] WARNING: image-ref.txt 寫入失敗（不影響 push 結果）"
 }
 
 # ── Image Scan（Trivy）────────────────────────────────────────────────────────

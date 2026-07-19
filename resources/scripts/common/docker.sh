@@ -28,6 +28,38 @@ harbor_image_ref() {
     printf '%s:%s' "${path}" "${build}"
 }
 
+# write_image_ref_file — 把本次 build 的 image 參照寫成產出物（供人與腳本消費）
+#
+# 為何需要：pipeline 跑完後，「這次到底產出哪一顆 image」只存在於中段 stage 的 console log
+# （Tagging/Pushing/smoke/Deploy 各印一次），收尾摘要不重述。人要換版就得翻 log 拼湊
+#   <registry>/<app>/<branch>/<version>:<build>
+# 五個欄位，其中 version 來自 CHANGELOG、build 來自 Jenkins——實務上高頻出錯。
+#
+# ⚠ 寫入的是 **push 側的參照**（registry 預設 localhost:9290），那是 host 端 docker 可用的形式。
+#   Deploy stage 另印一份 host.docker.internal:9290 的參照（k3s 拉取視角），複製那個到 host 上
+#   會因 insecure-registry 不匹配而走 HTTPS 失敗——本檔刻意不寫那一種。
+#
+# ⚠ SRP：本檔跨四個專案共用，故只寫「事實」（ref／digest），**不寫任何專案專屬的部署指令**。
+#   各專案怎麼用這顆 image 是專案自己的事（同 S9 快照被移出本 library 的理由，見 cd.sh）。
+write_image_ref_file() {
+    local harbor_image="$1"
+    local out="${WORKSPACE:-.}/image-ref.txt"
+    {
+        printf 'IMAGE_REF=%s\n' "${harbor_image}"
+        printf 'APP_NAME=%s\n' "${APP_NAME:-}"
+        printf 'BRANCH=%s\n' "${BRANCH:-}"
+        printf 'APP_VERSION=%s\n' "${APP_VERSION:-}"
+        printf 'BUILD_NUMBER=%s\n' "${BUILD_NUMBER:-}"
+        # digest＝build-once-promote 的追溯錨點：tag 可被覆蓋重推，digest 不會。
+        # 取不到不致命（不同 docker 版本 RepoDigests 行為有差），留空即可。
+        local digest
+        digest="$(docker image inspect --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}' \
+            "${harbor_image}" 2>/dev/null || true)"
+        printf 'IMAGE_DIGEST=%s\n' "${digest}"
+    } > "${out}"
+    echo "[docker] Image ref written: ${out}"
+}
+
 # 優先順序：
 # 1. 專案根目錄 Dockerfile-{language}
 # 2. 專案根目錄 Dockerfile

@@ -27,6 +27,19 @@ assert_ref() {
     fi
 }
 
+assert_file_kv() {
+    local desc="$1" file="$2" key="$3" want="$4"
+    local got; got="$(grep -E "^${key}=" "${file}" | head -1 | cut -d= -f2-)"
+    if [[ "${got}" == "${want}" ]]; then
+        echo "PASS: ${desc}（${key}=${got}）"
+    else
+        echo "FAIL: ${desc}"
+        echo "        got : ${key}=${got}"
+        echo "        want: ${key}=${want}"
+        fail=$((fail + 1))
+    fi
+}
+
 echo "── 各專案的實際版號格式（跨專案一致性）──────────────────────────────"
 assert_ref "go-ditch prod" \
     "localhost:9290/shiba-go-ditch-api-project/prod/0.67.2:12" \
@@ -83,10 +96,43 @@ else
     echo "SKIP: 無 docker 或無 alpine image，略過合法性實測"
 fi
 
+echo
+echo "── write_image_ref_file：產出物內容與韌性 ────────────────────────────"
+# 為何測：這個檔是「pipeline 產出哪一顆 image」的唯一機讀來源（收尾摘要與 archiveArtifacts
+# 都吃它）。寫錯 key 名不會讓 build 變紅，只會讓下游安靜地拿不到值。
+TMPWS="$(mktemp -d)"
+(
+    export WORKSPACE="${TMPWS}" APP_NAME=demo-app BRANCH=prod APP_VERSION=1.2.3 BUILD_NUMBER=42
+    write_image_ref_file "localhost:9290/demo-app/prod/1.2.3:42" >/dev/null
+)
+REF_FILE="${TMPWS}/image-ref.txt"
+if [[ -f "${REF_FILE}" ]]; then
+    assert_file_kv "IMAGE_REF 為 push 側（host 可用）參照" "${REF_FILE}" IMAGE_REF "localhost:9290/demo-app/prod/1.2.3:42"
+    assert_file_kv "帶出 APP_NAME"     "${REF_FILE}" APP_NAME     "demo-app"
+    assert_file_kv "帶出 BRANCH"       "${REF_FILE}" BRANCH       "prod"
+    assert_file_kv "帶出 APP_VERSION"  "${REF_FILE}" APP_VERSION  "1.2.3"
+    assert_file_kv "帶出 BUILD_NUMBER" "${REF_FILE}" BUILD_NUMBER "42"
+    # 不存在的 image → digest 取不到，但不得讓函數失敗（產出物是便利性，不是交付條件）
+    if grep -qE '^IMAGE_DIGEST=' "${REF_FILE}"; then
+        echo "PASS: image 不存在時 IMAGE_DIGEST 仍留空鍵、未讓函數失敗"
+    else
+        echo "FAIL: 缺 IMAGE_DIGEST 鍵"; fail=$((fail + 1))
+    fi
+    # SRP 守門：本 library 跨四專案共用，不得混入任何專案專屬的部署指令
+    if grep -qiE 'prod_app\.sh|kubectl|helm' "${REF_FILE}"; then
+        echo "FAIL: 產出物混入專案專屬部署指令（違反跨專案 SRP）"; fail=$((fail + 1))
+    else
+        echo "PASS: 產出物只含事實、無專案專屬指令"
+    fi
+else
+    echo "FAIL: 未產出 image-ref.txt"; fail=$((fail + 1))
+fi
+rm -rf "${TMPWS}"
+
 echo "────────────────────────────────────────────────────────────"
 if [[ ${fail} -eq 0 ]]; then
-    echo "✅ harbor_image_ref 全數通過"
+    echo "✅ docker.sh 全數通過"
 else
-    echo "❌ harbor_image_ref 有 ${fail} 項失敗"
+    echo "❌ docker.sh 有 ${fail} 項失敗"
 fi
 exit ${fail}

@@ -37,15 +37,23 @@ echo "[go-test] Test level: ${TEST_LEVEL}"
 # 版本，新 CVE 一落地就會讓所有 Go 專案的 build 一起紅。要收緊成 develop 即 fail，
 # 改 branch-policy.sh 的 develop 那行為 1 即可。
 run_govulncheck() {
+    local exit_code="${GO_VULN_EXIT_CODE:-0}"
     if ! command -v govulncheck >/dev/null 2>&1; then
         echo "╔══════════════════════════════════════════════════════════════╗"
         echo "║ [go-test] ⚠ govulncheck 未安裝，弱點掃描已跳過               ║"
         echo "║ 這不是「沒有弱點」，是「沒有檢查」——agent image 需重建：      ║"
         echo "║   cd jenkins/docker-compose/agent && bash rebuild.sh          ║"
         echo "╚══════════════════════════════════════════════════════════════╝"
+        # 政策要求硬閘（prod）時，工具缺席**不得**當成通過：那會讓「發版前必掃弱點」
+        # 這道閘在 agent image 漏裝的當下無聲消失，而 build 照樣是綠的——
+        # 比沒有這道閘更危險，因為它讓人以為掃過了（2026-07-20 稽核 N7）。
+        # warn 政策（dev/main）維持原本的跳過，避免工具問題擋住日常開發。
+        if [[ "${exit_code}" == "1" ]]; then
+            report_error "GOVULN" "002" "政策要求弱點掃描為硬閘（GO_VULN_EXIT_CODE=1）但 govulncheck 不存在——拒絕以「未檢查」冒充「無弱點」。請重建 agent image 後重試。"
+            exit 1
+        fi
         return 0
     fi
-    local exit_code="${GO_VULN_EXIT_CODE:-0}"
     echo "[go-test] govulncheck 掃描（可達性分析；exit-code 政策=${exit_code}）..."
     if govulncheck ./...; then
         echo "[go-test] ✅ 未發現可達弱點"

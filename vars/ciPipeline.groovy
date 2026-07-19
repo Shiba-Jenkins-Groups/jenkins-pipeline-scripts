@@ -310,6 +310,22 @@ def call(Map config = [:]) {
                             )]) {
                                 sh 'bash .pipeline/scripts/cd.sh harbor-push'
                             }
+                            // ── 把 image 參照帶出 workspace ──────────────────────────
+                            // ⚠ 時序陷阱：post.always 的 cleanWs() 早於 post.success 執行，
+                            //   故不可在 success{} 裡 readFile——workspace 那時已清空。
+                            //   在 stage 內讀進 env（env 跨 cleanWs 存活）並存檔，收尾才有東西可印。
+                            script {
+                                if (fileExists('image-ref.txt')) {
+                                    def props = readProperties file: 'image-ref.txt'
+                                    env.BUILT_IMAGE_REF = props.IMAGE_REF ?: ''
+                                    env.BUILT_IMAGE_DIGEST = props.IMAGE_DIGEST ?: ''
+                                    // 讓 build 列表一眼看到版本，不必點進 console
+                                    currentBuild.description = env.BUILT_IMAGE_REF
+                                    archiveArtifacts artifacts: 'image-ref.txt', allowEmptyArchive: true
+                                } else {
+                                    echo '[ciPipeline] image-ref.txt 不存在（未 push？），略過參照輸出'
+                                }
+                            }
                         }
                     }
 
@@ -422,6 +438,25 @@ def call(Map config = [:]) {
             }
             success {
                 echo "Pipeline SUCCESS — ${env.JOB_NAME} #${env.BUILD_NUMBER}"
+                // ── 交出「這次產出哪一顆 image」──────────────────────────────
+                // 原本 ref 只散落在中段 stage 的 log（Tagging/Pushing/smoke/Deploy 各一次），
+                // 收尾不重述 ⇒ 要換版的人得自己翻 log 拼五個欄位，實務上高頻出錯。
+                // env 由 Harbor Push stage 讀入，故不受 post.always 的 cleanWs() 影響。
+                script {
+                    if (env.BUILT_IMAGE_REF) {
+                        echo """
+╔══════════════════════════════════════════════════════════╗
+║  BUILT IMAGE                                             ║
+╠══════════════════════════════════════════════════════════╣
+  ${env.BUILT_IMAGE_REF}
+${env.BUILT_IMAGE_DIGEST ? "  digest: ${env.BUILT_IMAGE_DIGEST}" : ''}
+  拉取：docker pull ${env.BUILT_IMAGE_REF}
+  （此為 host 端可用的參照；Deploy stage 印的 host.docker.internal 形式是 k3s 視角，
+    複製那個到 host 會因 insecure-registry 不匹配而失敗）
+  完整產出物：${env.BUILD_URL}artifact/image-ref.txt
+╚══════════════════════════════════════════════════════════╝"""
+                    }
+                }
             }
         }
     }
