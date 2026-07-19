@@ -101,7 +101,9 @@ harbor_push_if_needed() {
     fi
 
     local registry="${HARBOR_REGISTRY:-localhost:9290}"
-    local harbor_image="${registry}/${APP_NAME}/${APP_NAME}:${BRANCH}-${APP_VERSION}-${BUILD_NUMBER}"
+    # 參照格式的單一產生點（見 common/docker.sh 的 harbor_image_ref）
+    local harbor_image
+    harbor_image="$(harbor_image_ref "${registry}" "${APP_NAME}" "${BRANCH}" "${APP_VERSION}" "${BUILD_NUMBER}")"
 
     # Harbor credentials 由 ciPipeline.groovy withCredentials 注入
     # docker login 失敗時包裝業務層說明，避免只看到 docker daemon 原始訊息
@@ -189,8 +191,9 @@ deploy_if_needed() {
     # envsubst 只替換已 export 的環境變數
     # APP_NAME 由 build.env source 取得，需明確 export 才能被 envsubst 看到
     export APP_NAME
-    # HARBOR_IMAGE 格式：<registry>/<app>/<app>:<branch>-<version>-<build>
-    export HARBOR_IMAGE="${k3s_registry}/${APP_NAME}/${APP_NAME}:${BRANCH}-${APP_VERSION}-${BUILD_NUMBER}"
+    # HARBOR_IMAGE 走與 push 相同的產生器，避免兩處字串各自漂移（見 common/docker.sh）
+    export HARBOR_IMAGE
+    HARBOR_IMAGE="$(harbor_image_ref "${k3s_registry}" "${APP_NAME}" "${BRANCH}" "${APP_VERSION}" "${BUILD_NUMBER}")"
     export NAMESPACE="${namespace}"
     # NODE_PORT 由呼叫端（ciPipeline.groovy 的 devNodePort/prodNodePort 參數）提供，此處僅確保 export 供 envsubst 使用
     export NODE_PORT

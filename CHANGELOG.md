@@ -7,6 +7,40 @@
 
 ---
 
+## [1.23.0] - 2026-07-19
+
+### Changed（Harbor image 命名改階層式：`<app>/<branch>/<version>:<build>`）
+
+- 舊格式 `<app>/<app>:<branch>-<version>-<build>` 使一個專案的所有 image 全擠在**單一
+  repository 平鋪**（實測：claude-project 58 顆、go-ditch 21 顆、woof 11 顆，共 90 顆），
+  既看不出環境與版本層次，也**無法套用 Harbor Tag Retention**——保留規則是 per-repository
+  評估的，全部同一個 repo 就只能「整個專案留 N 個」，粒度沒有意義。
+- 新格式範例：`localhost:9290/shiba-go-ditch-api-project/prod/0.67.2:12`
+- **參照格式收斂為單一產生點** `harbor_image_ref()`（`common/docker.sh`）：先前 push／deploy／
+  smoke 三處各自拼同一個字串，是典型的會漂移寫法。三處改為共用同一函數。
+- ⚠ **一律轉小寫**：OCI 規範要求 repository 名全小寫（tag 才容許大寫）。舊格式把版本放在
+  tag 裡所以 `0.0.1-SNAPSHOT` 沒事；移進路徑後不轉小寫會直接 `invalid reference format`。
+  **claude-project 正是 SNAPSHOT 版號，這是「其他專案比照」時唯一會炸的點**，已測試覆蓋
+  （含反向對照：確認 docker 真的拒絕大寫 repository，證明該轉換不是裝飾）。
+- ⚠ branch 的斜線轉 `-`：`feature/x` 否則會多切一層路徑、破壞「第二層＝環境」的語意。
+
+### Added（`docker.test.sh`：命名產生器迴歸測試）
+
+- 這個函數是四個專案共用的命名單一真相，產出錯誤的症狀會出現在很後面的 stage
+  （push 失敗／k8s ImagePullBackOff／smoke 拉不到），且往往只有其中一個專案壞。
+- 涵蓋各專案實際版號格式、大寫轉換、斜線處理、registry 變體，並**拿 docker 自己驗合法性**
+  （`docker tag` 接受與否），不靠人眼判斷。
+
+### Notes（Harbor 端的配套，非本 repo 程式碼）
+
+- 三個專案已建立 **Tag Retention** 排程（每日 03:00）：`prod/**` 留最近 20、
+  `develop/**`／`main/**` 留最近 10。舊 flat repo 不匹配任何規則 ⇒ 不受影響
+  （已用 dry-run 實證：產生零個 task）。
+- 舊 artifact 已清 86 顆，**保留 4 顆使用中的**（prod compose 容器、prod 驗證 pod、
+  dev pod、claude dev pod）——「全部清空」若照字面執行會讓這些部署重啟時拉不到 image。
+
+---
+
 ## [1.22.1] - 2026-07-19
 
 ### Added（`branch-policy.test.sh`：政策表迴歸測試）

@@ -3,6 +3,31 @@
 
 source "$(dirname "${BASH_SOURCE[0]}")/error-handler.sh"
 
+# harbor_image_ref — Harbor image 完整參照的**單一產生點**（2026-07-19 Shiba 定案的階層命名）
+#
+#   <registry>/<app>/<branch>/<version>:<build>
+#   例：localhost:9290/shiba-go-ditch-api-project/prod/0.67.2:12
+#
+# 為何把 branch 與 version 放進 repository 路徑而非全部塞進 tag：
+#   舊格式 `<app>/<app>:<branch>-<version>-<build>` 使每個專案的所有 image 全擠在單一
+#   repository 底下平鋪（實測 claude-project 累積 58 個 artifact），既看不出環境與版本的
+#   層次，也無法用 Harbor 的 Tag Retention 對「同一版本的歷次 build」做保留規則
+#   （保留規則是 per-repository 評估的）。改成路徑分層後，`develop/0.0.1-snapshot` 這個
+#   repository 保留最近 N 個 build tag 即可，不再無止盡長。
+#
+# ⚠ 一律轉小寫：OCI/Docker 規範要求 **repository 名必須全小寫**（tag 才容許大寫）。
+#   舊格式把版本放在 tag 裡所以 `0.0.1-SNAPSHOT` 沒問題；移進路徑後不轉小寫會直接
+#   `invalid reference format` ——claude-project 正是 SNAPSHOT 版號，這行是它的成敗關鍵。
+# ⚠ branch 的斜線轉為 `-`：feature/xxx 會多切出一層路徑，破壞「第二層＝環境」的語意。
+#   （現行政策 DO_PUSH 只對 develop/main/prod 為 true，此為防禦性處理。）
+harbor_image_ref() {
+    local registry="$1" app="$2" branch="$3" version="$4" build="$5"
+    local safe_branch="${branch//\//-}"
+    local path
+    path="$(printf '%s/%s/%s/%s' "${registry}" "${app}" "${safe_branch}" "${version}" | tr '[:upper:]' '[:lower:]')"
+    printf '%s:%s' "${path}" "${build}"
+}
+
 # 優先順序：
 # 1. 專案根目錄 Dockerfile-{language}
 # 2. 專案根目錄 Dockerfile
