@@ -7,6 +7,24 @@
 
 ---
 
+## [1.22.1] - 2026-07-19
+
+### Added（`branch-policy.test.sh`：政策表迴歸測試）
+
+- 政策表裡有一整類旗標**只有 prod 分支會執行到**（`SCAN_EXIT_CODE=1`／`GO_VULN_EXIT_CODE=1`／
+  `DEP_SCAN_CVSS=7`／`DEPLOY_INPUT_GATE`），develop 跑再多次也碰不到——它們第一次被執行的
+  時刻就是你要發版的那一刻。歷史上正是這個結構咬過人（`--no-tags` 使 prod build 結構上
+  不可能成功，develop 全綠無數次都驗不到）。本測試把「prod 會拿到什麼旗標」變成**離線可驗**。
+- 涵蓋 41 項斷言：四個分支的旗標值、資安不變量（秘密掃描全 branch 開且一律阻斷）、
+  `origin/` 前綴剝除、表內三條不變量（原註解宣稱「測試涵蓋」但測試檔並不存在，此次使其成真）。
+- **stdout 契約斷言**：`ciPipeline.groovy` 靠解析 `print_branch_policy` 的 KEY=VALUE 注入 env；
+  若有人在 `derive` 新增旗標卻忘了在 `print` 補一行，groovy 端會拿到空值且**毫無錯誤訊息**
+  （典型靜默失效）。故斷言兩者 key 集合一致。
+- **已做變異測試驗證測試本身有效**（綠燈不等於有牙齒）：放寬 prod Trivy 硬閘、
+  derive/print 漏同步、feature 分支誤開部署——三種變異全部被抓到。
+
+---
+
 ## [1.22.0] - 2026-07-19
 
 ### Added（Go 專案弱點掃描：govulncheck）
