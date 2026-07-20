@@ -424,6 +424,31 @@ def call(Map config = [:]) {
                 junit allowEmptyResults: true,
                       testResults: 'trivy-results.xml'
 
+                // ── 交出「這次產出哪一顆 image」──────────────────────────────
+                // 原本 ref 只散落在中段 stage 的 log（Tagging/Pushing/smoke/Deploy 各一次），
+                // 收尾不重述 ⇒ 要換版的人得自己翻 log 拼五個欄位，實務上高頻出錯。
+                //
+                // 放在 always 而非 success：develop 的 Trivy 政策是 warn（SCAN_EXIT_CODE=0），
+                // CVE 會進 JUnit XML 使 build 例行變 UNSTABLE——放 success{} 的話，
+                // 最需要這個參照的日常 develop build 反而印不出來（2026-07-20 claude-project #87）。
+                // BUILT_IMAGE_REF 只在 Harbor Push 成功後才有值，故此區塊本身即是「有推上去」的守衛。
+                // env 由 stage 內讀入，不受下方 cleanWs() 影響。
+                script {
+                    if (env.BUILT_IMAGE_REF) {
+                        echo """
+╔══════════════════════════════════════════════════════════╗
+║  BUILT IMAGE                                             ║
+╠══════════════════════════════════════════════════════════╣
+  ${env.BUILT_IMAGE_REF}
+${env.BUILT_IMAGE_DIGEST ? "  digest: ${env.BUILT_IMAGE_DIGEST}" : ''}
+  拉取：docker pull ${env.BUILT_IMAGE_REF}
+  （此為 host 端可用的參照；Deploy stage 印的 host.docker.internal 形式是 k3s 視角，
+    複製那個到 host 會因 insecure-registry 不匹配而失敗）
+  完整產出物：${env.BUILD_URL}artifact/image-ref.txt
+╚══════════════════════════════════════════════════════════╝"""
+                    }
+                }
+
                 // ── Docker dangling image 清理（無 tag 殘留層，每次 build 後自動清除）──
                 sh 'docker image prune -f'
 
@@ -446,25 +471,6 @@ def call(Map config = [:]) {
             }
             success {
                 echo "Pipeline SUCCESS — ${env.JOB_NAME} #${env.BUILD_NUMBER}"
-                // ── 交出「這次產出哪一顆 image」──────────────────────────────
-                // 原本 ref 只散落在中段 stage 的 log（Tagging/Pushing/smoke/Deploy 各一次），
-                // 收尾不重述 ⇒ 要換版的人得自己翻 log 拼五個欄位，實務上高頻出錯。
-                // env 由 Harbor Push stage 讀入，故不受 post.always 的 cleanWs() 影響。
-                script {
-                    if (env.BUILT_IMAGE_REF) {
-                        echo """
-╔══════════════════════════════════════════════════════════╗
-║  BUILT IMAGE                                             ║
-╠══════════════════════════════════════════════════════════╣
-  ${env.BUILT_IMAGE_REF}
-${env.BUILT_IMAGE_DIGEST ? "  digest: ${env.BUILT_IMAGE_DIGEST}" : ''}
-  拉取：docker pull ${env.BUILT_IMAGE_REF}
-  （此為 host 端可用的參照；Deploy stage 印的 host.docker.internal 形式是 k3s 視角，
-    複製那個到 host 會因 insecure-registry 不匹配而失敗）
-  完整產出物：${env.BUILD_URL}artifact/image-ref.txt
-╚══════════════════════════════════════════════════════════╝"""
-                    }
-                }
             }
         }
     }
