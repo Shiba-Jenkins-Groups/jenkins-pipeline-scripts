@@ -9,11 +9,16 @@ detect_java_version() {
     if [[ -f "${WORKSPACE}/pom.xml" ]]; then
         # 優先讀 <java.version>，其次讀 <maven.compiler.source>
         local version
-        version=$(grep -m1 '<java.version>' "${WORKSPACE}/pom.xml" \
-            | sed 's/.*<java.version>\(.*\)<\/java.version>.*/\1/' | tr -d '[:space:]')
+        # ⚠ 兩處結尾的 `|| true` 是必要的：呼叫端在 set -euo pipefail 下執行，pom.xml 沒有
+        #   該標籤時 grep 回 1 ⇒ pipefail 讓 pipeline 回 1 ⇒ 賦值回 1 ⇒ set -e 殺掉腳本。
+        #   那會讓下面這個「找不到 java.version 就改讀 maven.compiler.source」的 fallback
+        #   **永遠不可達**——正是本函數存在的意義（同 cd.sh 的 SMOKE_HEALTH_PATH 事故，
+        #   2026-07-20）。
+        version=$(grep -m1 '<java.version>' "${WORKSPACE}/pom.xml" 2>/dev/null \
+            | sed 's/.*<java.version>\(.*\)<\/java.version>.*/\1/' | tr -d '[:space:]' || true)
         if [[ -z "${version}" ]]; then
-            version=$(grep -m1 '<maven.compiler.source>' "${WORKSPACE}/pom.xml" \
-                | sed 's/.*<maven.compiler.source>\(.*\)<\/maven.compiler.source>.*/\1/' | tr -d '[:space:]')
+            version=$(grep -m1 '<maven.compiler.source>' "${WORKSPACE}/pom.xml" 2>/dev/null \
+                | sed 's/.*<maven.compiler.source>\(.*\)<\/maven.compiler.source>.*/\1/' | tr -d '[:space:]' || true)
         fi
         echo "${version}"
     elif [[ -f "${WORKSPACE}/build.gradle" ]]; then

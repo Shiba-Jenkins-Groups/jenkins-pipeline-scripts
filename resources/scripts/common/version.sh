@@ -42,8 +42,12 @@ version_from_changelog() {
     local file="${workspace}/CHANGELOG.md"
     [[ -f "${file}" ]] || return 1
     local v
+    # ⚠ 結尾 `|| true` 使本函數不依賴呼叫端的位置就安全：現行 resolve_app_version 以
+    #   `if v="$(…)"` 條件位置呼叫（該情境 set -e 不生效），但日後若有人改成直接賦值，
+    #   pipefail 會讓「找不到」變成靜默終止腳本而非回 1（見 pipefail-guard.test.sh）。
+    #   下方 `[[ -n ]] || return 1` 仍是唯一的成敗契約，行為不變。
     v="$(grep -m1 -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+[^]]*\]' "${file}" 2>/dev/null \
-        | sed -E 's/^## \[([^]]+)\]/\1/')"
+        | sed -E 's/^## \[([^]]+)\]/\1/' || true)"
     [[ -n "${v}" ]] || return 1
     echo "${v}"
 }
@@ -52,7 +56,11 @@ version_from_changelog() {
 version_from_git() {
     local workspace="${WORKSPACE:-$(pwd)}"
     local v
-    v="$(git -C "${workspace}" describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')"
+    # ⚠ 結尾 `|| true` 使本函數不依賴呼叫端的位置就安全：現行 resolve_app_version 以
+    #   `if v="$(…)"` 條件位置呼叫（該情境 set -e 不生效），但日後若有人改成直接賦值，
+    #   pipefail 會讓「找不到」變成靜默終止腳本而非回 1（見 pipefail-guard.test.sh）。
+    #   下方 `[[ -n ]] || return 1` 仍是唯一的成敗契約，行為不變。
+    v="$(git -C "${workspace}" describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || true)"
     [[ -n "${v}" ]] || return 1
     echo "${v}"
 }

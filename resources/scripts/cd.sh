@@ -255,7 +255,13 @@ deploy_if_needed() {
     # health 路徑沿用專案既有的 smoke-test.env 契約（SMOKE_HEALTH_PATH），不另立新設定。
     local health_path=""
     if [[ -f "${WORKSPACE}/smoke-test.env" ]]; then
-        health_path="$(grep -E '^SMOKE_HEALTH_PATH=' "${WORKSPACE}/smoke-test.env" | tail -1 | cut -d= -f2- | tr -d '"'"'"'')"
+        # ⚠ 結尾 `|| true` 是必要的：本檔在 set -euo pipefail 下執行，檔案存在但**沒有這個 key**
+        #   時 grep 回 1 ⇒ pipefail 讓 pipeline 回 1 ⇒ 賦值回 1 ⇒ set -e 靜默殺掉整個 deploy。
+        #   下面的 else 分支（「未宣告 SMOKE_HEALTH_PATH ⇒ 僅以 rollout status 為準」）明白表示
+        #   作者本就打算讓缺 key 是合法情形——pipefail 卻讓那條路不可達。
+        #   實例：claude-project 的 smoke-test.env 只有 SPRING_AUTOCONFIGURE_EXCLUDE，
+        #   於是 rollout 成功後整個 build 無聲 FAILURE（2026-07-20 build #86）。
+        health_path="$(grep -E '^SMOKE_HEALTH_PATH=' "${WORKSPACE}/smoke-test.env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"'"'"'' || true)"
     fi
     if [[ -n "${health_path}" ]]; then
         # agent 在 jenkins-network 上，經 host.docker.internal 打 k3d 發佈到 host 的 NodePort
