@@ -45,6 +45,11 @@ assert_flag prod TEST_LEVEL        coverage
 echo "── develop／main：日常路徑（警告不阻斷，痛點不該落在發版日）────────────"
 assert_flag develop SCAN_EXIT_CODE    0
 assert_flag develop GO_VULN_EXIT_CODE 0
+# 2026-07-20 起 develop 也跑依賴掃描：弱點訊號要在日常就出現，不是留到發版日才由 prod 硬閘
+# 攔下來（那會把發版日變成修依賴日）。CVSS=11＝warn only，與本分支其他掃描一致不阻斷。
+# 鎖進測試是因為它「開著也不會讓 build 變紅」⇒ 被誰順手關掉不會有任何人察覺。
+assert_flag develop DO_DEP_SCAN       true
+assert_flag develop DEP_SCAN_CVSS     11
 assert_flag develop DO_DEPLOY         true
 assert_flag develop DEPLOY_NAMESPACE  dev
 assert_flag develop TEST_LEVEL        unit

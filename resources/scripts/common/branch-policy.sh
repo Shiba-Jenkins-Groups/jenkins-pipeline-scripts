@@ -7,6 +7,8 @@
 # ── 政策矩陣 ──────────────────────────────────────────────────────────────────
 # | 旗標              | develop | main     | prod     | 其他  |
 # |-------------------|---------|----------|----------|-------|
+# | DO_DEP_SCAN       | true    | true     | true     | false |
+# | DEP_SCAN_CVSS     | 11(warn)| 11(warn) | 7(fail)  | 11    |
 # | DO_DOCKER_BUILD   | true    | true     | true     | false |
 # | DO_SCAN           | true    | true     | true     | false |
 # | SCAN_EXIT_CODE    | 0(warn) | 0(warn)  | 1(fail)  | 0     |
@@ -37,7 +39,11 @@ derive_branch_policy() {
     case "${branch}" in
         develop)
             DO_SECRET_SCAN=true; SECRET_SCAN_EXIT_CODE=1
-            DO_DEP_SCAN=false; DEP_SCAN_CVSS=11
+            # 2026-07-20 起 develop 也跑依賴掃描（CVSS=11＝warn only，與本分支 Trivy／
+            # govulncheck 一律 warn 的政策一致）。原本關閉的顧慮是速度，但 NVD DB 已快取於
+            # m2（jenkins-agent-cache volume），實測僅 ~15 秒；且 dependency-check.sh 現在會把
+            # 發現摘要印進 console，開著才有意義——弱點訊號要在 develop 就出現，不是留到發版日。
+            DO_DEP_SCAN=true; DEP_SCAN_CVSS=11
             DO_DOCKER_BUILD=true;  DO_SCAN=true; SCAN_EXIT_CODE=0; GO_VULN_EXIT_CODE=0
             DO_PUSH=true;  DO_DEPLOY=true;  DEPLOY_NAMESPACE=dev;  NODE_PORT=""
             DEPLOY_INPUT_GATE=false
