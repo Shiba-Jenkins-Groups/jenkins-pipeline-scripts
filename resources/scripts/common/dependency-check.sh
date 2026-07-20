@@ -44,3 +44,61 @@ echo "[dep-check] OWASP dependency-check ${DC_VERSION}（failBuildOnCVSS=${CVSS}
     -Dformats=HTML,JSON
 
 echo "[dep-check] 依賴掃描完成（report: target/dependency-check-report.html）。"
+
+# ── 把發現「說出來」──────────────────────────────────────────────────────────
+# 為何需要：main 的 failBuildOnCVSS=11（＝官方預設，CVSS 上限只有 10 ⇒ 永不 fail）。
+# 於是掃描跑了、報告出了、build 全綠，**除非有人主動點開 HTML 報告，否則沒人知道掃到什麼**。
+# 實例：claude-project main #14 掃出 9 個有 CVE 的依賴、其中 6 個 CRITICAL（CVSS 9.8，
+# 經版本區間核對為真陽性非 CPE 誤判），而 build 是綠的、無人察覺（2026-07-20 稽核）。
+# 「有價值的資訊不能只躺在報告裡等人去點」——本段只負責讓它出現在 console，
+# 不改變任何閘門行為（門檻仍由 DEP_SCAN_CVSS 決定）。
+# 遙測性質：解析失敗不得反噬掃描結果，故整段 `|| true`。
+summarize_dep_report() {
+    local json="${WORKSPACE}/target/dependency-check-report.json"
+    [[ -f "${json}" ]] || { echo "[dep-check] （無 JSON 報告可摘要）"; return 0; }
+    python3 - "${json}" "${CVSS}" <<'PY' || true
+import json, sys, collections
+try:
+    data = json.load(open(sys.argv[1]))
+except Exception as e:
+    print("[dep-check] 報告解析失敗（不影響掃描結果）：%s" % e); sys.exit(0)
+threshold = float(sys.argv[2])
+rows = []
+for dep in data.get("dependencies", []):
+    vulns = dep.get("vulnerabilities") or []
+    if not vulns:
+        continue
+    top, sev = 0.0, "UNKNOWN"
+    for v in vulns:
+        s = (v.get("cvssv3") or {}).get("baseScore") or (v.get("cvssv2") or {}).get("score") or 0
+        try: s = float(s)
+        except (TypeError, ValueError): s = 0.0
+        if s > top:
+            top, sev = s, (v.get("severity") or "UNKNOWN").upper()
+    rows.append((top, sev, dep.get("fileName", "?"), len(vulns)))
+if not rows:
+    print("[dep-check] ✅ 未發現含已知 CVE 的依賴")
+    sys.exit(0)
+by_sev = collections.Counter(r[1] for r in rows)
+total_cve = sum(r[3] for r in rows)
+over = [r for r in rows if r[0] >= threshold]
+print("")
+print("╔══════════════════════════════════════════════════════════╗")
+print("║  DEPENDENCY CVE SUMMARY                                  ║")
+print("╠══════════════════════════════════════════════════════════╣")
+print("  含已知 CVE 的依賴：%d 個（合計 %d 筆 CVE）" % (len(rows), total_cve))
+print("  最高嚴重度分布：%s" % (", ".join("%s=%d" % (k, by_sev[k])
+      for k in ("CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN") if by_sev.get(k))))
+print("  ── 依最高 CVSS 排序（前 10）──")
+for top, sev, name, n in sorted(rows, reverse=True)[:10]:
+    print("   CVSS %4.1f  %-8s %-42s (%d 筆)" % (top, sev, name[:42], n))
+if threshold > 10:
+    print("  ⚠ 本分支 failBuildOnCVSS=%g（>10 ＝永不阻斷，僅出報告）" % threshold)
+    print("    ⇒ 上列發現**不會**讓 build 變紅。要讓它成為閘門，改 branch-policy.sh 的 DEP_SCAN_CVSS。")
+else:
+    print("  本分支門檻 failBuildOnCVSS=%g ⇒ %d 個依賴超標" % (threshold, len(over)))
+print("  完整報告：Build 頁的「OWASP Dependency-Check Report」")
+print("╚══════════════════════════════════════════════════════════╝")
+PY
+}
+summarize_dep_report || true

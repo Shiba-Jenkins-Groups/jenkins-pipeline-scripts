@@ -403,23 +403,39 @@ def call(Map config = [:]) {
 
                 // 語言中立 Coverage HTML 契約（#2）：各語言 test 腳本統一產至 reports/coverage/index.html
                 // （Java=JaCoCo、Go=go tool cover）；coverage 檔位才產生，allowMissing 避免其他 branch fail
-                publishHTML(target: [
-                    allowMissing          : true,
-                    alwaysLinkToLastBuild : false,
-                    keepAll               : true,
-                    reportDir             : 'reports/coverage',
-                    reportFiles           : 'index.html',
-                    reportName            : 'Coverage Report'
-                ])
-                // OWASP Dependency-Check HTML（Phase 2 預留，allowMissing: true 目前不會 fail）
-                publishHTML(target: [
-                    allowMissing          : true,
-                    alwaysLinkToLastBuild : false,
-                    keepAll               : true,
-                    reportDir             : 'target',
-                    reportFiles           : 'dependency-check-report.html',
-                    reportName            : 'OWASP Dependency-Check Report'
-                ])
+                // 同下方 OWASP 的理由：coverage 僅在 TEST_LEVEL=coverage 時產生，
+                // 不存在時 publishHTML 會印紅色 ERROR（純噪音）。故先判存在再發佈。
+                script {
+                    if (fileExists('reports/coverage/index.html')) {
+                        publishHTML(target: [
+                            allowMissing          : true,
+                            alwaysLinkToLastBuild : false,
+                            keepAll               : true,
+                            reportDir             : 'reports/coverage',
+                            reportFiles           : 'index.html',
+                            reportName            : 'Coverage Report'
+                        ])
+                    }
+                }
+                // OWASP Dependency-Check HTML。
+                // ⚠ 只在報告真的存在時才發佈：allowMissing:true 雖不會讓 build 失敗，
+                //   但 reportDir 不存在時 publishHTML 仍會印一行紅色
+                //   「ERROR: Specified HTML directory '…/target' does not exist.」——
+                //   Go/Node/Python 專案每次 build 都出現（它們沒有 target/，OWASP 走的是
+                //   dependency-check-maven，僅 java/maven 適用）。那是純噪音，卻讓人誤以為
+                //   掃描壞了，也會淹沒真正的錯誤（2026-07-20 稽核）。
+                script {
+                    if (fileExists('target/dependency-check-report.html')) {
+                        publishHTML(target: [
+                            allowMissing          : true,
+                            alwaysLinkToLastBuild : false,
+                            keepAll               : true,
+                            reportDir             : 'target',
+                            reportFiles           : 'dependency-check-report.html',
+                            reportName            : 'OWASP Dependency-Check Report'
+                        ])
+                    }
+                }
                 // Trivy JUnit XML（main / prod branch 才產生，allowEmptyResults 避免其他 branch fail）
                 junit allowEmptyResults: true,
                       testResults: 'trivy-results.xml'
