@@ -29,7 +29,7 @@ ciPipeline(
 |------|------------|
 | Library 變更歷史 | `CHANGELOG.md`（本檔不再重列版本表）|
 | 日常引用版本 | `@main`（各專案 Jenkinsfile）|
-| JCaC fallback | `config/system/jenkins.yaml` → `defaultVersion: "main"` |
+| JCasC fallback | `config/system/jenkins.yaml` → `defaultVersion: "main"` |
 | git tag `vX.Y.Z` | **僅供歷史審計**，不用於日常引用 |
 
 - 升級＝直接 commit 到 main，所有專案下次 build 自動取得，無需改各專案版本號。
@@ -105,4 +105,4 @@ git tag vX.Y.Z -m "vX.Y.Z - 說明" && git push origin main --tags
 - prod branch 發版必須開發者手動打 GitHub tag，否則 pipeline exit 1
 - `DOCKER_BUILDKIT=0` 為必要設定（Agent 環境限制）
 - Dockerfile 優先順序：專案自訂 `Dockerfile-{lang}` > 專案 `Dockerfile` > Library 預設
-- Jenkins Controller 引用設定在 JCaC（`jenkins.yaml`），調整版本後需重啟或 reload
+- Jenkins Controller 引用設定在 JCasC（`jenkins.yaml`），調整版本後需重啟或 reload
