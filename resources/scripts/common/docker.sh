@@ -43,7 +43,8 @@ harbor_image_ref() {
 #   各專案怎麼用這顆 image 是專案自己的事（同 S9 快照被移出本 library 的理由，見 cd.sh）。
 write_image_ref_file() {
     local harbor_image="$1"
-    local out="${WORKSPACE:-.}/image-ref.txt"
+    # 第二參數供同一 commit 產多顆 image 時指定獨立產出物；省略時維持既有 app 契約。
+    local out="${2:-${WORKSPACE:-.}/image-ref.txt}"
     {
         printf 'IMAGE_REF=%s\n' "${harbor_image}"
         printf 'APP_NAME=%s\n' "${APP_NAME:-}"

@@ -5,6 +5,13 @@ def call(Map config = [:]) {
     // nexusCredentials：Nexus 部署帳號 Credential ID（改善計畫 #4a artifact 上傳）
     // 與 harbor 的 per-project robot 不同：全專案共用單一部署帳號，故給預設值免改各專案 Jenkinsfile
     def nexusCredentials = config.nexusCredentials ?: 'nexus-ci-deploy'
+    // 同一 commit 的附加無狀態 image（opt-in）。格式：
+    // additionalImages: [[name: 'receipt-recognition', dockerfile: 'Dockerfile-recognition']]
+    // 未宣告時不增加任何 stage 行為，維持所有既有專案相容。
+    def additionalImages = (config.additionalImages instanceof List) ? config.additionalImages : []
+    def additionalImagesSpec = additionalImages.collect { image ->
+        "${image.name ?: ''}=${image.dockerfile ?: ''}"
+    }.join(',')
 
     // ── 1. Profile 預設矩陣 ──────────────────────────────────────────────────
     // 組織策略層：預定義 pipeline 規模，統一由 Shared Library 維護
@@ -112,6 +119,7 @@ def call(Map config = [:]) {
                                     'scripts/smoke-test.sh',
                                     'scripts/common/error-handler.sh',
                                     'scripts/common/docker.sh',
+                                    'scripts/common/additional-images.sh',
                                     'scripts/common/git-tag.sh',
                                     'scripts/common/version.sh',
                                     'scripts/common/branch-policy.sh',
@@ -162,6 +170,11 @@ def call(Map config = [:]) {
                                     } else if (env.DEPLOY_NAMESPACE == 'prod') {
                                         env.NODE_PORT = (config.prodNodePort ?: error('ciPipeline: prodNodePort is required when DEPLOY_NAMESPACE=prod')).toString()
                                     }
+                                }
+
+                                env.ADDITIONAL_IMAGES = additionalImagesSpec
+                                if (env.ADDITIONAL_IMAGES) {
+                                    echo "[detect] Additional images: ${env.ADDITIONAL_IMAGES}"
                                 }
 
                                 // 驗證後即撤（deployTeardown: true）：k3d pod 只是 CI/CD 驗證閘的專案，
@@ -272,6 +285,11 @@ def call(Map config = [:]) {
                         }
                         steps {
                             sh 'bash .pipeline/scripts/cd.sh docker-build'
+                            script {
+                                if (env.ADDITIONAL_IMAGES) {
+                                    sh 'bash .pipeline/scripts/common/additional-images.sh build'
+                                }
+                            }
                         }
                     }
 
@@ -287,6 +305,11 @@ def call(Map config = [:]) {
                         }
                         steps {
                             sh 'bash .pipeline/scripts/cd.sh image-scan'
+                            script {
+                                if (env.ADDITIONAL_IMAGES) {
+                                    sh 'bash .pipeline/scripts/common/additional-images.sh scan'
+                                }
+                            }
                         }
                         // Trivy JUnit XML 已移至 pipeline post.always 統一收集
                     }
@@ -309,6 +332,11 @@ def call(Map config = [:]) {
                                 passwordVariable: 'HARBOR_PASS'
                             )]) {
                                 sh 'bash .pipeline/scripts/cd.sh harbor-push'
+                                script {
+                                    if (env.ADDITIONAL_IMAGES) {
+                                        sh 'bash .pipeline/scripts/common/additional-images.sh push'
+                                    }
+                                }
                             }
                             // ── 把 image 參照帶出 workspace ──────────────────────────
                             // ⚠ 時序陷阱：post.always 的 cleanWs() 早於 post.success 執行，
@@ -330,6 +358,13 @@ def call(Map config = [:]) {
                                     // 讓 build 列表一眼看到版本，不必點進 console
                                     currentBuild.description = env.BUILT_IMAGE_REF
                                     archiveArtifacts artifacts: 'image-ref.txt', allowEmptyArchive: true
+                                    archiveArtifacts artifacts: 'image-ref-*.txt', allowEmptyArchive: true
+                                    def extraRefs = additionalImages.collect { image ->
+                                        def path = "image-ref-${image.name}.txt"
+                                        if (!fileExists(path)) { return null }
+                                        readFile(path).readLines().find { it.startsWith('IMAGE_REF=') }?.substring('IMAGE_REF='.length())
+                                    }.findAll { it }
+                                    env.BUILT_ADDITIONAL_IMAGE_REFS = extraRefs.join('\n')
                                 } else {
                                     echo '[ciPipeline] image-ref.txt 不存在（未 push？），略過參照輸出'
                                 }
@@ -438,7 +473,7 @@ def call(Map config = [:]) {
                 }
                 // Trivy JUnit XML（main / prod branch 才產生，allowEmptyResults 避免其他 branch fail）
                 junit allowEmptyResults: true,
-                      testResults: 'trivy-results.xml'
+                      testResults: 'trivy-results*.xml'
 
                 // ── 交出「這次產出哪一顆 image」──────────────────────────────
                 // 原本 ref 只散落在中段 stage 的 log（Tagging/Pushing/smoke/Deploy 各一次），
@@ -462,6 +497,9 @@ ${env.BUILT_IMAGE_DIGEST ? "  digest: ${env.BUILT_IMAGE_DIGEST}" : ''}
     複製那個到 host 會因 insecure-registry 不匹配而失敗）
   完整產出物：${env.BUILD_URL}artifact/image-ref.txt
 ╚══════════════════════════════════════════════════════════╝"""
+                    }
+                    if (env.BUILT_ADDITIONAL_IMAGE_REFS) {
+                        echo "ADDITIONAL BUILT IMAGES:\n${env.BUILT_ADDITIONAL_IMAGE_REFS}"
                     }
                 }
 

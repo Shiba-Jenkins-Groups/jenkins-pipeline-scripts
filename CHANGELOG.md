@@ -5,6 +5,14 @@
 
 ## [Unreleased]
 
+### Added（同一 commit 的附加無狀態 image）
+
+- `ciPipeline(additionalImages: ...)` 可讓 opt-in 專案在既有 app image 之外，使用指定 Dockerfile
+  建置、掃描並推送第二顆以上的 independently deployable image。
+- 每顆附加 image 都產生獨立 `image-ref-<name>.txt`；未宣告的既有專案完全不改變。
+- 第一個使用者為 shiba-go-ditch-api 的 `receipt-recognition`，確保 app 與辨識服務來自同一 commit。
+- `additional-images.test.sh` 以 fake Docker／Trivy 驗證 build、scan、push 與 Harbor ref 契約。
+
 ---
 
 ## [1.24.0] - 2026-07-19

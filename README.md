@@ -15,7 +15,9 @@ Jenkins Shared Library，統一管理所有專案的 CI/CD 流程。
 
 ciPipeline(
     githubCredentials: 'github-credentials',
-    harborCredentials: 'harbor-robot-<project>'
+    harborCredentials: 'harbor-robot-<project>',
+    // 選用：同一 commit 產生額外的無狀態服務 image
+    additionalImages: [[name: 'worker', dockerfile: 'Dockerfile-worker']]
 )
 ```
 
