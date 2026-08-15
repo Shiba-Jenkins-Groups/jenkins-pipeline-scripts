@@ -23,6 +23,9 @@ ciPipeline(
 
 > 版本策略：`@main` 單一真相，各專案永遠追蹤最新 main（升級＝commit 到 main，無需改 Jenkinsfile）。
 
+Go 多服務專案可在 `go-pipeline.env` 宣告
+`GO_ADDITIONAL_BINARIES=worker=./cmd/worker`，並以同名 `additionalImages` 封裝第二顆 image。
+
 ---
 
 ## 目錄結構

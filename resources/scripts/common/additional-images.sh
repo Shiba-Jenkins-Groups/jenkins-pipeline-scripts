@@ -67,6 +67,12 @@ for entry in "${ENTRIES[@]}"; do
     case "${STAGE}" in
         build)
             echo "[additional-images] Building ${name}: ${local_image}"
+            staged_binary="${WORKSPACE}/.pipeline/${name}"
+            if [[ -f "${WORKSPACE}/.gobuild/${name}" ]]; then
+                cp "${WORKSPACE}/.gobuild/${name}" "${staged_binary}"
+                chmod 0555 "${staged_binary}"
+                echo "[additional-images] Staged CI binary: .pipeline/${name}"
+            fi
             DOCKER_BUILDKIT=0 docker build \
                 -f "${WORKSPACE}/${dockerfile}" \
                 --build-arg "APP_NAME=${APP_NAME}" \
@@ -74,6 +80,7 @@ for entry in "${ENTRIES[@]}"; do
                 --build-arg "BUILD_NUMBER=${BUILD_NUMBER}" \
                 --build-arg "BRANCH=${BRANCH}" \
                 -t "${local_image}" "${WORKSPACE}"
+            [[ ! -f "${staged_binary}" ]] || rm -f "${staged_binary}"
             ;;
         scan)
             report="${WORKSPACE}/trivy-results-${name}.xml"

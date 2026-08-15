@@ -6,6 +6,8 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "${TMP}"' EXIT
 mkdir -p "${TMP}/ws/.pipeline" "${TMP}/bin"
 touch "${TMP}/ws/Dockerfile-worker"
+mkdir -p "${TMP}/ws/.gobuild"
+printf '#!/bin/sh\n' >"${TMP}/ws/.gobuild/worker"
 cat >"${TMP}/ws/.pipeline/build.env" <<'EOF'
 APP_NAME=demo-app
 APP_VERSION=1.2.3
@@ -40,6 +42,7 @@ bash "${SCRIPT_DIR}/additional-images.sh" scan
 bash "${SCRIPT_DIR}/additional-images.sh" push
 
 grep -q 'docker build .*Dockerfile-worker.*demo-app-worker:1.2.3-42' "${FAKE_LOG}"
+[[ ! -e "${WORKSPACE}/.pipeline/worker" ]]
 grep -q 'trivy image .*demo-app-worker:1.2.3-42' "${FAKE_LOG}"
 grep -q 'docker push localhost:9290/demo-app/worker/develop/1.2.3:42' "${FAKE_LOG}"
 grep -q '^IMAGE_REF=localhost:9290/demo-app/worker/develop/1.2.3:42$' \

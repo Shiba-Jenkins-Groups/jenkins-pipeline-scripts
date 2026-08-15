@@ -12,6 +12,10 @@
 - 每顆附加 image 都產生獨立 `image-ref-<name>.txt`；未宣告的既有專案完全不改變。
 - 第一個使用者為 shiba-go-ditch-api 的 `receipt-recognition`，確保 app 與辨識服務來自同一 commit。
 - `additional-images.test.sh` 以 fake Docker／Trivy 驗證 build、scan、push 與 Harbor ref 契約。
+- Go 專案可用 `GO_ADDITIONAL_BINARIES=name=package` 在既有 Build stage 產出同 commit 靜態
+  binary；附加 image 優先封裝該 artifact，不在 Docker build 內重新下載 modules。
+- `go-build.test.sh` 驗證 app 與附加 main package 會同時產生可執行 artifact。
+- 修正 macOS Bash 3.2 在未設定 build tags 時展開空陣列會被 `set -u` 誤判的既存問題。
 
 ---
 

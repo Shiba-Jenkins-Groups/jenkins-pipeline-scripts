@@ -14,6 +14,7 @@ fi
 
 export GO_MAIN_PKG="${GO_MAIN_PKG:-.}"
 export GO_TEST_PKGS="${GO_TEST_PKGS:-./...}"
+export GO_ADDITIONAL_BINARIES="${GO_ADDITIONAL_BINARIES:-}"
 
 # 依賴快取：Nexus 目前無 go proxy repo，先走官方 proxy（未來建立 go-group 後改指 Nexus）
 export GOPROXY="${GOPROXY:-https://proxy.golang.org,direct}"

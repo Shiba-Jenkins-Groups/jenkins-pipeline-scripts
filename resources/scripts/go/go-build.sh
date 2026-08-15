@@ -4,6 +4,7 @@
 #   GO_MAIN_PKG=./cmd/app/server   ← main package 路徑（預設 .，多 main 專案必填）
 #   GO_TEST_PKGS=./internal/...    ← 測試範圍（預設 ./...，go-test.sh 使用）
 #   GO_LDFLAGS=-s -w               ← 額外 ldflags（選用）
+#   GO_ADDITIONAL_BINARIES=worker=./cmd/worker[,name=./cmd/other]
 # 另：GO_BUILD_TAGS 由 ciPipeline.groovy 依部署 namespace 注入（非本檔宣告，見 devBuildTags 參數）
 
 set -euo pipefail
@@ -27,13 +28,28 @@ if [ -n "${GO_BUILD_TAGS:-}" ]; then
 fi
 
 # 先全量編譯驗證（含未進 artifact 的套件，等同 L0 的 go build ./...）
-go build "${TAGS_ARG[@]}" ./...
+go build ${TAGS_ARG[@]+"${TAGS_ARG[@]}"} ./...
 
 # 產出物：CGO_ENABLED=0 靜態 binary（alpine runtime image 可直接執行）
 # 輸出至 .gobuild/（不污染專案 bin/ 慣例，隨 cleanWs 清理）
 mkdir -p "${WORKSPACE}/.gobuild"
-CGO_ENABLED=0 go build "${TAGS_ARG[@]}" -ldflags "${GO_LDFLAGS:--s -w}" \
+CGO_ENABLED=0 go build ${TAGS_ARG[@]+"${TAGS_ARG[@]}"} -ldflags "${GO_LDFLAGS:--s -w}" \
     -o "${WORKSPACE}/.gobuild/app" "${GO_MAIN_PKG}"
 
 echo "[go-build] Binary: ${WORKSPACE}/.gobuild/app ($(du -h "${WORKSPACE}/.gobuild/app" | cut -f1))"
+
+# 同 commit 的附加 main package。只產 binary，不改 app archive／Nexus 契約；
+# additional-images.sh 會依 image name 自動把同名 binary 放入 Docker build context。
+if [[ -n "${GO_ADDITIONAL_BINARIES:-}" ]]; then
+    IFS=',' read -r -a ADDITIONAL <<<"${GO_ADDITIONAL_BINARIES}"
+    for entry in "${ADDITIONAL[@]}"; do
+        name="${entry%%=*}"
+        pkg="${entry#*=}"
+        [[ "${name}" != "${pkg}" && "${name}" =~ ^[a-z0-9][a-z0-9-]*$ && -n "${pkg}" ]] \
+            || { echo "[go-build] GO_ADDITIONAL_BINARIES 非法：${entry}" >&2; exit 1; }
+        CGO_ENABLED=0 go build ${TAGS_ARG[@]+"${TAGS_ARG[@]}"} -ldflags "${GO_LDFLAGS:--s -w}" \
+            -o "${WORKSPACE}/.gobuild/${name}" "${pkg}"
+        echo "[go-build] Additional binary: ${name} ← ${pkg}"
+    done
+fi
 echo "[go-build] Build completed."
