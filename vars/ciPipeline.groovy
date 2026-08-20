@@ -635,7 +635,10 @@ ${env.BUILT_IMAGE_DIGEST ? "  digest: ${env.BUILT_IMAGE_DIGEST}" : ''}
 
                 // ── Docker dangling image 清理（無 tag 殘留層，每次 build 後自動清除）──
                 script {
-                    if (env.DO_IMAGE_BUILD == 'true') {
+                    // 共享 host Docker daemon 上的全域 prune 可能刪除其他專案的 dangling image。
+                    // 預設保留既有專案行為；需要隔離的專案可明確關閉，改由 host janitor 管理。
+                    def dockerPruneEnabled = config.containsKey('dockerPruneEnabled') ? config.dockerPruneEnabled : true
+                    if (env.DO_IMAGE_BUILD == 'true' && dockerPruneEnabled) {
                         sh 'docker image prune -f'
                     }
                 }
