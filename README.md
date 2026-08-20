@@ -17,7 +17,9 @@ ciPipeline(
     githubCredentials: 'github-credentials',
     harborCredentials: 'harbor-robot-<project>',
     // 選用：同一 commit 產生額外的無狀態服務 image
-    additionalImages: [[name: 'worker', dockerfile: 'Dockerfile-worker']]
+    additionalImages: [[name: 'worker', dockerfile: 'Dockerfile-worker']],
+    // 選用：保存未套 .trivyignore 的 HIGH/CRITICAL raw JSON；gate 仍看 filtered JUnit
+    trivyRawReportEnabled: true
 )
 ```
 
@@ -91,7 +93,7 @@ Prepare（Checkout → Load Scripts → Detect）
 | Test | 依 `TEST_LEVEL` 政策旗標決定測試檔位 |
 | Archive | 產出物命名、上傳 Nexus `raw-artifacts`（版本化路徑，單一真相），寫 build.env |
 | Docker Build | 建置 Docker image（取檔 `ARTIFACT_LOCAL` → Nexus 下載；政策旗標控制）|
-| Image Scan | Trivy 弱點掃描（exit code 依 branch 政策：main=warn、prod=fail）|
+| Image Scan | Trivy 弱點掃描（exit code 依 branch 政策：main=warn、prod=fail）；opt-in 專案另封存未過濾 raw JSON。|
 | Harbor Push | 推送 image 至 Harbor registry |
 | Smoke Test | 以 Harbor image 起容器驗證健康狀態 |
 | Deploy | 部署至 k3s（develop→dev、prod→prod namespace；prod 有 input 人工閘）|

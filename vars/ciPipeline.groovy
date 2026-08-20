@@ -12,6 +12,7 @@ def call(Map config = [:]) {
     // 未宣告時不增加任何 stage 行為，維持所有既有專案相容。
     def additionalImages = (config.additionalImages instanceof List) ? config.additionalImages : []
     def primaryImageEnabled = config.containsKey('primaryImageEnabled') ? config.primaryImageEnabled : true
+    def trivyRawReportEnabled = config.trivyRawReportEnabled ?: false
     def additionalImagesSpec = additionalImages.collect { image ->
         "${image.name ?: ''}=${image.dockerfile ?: ''}"
     }.join(',')
@@ -387,12 +388,14 @@ def call(Map config = [:]) {
                             }
                         }
                         steps {
-                            script {
-                                if (primaryImageEnabled) {
-                                    sh 'bash .pipeline/scripts/cd.sh image-scan'
-                                }
-                                if (env.ADDITIONAL_IMAGES) {
-                                    sh 'bash .pipeline/scripts/common/additional-images.sh scan'
+                            withEnv(["TRIVY_RAW_REPORT_ENABLED=${trivyRawReportEnabled}"]) {
+                                script {
+                                    if (primaryImageEnabled) {
+                                        sh 'bash .pipeline/scripts/cd.sh image-scan'
+                                    }
+                                    if (env.ADDITIONAL_IMAGES) {
+                                        sh 'bash .pipeline/scripts/common/additional-images.sh scan'
+                                    }
                                 }
                             }
                         }
@@ -564,6 +567,8 @@ def call(Map config = [:]) {
                 // archiveArtifacts 必須在 cleanWs 之前，否則檔案已被清除
                 // allowEmptyArchive: true — 報告不存在時（無 secret scan）不 fail
                 archiveArtifacts artifacts: 'gitleaks-report.json',
+                                 allowEmptyArchive: true
+                archiveArtifacts artifacts: 'trivy-results*.xml,trivy-results-raw*.json',
                                  allowEmptyArchive: true
 
                 // 語言中立 Coverage HTML 契約（#2）：各語言 test 腳本統一產至 reports/coverage/index.html

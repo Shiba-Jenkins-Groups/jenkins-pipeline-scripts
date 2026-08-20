@@ -139,6 +139,7 @@ image_scan_if_needed() {
     # trivy-results.xml 輸出至 WORKSPACE 根目錄，供 ciPipeline.groovy junit step 收集
     # trivy-cache 存於 WORKSPACE 下，隨 cleanWs 清理（避免額外 volume 掛載）
     local trivy_report="${WORKSPACE:-$(pwd)}/trivy-results.xml"
+    local trivy_raw_report="${WORKSPACE:-$(pwd)}/trivy-results-raw.json"
     local trivy_cache="${WORKSPACE:-$(pwd)}/.trivy-cache"
 
     # Trivy 不支援 --format junit，需透過 template 輸出 JUnit XML
@@ -152,6 +153,21 @@ image_scan_if_needed() {
     if [[ -f "${trivy_ignorefile}" ]]; then
         echo "[cd] 套用 .trivyignore（${trivy_ignorefile}）"
         ignore_args=(--ignorefile "${trivy_ignorefile}")
+    fi
+
+    # Raw evidence 與 gate 分離：raw 永不套 ignore、永不直接改變 build result；filtered
+    # scan 才依 branch policy 與專案例外決定 gate。只對明確 opt-in 專案產生，避免所有
+    # 既有 pipeline 無條件增加一次 registry/database scan。
+    if [[ "${TRIVY_RAW_REPORT_ENABLED:-false}" == "true" ]]; then
+        echo "[cd] Writing unfiltered Trivy evidence: ${trivy_raw_report}"
+        trivy image \
+            --exit-code 0 \
+            --severity HIGH,CRITICAL \
+            --scanners vuln \
+            --cache-dir "${trivy_cache}" \
+            --format json \
+            --output "${trivy_raw_report}" \
+            "${IMAGE_TAG}"
     fi
 
     echo "[cd] Running Trivy image scan: ${IMAGE_TAG} (branch: ${BRANCH}, exit-code: ${trivy_exit_code})"
