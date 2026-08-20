@@ -21,28 +21,32 @@ ASKPASS_EOF
     echo "${askpass}"
 }
 
-# Jenkins checkout 預設 noTags（避免 clone 拖一堆 tag 拖慢），但 prod 分支
-# 靠 `git describe --tags` 找手動打的 tag——describe 前得先把 tag 抓下來，
-# 否則剛 push 的 tag 在本地 workspace 看不到（G: 2026-07-19 實測踩坑）。
-fetch_git_tags() {
-    local remote_url
-    remote_url="$(git remote get-url origin)"
-
+_git_with_askpass() {
     local askpass
     askpass="$(_make_git_askpass)"
+    # 展開當下的隨機路徑，避免 RETURN 時 local 變數已離開作用域。
+    # shellcheck disable=SC2064
     trap "rm -f '${askpass}'" RETURN
-
     GIT_ASKPASS="${askpass}" \
     GIT_ASKPASS_USER="${GITHUB_CREDENTIALS_USR}" \
     GIT_ASKPASS_PASS="${GITHUB_CREDENTIALS_PSW}" \
-    GIT_TERMINAL_PROMPT=0 \
-        git fetch --tags --force "${remote_url}" 2>/dev/null || true
+    GIT_TERMINAL_PROMPT=0 "$@"
+}
+
+remote_tag_commit() {
+    local tag="${1:?tag is required}" remote_url output
+    remote_url="$(git remote get-url origin)"
+    output="$(_git_with_askpass git ls-remote --tags "${remote_url}" \
+        "refs/tags/${tag}" "refs/tags/${tag}^{}")"
+    awk -v peeled="refs/tags/${tag}^{}" -v direct="refs/tags/${tag}" \
+        '$2 == peeled { print $1; found=1; exit } $2 == direct { fallback=$1 } END { if (!found && fallback) print fallback }' \
+        <<<"${output}"
 }
 
 # Branch → tag prefix 對應
-# develop  → ci-dev-{BUILD_NUMBER}
+# develop  → ci-dev-{BUILD_NUMBER}（專案可透過 gitTagEnabled:false 關閉）
 # main     → ci-main-{BUILD_NUMBER}
-# prod     → 開發者手動打 tag，不自動建立
+# prod     → 由已通過 strict verification 的 release finalization 建立 v{APP_VERSION}
 # 其他     → ci-{branch}-{BUILD_NUMBER}
 resolve_git_tag() {
     local branch="${1}"
@@ -56,15 +60,15 @@ resolve_git_tag() {
             echo "ci-main-${build_number}"
             ;;
         prod)
-            # prod 使用手動打的 tag，從 git describe 取得（先 fetch --tags，見上）
-            fetch_git_tags
-            local tag
-            tag="$(git describe --tags --exact-match HEAD 2>/dev/null || true)"
-            if [[ -z "${tag}" ]]; then
-                echo "[ERROR] prod branch requires a manual git tag. Please tag the commit before triggering pipeline." >&2
+            local version="${RELEASE_VERSION:-${APP_VERSION:-}}"
+            version="${version#v}"
+            version="${version%-SNAPSHOT}"
+            version="${version%-RC}"
+            if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                echo "[ERROR] prod release requires an exact SemVer APP_VERSION (got: ${version:-empty})." >&2
                 exit 1
             fi
-            echo "${tag}"
+            echo "v${version}"
             ;;
         *)
             local safe_branch
@@ -79,23 +83,31 @@ push_git_tag() {
     local remote_url
     remote_url="$(git remote get-url origin)"
 
-    # prod 路徑：resolve_git_tag 已透過 fetch_git_tags 把手動打的 tag 抓下來，
-    # 本地已存在同名 tag ref，此時只需重推（no-op）；develop/main 才是全新建立。
-    git rev-parse -q --verify "refs/tags/${tag}" >/dev/null || git tag "${tag}"
+    local head remote_commit local_commit
+    head="$(git rev-parse HEAD)"
+    remote_commit="$(remote_tag_commit "${tag}")"
+    if [[ -n "${remote_commit}" ]]; then
+        if [[ "${remote_commit}" == "${head}" ]]; then
+            echo "[git-tag] Tag already exists on this commit: ${tag}"
+            return 0
+        fi
+        report_error "GIT_TAG" "002" "Immutable tag ${tag} already points to ${remote_commit}; refusing to move it to ${head}."
+        return 1
+    fi
+
+    if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+        local_commit="$(git rev-list -n 1 "${tag}")"
+        if [[ "${local_commit}" != "${head}" ]]; then
+            report_error "GIT_TAG" "003" "Local tag ${tag} points to ${local_commit}; refusing to move it to ${head}."
+            return 1
+        fi
+    else
+        git tag -a "${tag}" -m "Release ${tag}"
+    fi
 
     # 憑證以 GIT_ASKPASS 提供（走 env，不塞進 URL）——避免 token 洩漏於
     # `ps` 的 command args（世界可讀，Jenkins console mask 不涵蓋）與 git push 失敗訊息。
-    local askpass
-    askpass="$(_make_git_askpass)"
-    # 函數返回時清掉臨時 askpass（含失敗路徑）
-    # shellcheck disable=SC2064
-    trap "rm -f '${askpass}'" RETURN
-
-    GIT_ASKPASS="${askpass}" \
-    GIT_ASKPASS_USER="${GITHUB_CREDENTIALS_USR}" \
-    GIT_ASKPASS_PASS="${GITHUB_CREDENTIALS_PSW}" \
-    GIT_TERMINAL_PROMPT=0 \
-        git push "${remote_url}" "${tag}"
+    _git_with_askpass git push "${remote_url}" "refs/tags/${tag}"
 
     echo "[git-tag] Pushed tag: ${tag}"
 }

@@ -88,7 +88,12 @@ zip -r "${ARTIFACT_PATH}" . \
 echo "[node-archive] zip created: ${ARTIFACT_PATH}"
 
 # ── 上傳 Nexus raw-artifacts（#4b 起單一真相：版本化路徑＝防覆蓋防競態）──────
-NEXUS_ARTIFACT_URL="$(nexus_upload_artifact "${APP_NAME}" "${BRANCH}" "${BASE_VERSION}" "${BUILD_NUMBER}" "${ARTIFACT_PATH}")"
+NEXUS_ARTIFACT_URL=""
+if [[ "${DO_ARCHIVE_ARTIFACT_PUBLISH:-${DO_ARTIFACT_PUBLISH:-false}}" == "true" ]]; then
+    NEXUS_ARTIFACT_URL="$(nexus_upload_artifact "${APP_NAME}" "${BRANCH}" "${BASE_VERSION}" "${BUILD_NUMBER}" "${ARTIFACT_PATH}")"
+else
+    echo "[node-archive] Artifact publish disabled by branch policy."
+fi
 # staging 檔保留供 Docker Build 精確取用（拋棄式 agent，/tmp 隨容器回收，不需 rm）
 
 # ── 寫入 build.env（供後續 Docker Build stage 讀取）─────────────────────────
@@ -107,9 +112,13 @@ EOF
 echo "[node-archive] build.env written."
 
 # ── Git Tag ───────────────────────────────────────────────────────────────────
-GIT_TAG_NAME="$(resolve_git_tag "${BRANCH}" "${BUILD_NUMBER}")"
-export GIT_TAG_NAME
-echo "[node-archive] git tag: ${GIT_TAG_NAME}"
-push_git_tag "${GIT_TAG_NAME}"
+if [[ "${DO_ARCHIVE_GIT_TAG:-${DO_GIT_TAG:-false}}" == "true" ]]; then
+    GIT_TAG_NAME="$(resolve_git_tag "${BRANCH}" "${BUILD_NUMBER}")"
+    export GIT_TAG_NAME
+    echo "[node-archive] git tag: ${GIT_TAG_NAME}"
+    push_git_tag "${GIT_TAG_NAME}"
+else
+    echo "[node-archive] Git tag disabled by branch policy."
+fi
 
 echo "[node-archive] Archive completed."

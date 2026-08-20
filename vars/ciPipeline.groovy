@@ -1,5 +1,7 @@
 def call(Map config = [:]) {
     def githubCredentials = config.githubCredentials ?: error('githubCredentials is required')
+    // release writer 與 SCM checkout 分權。未設定時沿用舊 credential，維持其他專案相容。
+    def githubReleaseCredentials = config.githubReleaseCredentials ?: githubCredentials
     // harborCredentials：Harbor Robot Account Credential ID（Jenkins Credentials 中定義）
     def harborCredentials = config.harborCredentials ?: error('harborCredentials is required')
     // nexusCredentials：Nexus 部署帳號 Credential ID（改善計畫 #4a artifact 上傳）
@@ -9,9 +11,15 @@ def call(Map config = [:]) {
     // additionalImages: [[name: 'receipt-recognition', dockerfile: 'Dockerfile-recognition']]
     // 未宣告時不增加任何 stage 行為，維持所有既有專案相容。
     def additionalImages = (config.additionalImages instanceof List) ? config.additionalImages : []
+    def primaryImageEnabled = config.containsKey('primaryImageEnabled') ? config.primaryImageEnabled : true
     def additionalImagesSpec = additionalImages.collect { image ->
         "${image.name ?: ''}=${image.dockerfile ?: ''}"
     }.join(',')
+    def sourceBranch = (env.CHANGE_BRANCH ?: env.BRANCH_NAME ?: env.GIT_BRANCH ?: '').replaceFirst('^origin/', '')
+    // Fail closed：只有三個明確可信 branch 可取得 image-builder；PR 與所有未知 branch
+    // 一律進無 Docker socket／無發布 credential 的 ci-untrusted。
+    def trustedBranch = !env.CHANGE_ID?.trim() && ['develop', 'main', 'prod'].contains(sourceBranch)
+    def selectedAgentLabel = trustedBranch ? 'ci-image-builder' : 'ci-untrusted'
 
     // ── 1. Profile 預設矩陣 ──────────────────────────────────────────────────
     // 組織策略層：預定義 pipeline 規模，統一由 Shared Library 維護
@@ -63,22 +71,16 @@ def call(Map config = [:]) {
     echo "[ciPipeline] profile  : ${profileName}"
     echo "[ciPipeline] ciStages : ${ciStages}"
     echo "[ciPipeline] cdStages : ${cdStages}"
+    echo "[ciPipeline] agent   : ${selectedAgentLabel}"
 
     pipeline {
         agent {
-            label 'docker-agent'
+            label "${selectedAgentLabel}"
         }
 
         options {
             timestamps()
             disableConcurrentBuilds()
-        }
-
-        environment {
-            GITHUB_CREDENTIALS = credentials("${githubCredentials}")
-            // usernamePassword 型 credential 自動展開 NEXUS_CRED_USR / NEXUS_CRED_PSW，
-            // 供 nexus-upload.sh（Archive 上傳／cd.sh 下載）使用
-            NEXUS_CRED = credentials("${nexusCredentials}")
         }
 
         stages {
@@ -126,6 +128,7 @@ def call(Map config = [:]) {
                                     'scripts/common/nexus-upload.sh',
                                     'scripts/common/secret-scan.sh',
                                     'scripts/common/dependency-check.sh',
+                                    'scripts/common/release-finalize.sh',
                                 ]
                                 for (lang in LANGUAGES) {
                                     for (step in LANG_STEPS) {
@@ -149,6 +152,7 @@ def call(Map config = [:]) {
                     stage('Detect') {
                         steps {
                             script {
+                                env.PROJECT_MAIN_ENABLED = (config.containsKey('projectMainEnabled') ? config.projectMainEnabled : true).toString()
                                 // detect.sh：語言偵測；branch-policy.sh：branch 政策旗標（單一真相表）
                                 // 兩者皆以 KEY=VALUE 輸出，統一解析後注入 env，供 when 條件與下游腳本讀取
                                 def output = sh(
@@ -159,6 +163,39 @@ def call(Map config = [:]) {
                                     def parts = line.split('=', 2)
                                     if (parts.size() == 2) {
                                         env[parts[0].trim()] = parts[1].trim()
+                                    }
+                                }
+                                // 專案參數只能收緊中央 policy，不能把 feature/hotfix/PR 的 false
+                                // 放寬為 true；避免 branch-controlled Jenkinsfile 取得發布憑證。
+                                if (config.containsKey('artifactPublishEnabled') && config.artifactPublishEnabled == false) {
+                                    env.DO_ARTIFACT_PUBLISH = 'false'
+                                }
+                                if (config.containsKey('gitTagEnabled') && config.gitTagEnabled == false) {
+                                    env.DO_GIT_TAG = 'false'
+                                }
+                                if (config.developGitTagEnabled == false && env.POLICY_NAME == 'develop') {
+                                    env.DO_GIT_TAG = 'false'
+                                }
+
+                                // shiba 的 PROD release 必須等 strict scan、image 與 k3s verification
+                                // 全數通過後才發布 artifact/tag。其他專案預設維持既有時序。
+                                env.DEFER_RELEASE_FINALIZATION = (config.releaseFinalizeAfterVerification == true).toString()
+                                def deferThisRelease = env.DEFER_RELEASE_FINALIZATION == 'true' && env.DO_PROD_DEPLOY == 'true'
+                                env.DO_ARCHIVE_ARTIFACT_PUBLISH = (env.DO_ARTIFACT_PUBLISH == 'true' && !deferThisRelease).toString()
+                                env.DO_ARCHIVE_GIT_TAG = (env.DO_GIT_TAG == 'true' && !deferThisRelease).toString()
+
+                                if (env.CHANGE_ID) {
+                                    def forbidden = [
+                                        DO_ARTIFACT_PUBLISH: env.DO_ARTIFACT_PUBLISH,
+                                        DO_GIT_TAG: env.DO_GIT_TAG,
+                                        DO_IMAGE_BUILD: env.DO_IMAGE_BUILD,
+                                        DO_IMAGE_PUSH: env.DO_IMAGE_PUSH,
+                                        DO_K3S_VERIFY: env.DO_K3S_VERIFY,
+                                        DO_RUNTIME_DEPLOY: env.DO_RUNTIME_DEPLOY,
+                                        DO_PROD_DEPLOY: env.DO_PROD_DEPLOY,
+                                    ].findAll { key, value -> value == 'true' }
+                                    if (forbidden) {
+                                        error("PR policy invariant violated: ${forbidden.keySet().join(', ')}")
                                     }
                                 }
 
@@ -198,8 +235,9 @@ def call(Map config = [:]) {
                                 }
 
                                 echo "[detect] Language: ${env.LANGUAGE}, BuildTool: ${env.BUILD_TOOL}"
-                                echo "[detect] Policy: DO_SECRET_SCAN=${env.DO_SECRET_SCAN}(exit=${env.SECRET_SCAN_EXIT_CODE}), DO_DEP_SCAN=${env.DO_DEP_SCAN}(cvss=${env.DEP_SCAN_CVSS}), DO_DOCKER_BUILD=${env.DO_DOCKER_BUILD}, DO_SCAN=${env.DO_SCAN}(exit=${env.SCAN_EXIT_CODE}), " +
-                                     "DO_PUSH=${env.DO_PUSH}, DO_DEPLOY=${env.DO_DEPLOY}(ns=${env.DEPLOY_NAMESPACE}, port=${env.NODE_PORT}), TEST_LEVEL=${env.TEST_LEVEL}, GO_BUILD_TAGS=${env.GO_BUILD_TAGS ?: '(none)'}"
+                                echo "[detect] Policy: event=${env.PIPELINE_EVENT}, trust=${env.PIPELINE_TRUST}, package=${env.DO_PACKAGE}, publish=${env.DO_ARTIFACT_PUBLISH}, tag=${env.DO_GIT_TAG}, " +
+                                     "image=${env.DO_IMAGE_BUILD}/${env.DO_IMAGE_PUSH}, k3s=${env.DO_K3S_VERIFY}, runtime=${env.DO_RUNTIME_DEPLOY}, prod=${env.DO_PROD_DEPLOY}, " +
+                                     "ns=${env.DEPLOY_NAMESPACE}, port=${env.NODE_PORT}, TEST_LEVEL=${env.TEST_LEVEL}, GO_BUILD_TAGS=${env.GO_BUILD_TAGS ?: '(none)'}"
                             }
                         }
                     }
@@ -244,24 +282,67 @@ def call(Map config = [:]) {
                         }
                     }
 
+                    stage('Fast Contract Test') {
+                        when { expression { ciStages.test && config.fastContractCommand } }
+                        steps {
+                            // 命令來自 trusted Jenkinsfile；untrusted discovery 在具備中央固定
+                            // Jenkinsfile 前保持關閉。此 stage 專注 API/config contract，不啟動 runtime。
+                            sh config.fastContractCommand.toString()
+                        }
+                    }
+
                     stage('Dependency Scan') {
                         // OWASP Dependency-Check（第三方依賴 CVE，Security Phase 2）
                         // DO_DEP_SCAN 由 branch-policy 決定（main warn / prod fail）；語言 guard 在腳本內（僅 java/maven）
                         // 置 Archive 前：prod 依賴含高危 CVE 時擋在打 tag／發佈 artifact 之前
                         when { expression { env.DO_DEP_SCAN == 'true' } }
                         steps {
-                            // NVD API key 由 credential 綁定注入 env（console 自動 mask）
-                            withCredentials([string(credentialsId: 'nvd-api-key', variable: 'NVD_API_KEY')]) {
-                                sh "bash .pipeline/scripts/common/dependency-check.sh"
+                            script {
+                                if (env.PIPELINE_TRUST == 'trusted') {
+                                    withCredentials([string(credentialsId: 'nvd-api-key', variable: 'NVD_API_KEY')]) {
+                                        sh "bash .pipeline/scripts/common/dependency-check.sh"
+                                    }
+                                } else {
+                                    // PR/hotfix 不注入 credential；scanner 以無 NVD key 模式執行。
+                                    sh "bash .pipeline/scripts/common/dependency-check.sh"
+                                }
                             }
                         }
                     }
 
-                    stage('Archive') {
-                        // ciStages.archive = false 時跳過（build: false 時依賴推導自動關閉）
-                        when { expression { ciStages.archive } }
+                    stage('Package / Publish / Tag') {
+                        when {
+                            allOf {
+                                expression { ciStages.archive }
+                                expression { env.DO_PACKAGE == 'true' }
+                            }
+                        }
                         steps {
-                            sh "bash .pipeline/scripts/${env.LANGUAGE}/${env.LANGUAGE}-archive.sh"
+                            script {
+                                if (env.DO_ARCHIVE_ARTIFACT_PUBLISH == 'true' && env.DO_ARCHIVE_GIT_TAG == 'true') {
+                                    withCredentials([
+                                        usernamePassword(credentialsId: githubReleaseCredentials,
+                                            usernameVariable: 'GITHUB_CREDENTIALS_USR', passwordVariable: 'GITHUB_CREDENTIALS_PSW'),
+                                        usernamePassword(credentialsId: nexusCredentials,
+                                            usernameVariable: 'NEXUS_CRED_USR', passwordVariable: 'NEXUS_CRED_PSW')
+                                    ]) {
+                                        sh "bash .pipeline/scripts/${env.LANGUAGE}/${env.LANGUAGE}-archive.sh"
+                                    }
+                                } else if (env.DO_ARCHIVE_ARTIFACT_PUBLISH == 'true') {
+                                    withCredentials([usernamePassword(credentialsId: nexusCredentials,
+                                        usernameVariable: 'NEXUS_CRED_USR', passwordVariable: 'NEXUS_CRED_PSW')]) {
+                                        sh "bash .pipeline/scripts/${env.LANGUAGE}/${env.LANGUAGE}-archive.sh"
+                                    }
+                                } else if (env.DO_ARCHIVE_GIT_TAG == 'true') {
+                                    withCredentials([usernamePassword(credentialsId: githubReleaseCredentials,
+                                        usernameVariable: 'GITHUB_CREDENTIALS_USR', passwordVariable: 'GITHUB_CREDENTIALS_PSW')]) {
+                                        sh "bash .pipeline/scripts/${env.LANGUAGE}/${env.LANGUAGE}-archive.sh"
+                                    }
+                                } else {
+                                    // 無發布副作用，或 PROD release 已延後；只在 workspace 打包。
+                                    sh "bash .pipeline/scripts/${env.LANGUAGE}/${env.LANGUAGE}-archive.sh"
+                                }
+                            }
                         }
                     }
 
@@ -284,8 +365,10 @@ def call(Map config = [:]) {
                             }
                         }
                         steps {
-                            sh 'bash .pipeline/scripts/cd.sh docker-build'
                             script {
+                                if (primaryImageEnabled) {
+                                    sh 'bash .pipeline/scripts/cd.sh docker-build'
+                                }
                                 if (env.ADDITIONAL_IMAGES) {
                                     sh 'bash .pipeline/scripts/common/additional-images.sh build'
                                 }
@@ -304,8 +387,10 @@ def call(Map config = [:]) {
                             }
                         }
                         steps {
-                            sh 'bash .pipeline/scripts/cd.sh image-scan'
                             script {
+                                if (primaryImageEnabled) {
+                                    sh 'bash .pipeline/scripts/cd.sh image-scan'
+                                }
                                 if (env.ADDITIONAL_IMAGES) {
                                     sh 'bash .pipeline/scripts/common/additional-images.sh scan'
                                 }
@@ -331,8 +416,10 @@ def call(Map config = [:]) {
                                 usernameVariable: 'HARBOR_USER',
                                 passwordVariable: 'HARBOR_PASS'
                             )]) {
-                                sh 'bash .pipeline/scripts/cd.sh harbor-push'
                                 script {
+                                    if (primaryImageEnabled) {
+                                        sh 'bash .pipeline/scripts/cd.sh harbor-push'
+                                    }
                                     if (env.ADDITIONAL_IMAGES) {
                                         sh 'bash .pipeline/scripts/common/additional-images.sh push'
                                     }
@@ -343,7 +430,7 @@ def call(Map config = [:]) {
                             //   故不可在 success{} 裡 readFile——workspace 那時已清空。
                             //   在 stage 內讀進 env（env 跨 cleanWs 存活）並存檔，收尾才有東西可印。
                             script {
-                                if (fileExists('image-ref.txt')) {
+                                if (primaryImageEnabled && fileExists('image-ref.txt')) {
                                     // ⚠ 用 readFile 自行解析，**不要用 readProperties**——後者屬
                                     //   pipeline-utility-steps plugin，本 Jenkins 未安裝，會拋
                                     //   NoSuchMethodError 讓整個 Harbor Push stage 變紅
@@ -365,8 +452,28 @@ def call(Map config = [:]) {
                                         readFile(path).readLines().find { it.startsWith('IMAGE_REF=') }?.substring('IMAGE_REF='.length())
                                     }.findAll { it }
                                     env.BUILT_ADDITIONAL_IMAGE_REFS = extraRefs.join('\n')
-                                } else {
+                                } else if (primaryImageEnabled) {
                                     echo '[ciPipeline] image-ref.txt 不存在（未 push？），略過參照輸出'
+                                }
+                                if (!primaryImageEnabled && additionalImages) {
+                                    def firstPath = "image-ref-${additionalImages[0].name}.txt"
+                                    if (fileExists(firstPath)) {
+                                        def firstProps = [:]
+                                        readFile(firstPath).split('\n').each { line ->
+                                            int i = line.indexOf('=')
+                                            if (i > 0) { firstProps[line.substring(0, i).trim()] = line.substring(i + 1).trim() }
+                                        }
+                                        env.BUILT_IMAGE_REF = firstProps['IMAGE_REF'] ?: ''
+                                        env.BUILT_IMAGE_DIGEST = firstProps['IMAGE_DIGEST'] ?: ''
+                                        currentBuild.description = env.BUILT_IMAGE_REF
+                                    }
+                                    def extraRefs = additionalImages.collect { image ->
+                                        def path = "image-ref-${image.name}.txt"
+                                        if (!fileExists(path)) { return null }
+                                        readFile(path).readLines().find { it.startsWith('IMAGE_REF=') }?.substring('IMAGE_REF='.length())
+                                    }.findAll { it }
+                                    env.BUILT_ADDITIONAL_IMAGE_REFS = extraRefs.join('\n')
+                                    archiveArtifacts artifacts: 'image-ref-*.txt', allowEmptyArchive: false
                                 }
                             }
                         }
@@ -389,7 +496,7 @@ def call(Map config = [:]) {
                         }
                     }
 
-                    stage('Deploy') {
+                    stage('Deployment Verification — k3s') {
                         when {
                             allOf {
                                 expression { env.DO_DEPLOY == 'true' }
@@ -409,6 +516,29 @@ def call(Map config = [:]) {
                             withCredentials([file(credentialsId: 'k3s-kubeconfig', variable: 'KUBECONFIG')]) {
                                 sh 'bash .pipeline/scripts/cd.sh deploy'
                             }
+                        }
+                    }
+
+                    stage('Release Finalization — Artifact / Git Tag') {
+                        when {
+                            allOf {
+                                expression { env.DEFER_RELEASE_FINALIZATION == 'true' }
+                                expression { env.DO_PROD_DEPLOY == 'true' }
+                                expression { env.DO_GIT_TAG == 'true' }
+                                expression { env.DO_K3S_VERIFY == 'true' }
+                                expression { cdStages.deploy }
+                            }
+                        }
+                        steps {
+                            withCredentials([
+                                usernamePassword(credentialsId: githubReleaseCredentials,
+                                    usernameVariable: 'GITHUB_CREDENTIALS_USR', passwordVariable: 'GITHUB_CREDENTIALS_PSW'),
+                                usernamePassword(credentialsId: nexusCredentials,
+                                    usernameVariable: 'NEXUS_CRED_USR', passwordVariable: 'NEXUS_CRED_PSW')
+                            ]) {
+                                sh 'bash .pipeline/scripts/common/release-finalize.sh'
+                            }
+                            archiveArtifacts artifacts: '.pipeline/release-manifest.env', allowEmptyArchive: false
                         }
                     }
 
@@ -504,7 +634,11 @@ ${env.BUILT_IMAGE_DIGEST ? "  digest: ${env.BUILT_IMAGE_DIGEST}" : ''}
                 }
 
                 // ── Docker dangling image 清理（無 tag 殘留層，每次 build 後自動清除）──
-                sh 'docker image prune -f'
+                script {
+                    if (env.DO_IMAGE_BUILD == 'true') {
+                        sh 'docker image prune -f'
+                    }
+                }
 
                 cleanWs()
             }
