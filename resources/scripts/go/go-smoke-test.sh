@@ -54,11 +54,23 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# ── 輪詢等待應用程式啟動（Dockerfile-go 已含 curl）───────────────────────────
+# ── 輪詢等待應用程式啟動 ────────────────────────────────────────────────────
+# Distroless image 不含 shell／curl；若 image 宣告 Docker HEALTHCHECK，直接讀 daemon
+# 的 health 狀態。舊 image 沒有 HEALTHCHECK 時才保留 container 內 curl 相容路徑。
 echo "[go-smoke] Waiting for HTTP 200 on ${HEALTH_PATH} (max ${MAX_WAIT}s)..."
 elapsed=0
-until docker exec "${CONTAINER_NAME}" \
-    curl -sf "http://localhost:${APP_PORT}${HEALTH_PATH}" > /dev/null 2>&1; do
+probe_healthy() {
+    local health_status
+    health_status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "${CONTAINER_NAME}" 2>/dev/null || true)"
+    if [[ -n "${health_status}" ]]; then
+        [[ "${health_status}" == "healthy" ]]
+        return
+    fi
+    docker exec "${CONTAINER_NAME}" \
+        curl -sf "http://localhost:${APP_PORT}${HEALTH_PATH}" > /dev/null 2>&1
+}
+
+until probe_healthy; do
     sleep 5
     elapsed=$((elapsed + 5))
     echo "[go-smoke] Waiting... ${elapsed}s"
