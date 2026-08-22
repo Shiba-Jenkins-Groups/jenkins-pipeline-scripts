@@ -26,6 +26,12 @@
   auto-rescan 最新結果成獨立 Jenkins 快照，不嘗試回填已完成的歷史 build。
 - Harbor API／權限／timeout 錯誤將 app build 標為 UNSTABLE，但不抹掉已成功 push 的 image。
 
+### Fixed（Harbor API 的容器網路視角）
+
+- 修正 Agent 由 image ref 推導 `http://localhost:9290`，實際連到 Agent 自己而得到
+  `Connection refused`；app scan 與每日 sync 預設均改走 Docker host gateway
+  `http://host.docker.internal:9290`，非本機環境仍可明確覆寫。
+
 ### Added（同一 commit 的附加無狀態 image）
 
 - `ciPipeline(additionalImages: ...)` 可讓 opt-in 專案在既有 app image 之外，使用指定 Dockerfile

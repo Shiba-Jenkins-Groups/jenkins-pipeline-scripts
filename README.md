@@ -20,7 +20,7 @@ ciPipeline(
     additionalImages: [[name: 'worker', dockerfile: 'Dockerfile-worker']],
     // 選用：保存未套 .trivyignore 的 HIGH/CRITICAL raw JSON；gate 仍看 filtered JUnit
     trivyRawReportEnabled: true,
-    // 選用：Harbor API 非預設 HTTP registry 時覆寫；預設由 IMAGE_REF 推導
+    // 選用：預設為 Agent 可達的 http://host.docker.internal:9290
     harborApiUrl: 'https://harbor.example.com'
 )
 ```
@@ -126,6 +126,8 @@ Detect stage 推導旗標注入 env，`ciPipeline.groovy` 的 `when` 與各腳�
 ### Harbor 掃描報告
 
 - 預設啟用 `harborReport` stage；可用 `harborScanReportEnabled: false` 明確關閉。
+- 本機 Docker Desktop 預設 API URL 為 `http://host.docker.internal:9290`；不可使用 image ref
+  中 host daemon 視角的 `localhost:9290`。其他環境請用 `harborApiUrl` 覆寫。
 - Harbor Robot Account 需有目標 project 的 `repository:pull`、`repository:push` 與
   `scan:create`。如需權限分離，可傳入 `harborScanCredentials` 使用另一組 Jenkins credential。
 - `reports/harbor-scan/` 保存 Harbor 原始 v1.1 JSON、JUnit XML 與 HTML；JUnit 僅把

@@ -7,7 +7,9 @@ def call(Map config = [:]) {
     // Harbor scan API 預設沿用 push robot；若組織採權限分離，可另給 scanner robot。
     def harborScanCredentials = config.harborScanCredentials ?: harborCredentials
     def harborScanReportEnabled = config.containsKey('harborScanReportEnabled') ? config.harborScanReportEnabled : true
-    def harborApiUrl = config.harborApiUrl ?: ''
+    // docker push 的 localhost 是 host daemon 視角；Agent 容器內的 API 必須走 host gateway。
+    // 雲端／非 Docker Desktop 環境可由 Jenkinsfile 明確覆寫 harborApiUrl。
+    def harborApiUrl = config.harborApiUrl ?: 'http://host.docker.internal:9290'
     def harborApiInsecure = config.harborApiInsecure ?: false
     def harborScanTimeoutSeconds = (config.harborScanTimeoutSeconds ?: 600) as Integer
     // nexusCredentials：Nexus 部署帳號 Credential ID（改善計畫 #4a artifact 上傳）
