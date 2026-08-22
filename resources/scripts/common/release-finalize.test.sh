@@ -18,6 +18,11 @@ git -C "${WORKSPACE}" add app.txt
 git -C "${WORKSPACE}" commit -q -m release
 git -C "${WORKSPACE}" remote add origin "${REMOTE}"
 git -C "${WORKSPACE}" push -q -u origin prod
+# 模擬拋棄式 Jenkins agent：checkout 可存在，但沒有任何 committer identity。
+git -C "${WORKSPACE}" config --unset user.name
+git -C "${WORKSPACE}" config --unset user.email
+export HOME="${TEST_ROOT}/empty-home"
+mkdir -p "${HOME}"
 
 mkdir -p "${WORKSPACE}/.pipeline"
 ARTIFACT="${TEST_ROOT}/app-prod-1.2.3"
@@ -50,12 +55,13 @@ GIT_COMMIT="$(git -C "${WORKSPACE}" rev-parse HEAD)"
 
 bash "${SCRIPT_DIR}/release-finalize.sh"
 test "$(git --git-dir="${REMOTE}" rev-list -n 1 v1.2.3)" = "${GIT_COMMIT}"
+test "$(git --git-dir="${REMOTE}" for-each-ref --format='%(taggername)' refs/tags/v1.2.3)" = 'Jenkins Release'
 grep -q '^RELEASE_TAG=v1.2.3$' "${WORKSPACE}/.pipeline/release-manifest.env"
 grep -q "^IMAGE_DIGEST=${BUILT_IMAGE_DIGEST}$" "${WORKSPACE}/.pipeline/release-manifest.env"
 
 # 同版本若已屬於其他 commit，必須 fail closed 且不可移動 tag。
 printf 'next\n' >> "${WORKSPACE}/app.txt"
-git -C "${WORKSPACE}" commit -q -am next
+git -C "${WORKSPACE}" -c user.name=test -c user.email=test@example.invalid commit -q -am next
 if bash "${SCRIPT_DIR}/release-finalize.sh" >"${TEST_ROOT}/conflict.log" 2>&1; then
     echo 'FAIL: conflicting immutable tag was accepted' >&2
     exit 1

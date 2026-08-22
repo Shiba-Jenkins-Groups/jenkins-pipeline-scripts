@@ -102,7 +102,11 @@ push_git_tag() {
             return 1
         fi
     else
-        git tag -a "${tag}" -m "Release ${tag}"
+        # 動態 Jenkins agent 不保證有 global/repository committer identity。
+        # Annotated tag 必須自行帶 identity，不能讓已完成的 PROD 驗證在最後一步依賴 agent 狀態。
+        git -c user.name="${GIT_TAG_USER_NAME:-Jenkins Release}" \
+            -c user.email="${GIT_TAG_USER_EMAIL:-jenkins-release@localhost}" \
+            tag -a "${tag}" -m "Release ${tag}"
     fi
 
     # 憑證以 GIT_ASKPASS 提供（走 env，不塞進 URL）——避免 token 洩漏於

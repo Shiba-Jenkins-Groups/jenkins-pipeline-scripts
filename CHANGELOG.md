@@ -13,6 +13,8 @@
 - `docker.test.sh` 新增完整 RepoDigest 與純 digest 的回歸案例。
 - Harbor report reader 依正式分離契約重組 immutable `repository@digest`，並相容舊版將完整
   RepoDigest 寫入 `IMAGE_DIGEST` 的產出物。
+- Annotated release tag 建立時明確使用 Jenkins release identity，不再依賴動態 agent 是否配置
+  global Git `user.name`／`user.email`。
 
 ### Fixed（Dependency Scan 語言分派）
 
