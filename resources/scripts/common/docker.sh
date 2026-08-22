@@ -41,6 +41,11 @@ harbor_image_ref() {
 #
 # ⚠ SRP：本檔跨四個專案共用，故只寫「事實」（ref／digest），**不寫任何專案專屬的部署指令**。
 #   各專案怎麼用這顆 image 是專案自己的事（同 S9 快照被移出本 library 的理由，見 cd.sh）。
+normalize_repo_digest() {
+    local repo_digest="${1:-}"
+    printf '%s\n' "${repo_digest##*@}"
+}
+
 write_image_ref_file() {
     local harbor_image="$1"
     # 第二參數供同一 commit 產多顆 image 時指定獨立產出物；省略時維持既有 app 契約。
@@ -56,6 +61,9 @@ write_image_ref_file() {
         local digest
         digest="$(docker image inspect --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}' \
             "${harbor_image}" 2>/dev/null || true)"
+        # Docker RepoDigests 回傳 `<repository>@sha256:<hex>`；下游 release manifest 的
+        # IMAGE_REF 與 IMAGE_DIGEST 是兩個獨立欄位，digest 必須正規化為純 sha256 值。
+        digest="$(normalize_repo_digest "${digest}")"
         printf 'IMAGE_DIGEST=%s\n' "${digest}"
     } > "${out}"
     echo "[docker] Image ref written: ${out}"

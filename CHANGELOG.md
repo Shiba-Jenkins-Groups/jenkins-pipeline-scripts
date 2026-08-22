@@ -5,6 +5,13 @@
 
 ## [Unreleased]
 
+### Fixed（Release Finalization image digest 契約）
+
+- `write_image_ref_file` 將 Docker `RepoDigests` 的 `<repository>@sha256:<hex>` 正規化為純
+  `sha256:<hex>`，使 `IMAGE_REF`／`IMAGE_DIGEST` 維持分離，PROD finalizer 不再以
+  `RELEASE-005 Invalid image digest` 拒絕已驗證 image。
+- `docker.test.sh` 新增完整 RepoDigest 與純 digest 的回歸案例。
+
 ### Fixed（Dependency Scan 語言分派）
 
 - Go 專案的 `govulncheck` 從 Test 移至正式 `Dependency Scan` Stage，Stage 成功不再代表「OWASP

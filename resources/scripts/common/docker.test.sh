@@ -27,6 +27,18 @@ assert_ref() {
     fi
 }
 
+assert_value() {
+    local desc="$1" want="$2" got="$3"
+    if [[ "${got}" == "${want}" ]]; then
+        echo "PASS: ${desc} → ${got}"
+    else
+        echo "FAIL: ${desc}"
+        echo "        got : ${got}"
+        echo "        want: ${want}"
+        fail=$((fail + 1))
+    fi
+}
+
 assert_file_kv() {
     local desc="$1" file="$2" key="$3" want="$4"
     local got; got="$(grep -E "^${key}=" "${file}" | head -1 | cut -d= -f2-)"
@@ -98,6 +110,13 @@ fi
 
 echo
 echo "── write_image_ref_file：產出物內容與韌性 ────────────────────────────"
+assert_value "RepoDigest 正規化為純 digest" \
+    "sha256:2a48dacde8663e11fa5f6f56fbee4a40b6f3b782f967e2a5c0a46353c710f532" \
+    "$(normalize_repo_digest "localhost:9290/demo-app/prod/1.2.3@sha256:2a48dacde8663e11fa5f6f56fbee4a40b6f3b782f967e2a5c0a46353c710f532")"
+assert_value "純 digest 保持不變" \
+    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
+    "$(normalize_repo_digest "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")"
+
 # 為何測：這個檔是「pipeline 產出哪一顆 image」的唯一機讀來源（收尾摘要與 archiveArtifacts
 # 都吃它）。寫錯 key 名不會讓 build 變紅，只會讓下游安靜地拿不到值。
 TMPWS="$(mktemp -d)"
