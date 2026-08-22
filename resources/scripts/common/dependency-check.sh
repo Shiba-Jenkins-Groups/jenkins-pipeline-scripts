@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# common/dependency-check.sh — 第三方依賴 CVE 掃描（OWASP Dependency-Check；Security Phase 2 v1.7.1）
+# common/dependency-check.sh — 依語言分派第三方依賴弱點掃描
 #
-# 比對專案依賴 vs NVD（National Vulnerability Database）已知 CVE。
+# Go 使用 govulncheck 可達性分析；Java/Maven 使用 OWASP Dependency-Check 比對 NVD。
 # 政策 DO_DEP_SCAN / DEP_SCAN_CVSS 由 branch-policy.sh 決定：
 #   main  → failBuildOnCVSS=11（＝官方預設，永不 fail＝warn only，只出報告）
 #   prod  → failBuildOnCVSS=7（依賴含 CVSS≥7 的 CVE 即 build FAILURE）
@@ -19,13 +19,41 @@ LANGUAGE="${LANGUAGE:-}"
 BUILD_TOOL="${BUILD_TOOL:-}"
 CVSS="${DEP_SCAN_CVSS:-11}"
 DC_VERSION="12.2.2"
+GOVULNCHECK_BIN="${GOVULNCHECK_BIN:-govulncheck}"
 
 cd "${WORKSPACE}"
 
-# 本階段 OWASP 走 dependency-check-maven plugin，僅適用 Java/Maven。
-# 其他語言（Node/Go）的依賴 CVE 掃描屬另一分析器，暫不在本項範圍——非 java/maven 直接跳過。
+run_govulncheck() {
+    local exit_code="${GO_VULN_EXIT_CODE:-0}"
+    if ! command -v "${GOVULNCHECK_BIN}" >/dev/null 2>&1; then
+        echo "[dep-check] ⚠ govulncheck 未安裝，Go 弱點掃描未執行。" >&2
+        if [[ "${exit_code}" == "1" ]]; then
+            report_error "GOVULN" "002" "政策要求 Go 弱點掃描為硬閘，但 govulncheck 不存在。請重建 Jenkins agent image 後重試。"
+            return 1
+        fi
+        return 0
+    fi
+
+    echo "[dep-check] govulncheck 掃描（可達性分析；exit-code 政策=${exit_code}）..."
+    if "${GOVULNCHECK_BIN}" ./...; then
+        echo "[dep-check] ✅ govulncheck 未發現可達弱點。"
+        return 0
+    fi
+    if [[ "${exit_code}" == "1" ]]; then
+        report_error "GOVULN" "001" "發現可達的已知弱點；目前分支政策禁止繼續交付。"
+        return 1
+    fi
+    echo "[dep-check] ⚠ govulncheck 發現可達弱點；目前分支為警告模式，prod/hotfix 將阻擋交付。"
+}
+
+if [[ "${LANGUAGE}" == "go" ]]; then
+    run_govulncheck
+    exit $?
+fi
+
+# OWASP dependency-check-maven 僅適用 Java/Maven；其他尚未接上專屬 scanner 的語言明確跳過。
 if [[ "${LANGUAGE}" != "java" || "${BUILD_TOOL}" != "maven" ]]; then
-    echo "[dep-check] LANGUAGE=${LANGUAGE:-?}/BUILD_TOOL=${BUILD_TOOL:-?} 非 java/maven，跳過 OWASP 依賴掃描。"
+    echo "[dep-check] LANGUAGE=${LANGUAGE:-?}/BUILD_TOOL=${BUILD_TOOL:-?} 尚未配置依賴弱點 scanner，跳過。"
     exit 0
 fi
 

@@ -5,6 +5,15 @@
 
 ## [Unreleased]
 
+### Fixed（Dependency Scan 語言分派）
+
+- Go 專案的 `govulncheck` 從 Test 移至正式 `Dependency Scan` Stage，Stage 成功不再代表「OWASP
+  不適用後直接 exit 0」，並避免同一建置重複掃描。
+- `Dependency Scan` 依語言分派：Go 使用 `govulncheck`，Java/Maven 使用 OWASP
+  Dependency-Check；NVD API credential 僅注入 Java/Maven 路徑。
+- 保留所有 Go branch 都執行可達性掃描的既有安全行為；develop/main 為警告模式，
+  prod/hotfix 為硬閘。
+
 ### Added（同一 commit 的附加無狀態 image）
 
 - `ciPipeline(additionalImages: ...)` 可讓 opt-in 專案在既有 app image 之外，使用指定 Dockerfile

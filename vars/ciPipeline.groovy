@@ -293,18 +293,18 @@ def call(Map config = [:]) {
                     }
 
                     stage('Dependency Scan') {
-                        // OWASP Dependency-Check（第三方依賴 CVE，Security Phase 2）
-                        // DO_DEP_SCAN 由 branch-policy 決定（main warn / prod fail）；語言 guard 在腳本內（僅 java/maven）
+                        // 語言分派：Go → govulncheck；Java/Maven → OWASP Dependency-Check。
+                        // Go 保留既有「每個 branch 都掃」行為；其他語言由 DO_DEP_SCAN 政策控制。
                         // 置 Archive 前：prod 依賴含高危 CVE 時擋在打 tag／發佈 artifact 之前
-                        when { expression { env.DO_DEP_SCAN == 'true' } }
+                        when { expression { env.LANGUAGE == 'go' || env.DO_DEP_SCAN == 'true' } }
                         steps {
                             script {
-                                if (env.PIPELINE_TRUST == 'trusted') {
+                                // NVD key 只供 OWASP Dependency-Check 使用；Go govulncheck 不應取得此 credential。
+                                if (env.LANGUAGE == 'java' && env.BUILD_TOOL == 'maven' && env.PIPELINE_TRUST == 'trusted') {
                                     withCredentials([string(credentialsId: 'nvd-api-key', variable: 'NVD_API_KEY')]) {
                                         sh "bash .pipeline/scripts/common/dependency-check.sh"
                                     }
                                 } else {
-                                    // PR/hotfix 不注入 credential；scanner 以無 NVD key 模式執行。
                                     sh "bash .pipeline/scripts/common/dependency-check.sh"
                                 }
                             }
