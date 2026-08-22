@@ -11,6 +11,8 @@
   `sha256:<hex>`，使 `IMAGE_REF`／`IMAGE_DIGEST` 維持分離，PROD finalizer 不再以
   `RELEASE-005 Invalid image digest` 拒絕已驗證 image。
 - `docker.test.sh` 新增完整 RepoDigest 與純 digest 的回歸案例。
+- Harbor report reader 依正式分離契約重組 immutable `repository@digest`，並相容舊版將完整
+  RepoDigest 寫入 `IMAGE_DIGEST` 的產出物。
 
 ### Fixed（Dependency Scan 語言分派）
 
