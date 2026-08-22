@@ -31,6 +31,10 @@
 - 修正 Agent 由 image ref 推導 `http://localhost:9290`，實際連到 Agent 自己而得到
   `Connection refused`；app scan 與每日 sync 預設均改走 Docker host gateway
   `http://host.docker.internal:9290`，非本機環境仍可明確覆寫。
+- 補正 Harbor v2 API 的最小 RBAC：讀 scan overview 實際要求 `artifact:read`，下載報告要求
+  `artifact-addition:read`，並非 repository pull 即自動涵蓋；錯誤提示與文件同步修正。
+- 每日 sync 在已指定 project 時直接呼叫 scoped endpoint，不先列舉 `/projects`，使既有
+  per-project Robot Account 不需要取得跨專案 list 權限。
 
 ### Added（同一 commit 的附加無狀態 image）
 
