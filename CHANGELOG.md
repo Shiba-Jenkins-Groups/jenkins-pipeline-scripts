@@ -14,6 +14,18 @@
 - 保留所有 Go branch 都執行可達性掃描的既有安全行為；develop/main 為警告模式，
   prod/hotfix 為硬閘。
 
+### Added（Harbor 原生掃描結果回收）
+
+- `Harbor Push` 後新增 `Harbor Vulnerability Report`：先由 Harbor 將 tag 解析成 immutable
+  digest，再呼叫 v2 API 觸發 scan、輪詢完成並下載 native v1.1 vulnerability report。
+- `harbor-vulnerability-report.py` 將原始 JSON 同時轉為 Jenkins JUnit 與 HTML；完整報告封存於
+  `reports/harbor-scan/`，HIGH/CRITICAL 進入 Test Result／趨勢圖。
+- 支援 Harbor 階層式 repository 所需的 double URL encoding，並以本機 Harbor 真實 API
+  驗證 Pending → Running → Success 與 83-artifact 分頁同步流程。
+- 新增 `harborVulnerabilitySyncPipeline()`：每日逐專案使用既有 Robot Account，回收 Harbor
+  auto-rescan 最新結果成獨立 Jenkins 快照，不嘗試回填已完成的歷史 build。
+- Harbor API／權限／timeout 錯誤將 app build 標為 UNSTABLE，但不抹掉已成功 push 的 image。
+
 ### Added（同一 commit 的附加無狀態 image）
 
 - `ciPipeline(additionalImages: ...)` 可讓 opt-in 專案在既有 app image 之外，使用指定 Dockerfile

@@ -4,6 +4,12 @@ def call(Map config = [:]) {
     def githubReleaseCredentials = config.githubReleaseCredentials ?: githubCredentials
     // harborCredentials：Harbor Robot Account Credential ID（Jenkins Credentials 中定義）
     def harborCredentials = config.harborCredentials ?: error('harborCredentials is required')
+    // Harbor scan API 預設沿用 push robot；若組織採權限分離，可另給 scanner robot。
+    def harborScanCredentials = config.harborScanCredentials ?: harborCredentials
+    def harborScanReportEnabled = config.containsKey('harborScanReportEnabled') ? config.harborScanReportEnabled : true
+    def harborApiUrl = config.harborApiUrl ?: ''
+    def harborApiInsecure = config.harborApiInsecure ?: false
+    def harborScanTimeoutSeconds = (config.harborScanTimeoutSeconds ?: 600) as Integer
     // nexusCredentials：Nexus 部署帳號 Credential ID（改善計畫 #4a artifact 上傳）
     // 與 harbor 的 per-project robot 不同：全專案共用單一部署帳號，故給預設值免改各專案 Jenkinsfile
     def nexusCredentials = config.nexusCredentials ?: 'nexus-ci-deploy'
@@ -25,20 +31,20 @@ def call(Map config = [:]) {
     // ── 1. Profile 預設矩陣 ──────────────────────────────────────────────────
     // 組織策略層：預定義 pipeline 規模，統一由 Shared Library 維護
     // ciStages：build / test / archive
-    // cdStages：dockerBuild / imageScan / harborPush / smokeTest / deploy
+    // cdStages：dockerBuild / imageScan / harborPush / harborReport / smokeTest / deploy
     def profiles = [
         // full：跑完所有 stage，適用 main / prod 正式交付
         'full'   : [ci: [build: true,  test: true, archive: true],
-                    cd: [dockerBuild: true,  imageScan: true,  harborPush: true,  smokeTest: true,  deploy: true]],
+                    cd: [dockerBuild: true,  imageScan: true,  harborPush: true,  harborReport: true, smokeTest: true,  deploy: true]],
         // ci-only：僅 CI 階段，不含任何 CD stage，適用 PR 快速驗證、feature branch
         'ci-only': [ci: [build: true,  test: true, archive: true],
-                    cd: [dockerBuild: false, imageScan: false, harborPush: false, smokeTest: false, deploy: false]],
+                    cd: [dockerBuild: false, imageScan: false, harborPush: false, harborReport: false, smokeTest: false, deploy: false]],
         // ci-cd：CI + Docker Build + Image Scan + Harbor Push，需要打包但不部署
         'ci-cd'  : [ci: [build: true,  test: true, archive: true],
-                    cd: [dockerBuild: true,  imageScan: true,  harborPush: true,  smokeTest: false, deploy: false]],
+                    cd: [dockerBuild: true,  imageScan: true,  harborPush: true,  harborReport: true, smokeTest: false, deploy: false]],
         // smoke：完整 CI/CD + Smoke Test，不 deploy，適用 staging 環境驗證
         'smoke'  : [ci: [build: true,  test: true, archive: true],
-                    cd: [dockerBuild: true,  imageScan: true,  harborPush: true,  smokeTest: true,  deploy: false]],
+                    cd: [dockerBuild: true,  imageScan: true,  harborPush: true,  harborReport: true, smokeTest: true,  deploy: false]],
     ]
 
     // ── 2. 套用 profile（預設 full）──────────────────────────────────────────
@@ -62,10 +68,14 @@ def call(Map config = [:]) {
     if (!cdStages.dockerBuild) {
         cdStages.imageScan  = false   // image 不存在時無法掃描
         cdStages.harborPush = false
+        cdStages.harborReport = false
         cdStages.smokeTest  = false
         cdStages.deploy     = false
     }
-    if (!cdStages.harborPush)    cdStages.smokeTest      = false
+    if (!cdStages.harborPush) {
+        cdStages.harborReport = false
+        cdStages.smokeTest = false
+    }
     // 注意：imageScan 與 harborPush 為獨立 flag，可各自關閉（不互相阻斷）
 
     // 初始化 log：Pipeline 啟動時輸出推導後的 stage 設定，方便 debug
@@ -129,6 +139,7 @@ def call(Map config = [:]) {
                                     'scripts/common/nexus-upload.sh',
                                     'scripts/common/secret-scan.sh',
                                     'scripts/common/dependency-check.sh',
+                                    'scripts/common/harbor-vulnerability-report.py',
                                     'scripts/common/release-finalize.sh',
                                 ]
                                 for (lang in LANGUAGES) {
@@ -482,6 +493,53 @@ def call(Map config = [:]) {
                         }
                     }
 
+                    stage('Harbor Vulnerability Report') {
+                        when {
+                            allOf {
+                                expression { env.DO_PUSH == 'true' }
+                                expression { cdStages.harborPush }
+                                expression { cdStages.harborReport }
+                                expression { harborScanReportEnabled }
+                            }
+                        }
+                        steps {
+                            script {
+                                def refArgs = []
+                                if (primaryImageEnabled) {
+                                    refArgs << '--image-ref-file image-ref.txt'
+                                }
+                                additionalImages.each { image ->
+                                    refArgs << "--image-ref-file image-ref-${image.name}.txt"
+                                }
+                                if (!refArgs) {
+                                    echo '[ciPipeline] 沒有 pushed image，略過 Harbor vulnerability report'
+                                } else {
+                                    // Harbor 掃描是非同步工作。API/權限/timeout 問題標成 UNSTABLE，
+                                    // 不抹掉前一個 stage 已成功 push 的 image；原始錯誤仍保留在 log。
+                                    catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
+                                        timeout(time: harborScanTimeoutSeconds + 60, unit: 'SECONDS') {
+                                            withCredentials([usernamePassword(
+                                                credentialsId: harborScanCredentials,
+                                                usernameVariable: 'HARBOR_USER',
+                                                passwordVariable: 'HARBOR_PASS'
+                                            )]) {
+                                                withEnv([
+                                                    "HARBOR_API_URL=${harborApiUrl}",
+                                                ]) {
+                                                    def insecureArg = harborApiInsecure ? '--insecure' : ''
+                                                    sh """python3 .pipeline/scripts/common/harbor-vulnerability-report.py scan \\
+                                                        ${refArgs.join(' ')} \\
+                                                        --output-dir reports/harbor-scan \\
+                                                        --timeout ${harborScanTimeoutSeconds} ${insecureArg}"""
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     stage('Smoke Test') {
                         when {
                             allOf {
@@ -570,6 +628,8 @@ def call(Map config = [:]) {
                                  allowEmptyArchive: true
                 archiveArtifacts artifacts: 'trivy-results*.xml,trivy-results-raw*.json',
                                  allowEmptyArchive: true
+                archiveArtifacts artifacts: 'reports/harbor-scan/**/*',
+                                 allowEmptyArchive: true
 
                 // 語言中立 Coverage HTML 契約（#2）：各語言 test 腳本統一產至 reports/coverage/index.html
                 // （Java=JaCoCo、Go=go tool cover）；coverage 檔位才產生，allowMissing 避免其他 branch fail
@@ -606,9 +666,24 @@ def call(Map config = [:]) {
                         ])
                     }
                 }
+                script {
+                    if (fileExists('reports/harbor-scan/index.html')) {
+                        publishHTML(target: [
+                            allowMissing          : true,
+                            alwaysLinkToLastBuild : false,
+                            keepAll               : true,
+                            reportDir             : 'reports/harbor-scan',
+                            reportFiles           : 'index.html',
+                            reportName            : 'Harbor Vulnerability Report'
+                        ])
+                    }
+                }
                 // Trivy JUnit XML（main / prod branch 才產生，allowEmptyResults 避免其他 branch fail）
                 junit allowEmptyResults: true,
                       testResults: 'trivy-results*.xml'
+                // Harbor API 回收結果：HIGH/CRITICAL 轉成 failure 供 Test Result 與趨勢圖顯示。
+                junit allowEmptyResults: true,
+                      testResults: 'reports/harbor-scan/*-junit.xml'
 
                 // ── 交出「這次產出哪一顆 image」──────────────────────────────
                 // 原本 ref 只散落在中段 stage 的 log（Tagging/Pushing/smoke/Deploy 各一次），

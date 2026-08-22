@@ -19,7 +19,9 @@ ciPipeline(
     // 選用：同一 commit 產生額外的無狀態服務 image
     additionalImages: [[name: 'worker', dockerfile: 'Dockerfile-worker']],
     // 選用：保存未套 .trivyignore 的 HIGH/CRITICAL raw JSON；gate 仍看 filtered JUnit
-    trivyRawReportEnabled: true
+    trivyRawReportEnabled: true,
+    // 選用：Harbor API 非預設 HTTP registry 時覆寫；預設由 IMAGE_REF 推導
+    harborApiUrl: 'https://harbor.example.com'
 )
 ```
 
@@ -81,7 +83,7 @@ jenkins-pipeline-scripts/
 ```
 Prepare（Checkout → Load Scripts → Detect）
   → CI（Build → Test → Archive）
-  → CD（Docker Build → Image Scan → Harbor Push → Smoke Test → Deploy）
+  → CD（Docker Build → Image Scan → Harbor Push → Harbor Report → Smoke Test → Deploy）
 ```
 
 | Stage | 說明 |
@@ -95,6 +97,7 @@ Prepare（Checkout → Load Scripts → Detect）
 | Docker Build | 建置 Docker image（取檔 `ARTIFACT_LOCAL` → Nexus 下載；政策旗標控制）|
 | Image Scan | Trivy 弱點掃描（exit code 依 branch 政策：main=warn、prod=fail）；opt-in 專案另封存未過濾 raw JSON。|
 | Harbor Push | 推送 image 至 Harbor registry |
+| Harbor Vulnerability Report | 以 immutable digest 觸發 Harbor scan，等待完成後下載原始 JSON，轉成 JUnit 與 HTML 發佈。API/timeout 問題標記 UNSTABLE，不抹掉已推送 image。|
 | Smoke Test | 以 Harbor image 起容器驗證健康狀態 |
 | Deploy | 部署至 k3s（develop→dev、prod→prod namespace；prod 有 input 人工閘）|
 
@@ -109,7 +112,7 @@ Detect stage 推導旗標注入 env，`ciPipeline.groovy` 的 `when` 與各腳�
 | 旗標 | develop | main | prod | 其他 |
 |------|---------|------|------|------|
 | DO_DOCKER_BUILD | true | true | true | false |
-| DO_SCAN（Trivy）| false | true | true | false |
+| DO_SCAN（Trivy）| true | true | true | false |
 | SCAN_EXIT_CODE | 0 | 0（warn）| 1（fail）| 0 |
 | DO_PUSH（Harbor）| true | true | true | false |
 | DO_DEPLOY（k3s）| true | false | true | false |
@@ -119,6 +122,16 @@ Detect stage 推導旗標注入 env，`ciPipeline.groovy` 的 `when` 與各腳�
 
 > Integration（TODO）附掛於 coverage 檔位；Security scan（gitleaks / OWASP）
 > 由 Phase 2（v1.7.x）以獨立政策旗標實作。
+
+### Harbor 掃描報告
+
+- 預設啟用 `harborReport` stage；可用 `harborScanReportEnabled: false` 明確關閉。
+- Harbor Robot Account 需有目標 project 的 `repository:pull`、`repository:push` 與
+  `scan:create`。如需權限分離，可傳入 `harborScanCredentials` 使用另一組 Jenkins credential。
+- `reports/harbor-scan/` 保存 Harbor 原始 v1.1 JSON、JUnit XML 與 HTML；JUnit 僅把
+  HIGH/CRITICAL 轉為 failure，完整嚴重度仍可在 HTML／JSON 查看。
+- `harbor-vulnerability-sync` 每日使用既有四組 per-project robot 讀取 Harbor auto-rescan
+  的最新結果，形成獨立 Jenkins 趨勢；不修改或回填歷史專案 build。
 
 ---
 
