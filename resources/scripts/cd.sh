@@ -44,6 +44,11 @@ ARTIFACT_NAME="${ARTIFACT_NAME:-}"
 RUNTIME_VERSION="${RUNTIME_VERSION:-17}"
 LANGUAGE="${LANGUAGE:-java}"
 
+# build.env is sourced into this shell, but deploy/cleanup are delegated to a
+# child Bash process. Export the resolved build identity so the child receives
+# the same application/version context instead of failing under `set -u`.
+export APP_NAME APP_VERSION BUILD_NUMBER BRANCH ARTIFACT_NAME RUNTIME_VERSION LANGUAGE
+
 IMAGE_TAG="${APP_NAME}:${APP_VERSION}-${BUILD_NUMBER}"
 
 echo "[cd] Stage: ${STAGE}"

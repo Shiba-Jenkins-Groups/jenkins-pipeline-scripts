@@ -207,6 +207,10 @@ verify_service_health() {
 
 deploy() {
     require_pool_identity
+    : "${APP_NAME:?APP_NAME must be exported from cd.sh build.env context}"
+    : "${APP_VERSION:?APP_VERSION must be exported from cd.sh build.env context}"
+    : "${BUILD_NUMBER:?BUILD_NUMBER must be exported from cd.sh build.env context}"
+    : "${BRANCH:?BRANCH must be exported from cd.sh build.env context}"
     [[ -d "${WORKSPACE}/k8s" ]] || {
         report_error "K3D_POOL" "002" "k8s/ directory not found; project must provide verification manifests"
         return 1
