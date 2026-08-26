@@ -109,7 +109,15 @@ def call(Map config = [:]) {
 
                     stage('Checkout') {
                         steps {
-                            checkout scm
+                            script {
+                                def scmVars = checkout scm
+                                // Multibranch checkout does not consistently persist these
+                                // return values into env. Keep one checkout and publish its
+                                // resolved identity for archive/image/deploy child scripts.
+                                env.GIT_BRANCH = (scmVars.GIT_BRANCH ?: env.BRANCH_NAME ?: '')
+                                    .replaceFirst('^origin/', '')
+                                env.GIT_COMMIT = scmVars.GIT_COMMIT ?: env.GIT_COMMIT
+                            }
                             // branch 政策旗標統一由 Detect stage 的 branch-policy.sh 推導
                             echo "[checkout] GIT_BRANCH: ${env.GIT_BRANCH}"
                         }
