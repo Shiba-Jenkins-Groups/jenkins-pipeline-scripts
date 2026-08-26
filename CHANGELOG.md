@@ -5,6 +5,22 @@
 
 ## [Unreleased]
 
+### Changed（全域 K3D 共用驗證池）
+
+- 所有 CD verification 改用每個 build 獨立的 `ci-dev-*`／`ci-prod-*` namespace；跨專案
+  併發時自動建立更多槽位，Pipeline `finally` 在成功與失敗路徑都釋放，不再由各專案管理
+  固定 NodePort 或 `deployTeardown`。
+- 套用 manifest 前將驗證 Service 統一轉成 ClusterIP，使用臨時 `kubectl port-forward`
+  驗證 Service→Pod；不再把 CI endpoint 暴露至 host/LAN。
+- 臨時 namespace 只從對應 dev/prod 常駐 namespace 複製 manifest 實際引用的 Secret，
+  Harbor image pull 使用該專案既有 Robot Account，DEV／PROD 與跨專案 credential 不混用。
+- 新增 `k3dPoolMaintenancePipeline()`，兜底回收超過兩小時的 `ci-*` 孤兒 namespace。
+
+### Fixed（Declarative 重複 checkout）
+
+- Pipeline 全域啟用 `skipDefaultCheckout(true)`，保留 Prepare/Checkout 的顯式 SCM checkout，
+  移除 Jenkins 自動產生的重複 `Declarative: Checkout SCM` stage 與第二次 fetch。
+
 ### Fixed（Release Finalization image digest 契約）
 
 - `write_image_ref_file` 將 Docker `RepoDigests` 的 `<repository>@sha256:<hex>` 正規化為純

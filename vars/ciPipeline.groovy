@@ -94,6 +94,9 @@ def call(Map config = [:]) {
         options {
             timestamps()
             disableConcurrentBuilds()
+            // Declarative Pipeline otherwise performs an implicit checkout before
+            // Prepare/Checkout, producing a duplicate "Declarative: Checkout SCM" stage.
+            skipDefaultCheckout(true)
         }
 
         stages {
@@ -141,6 +144,7 @@ def call(Map config = [:]) {
                                     'scripts/common/nexus-upload.sh',
                                     'scripts/common/secret-scan.sh',
                                     'scripts/common/dependency-check.sh',
+                                    'scripts/common/k3d-verify.sh',
                                     'scripts/common/harbor-vulnerability-report.py',
                                     'scripts/common/release-finalize.sh',
                                 ]
@@ -213,13 +217,26 @@ def call(Map config = [:]) {
                                     }
                                 }
 
-                                // NodePort 不再由 branch-policy.sh 提供（避免所有專案撞用同一固定值）
-                                // 改由各專案 Jenkinsfile 的 devNodePort/prodNodePort 參數依 DEPLOY_NAMESPACE 決定
+                                // k3d 是跨專案共用的驗證池：每個 build 自動建立隔離 namespace，
+                                // Service 在套用前統一轉為 ClusterIP，再由 kubectl port-forward 驗證。
+                                // 因此不再要求各專案保留固定 NodePort，也不會發生跨專案撞 port。
                                 if (env.DO_DEPLOY == 'true') {
-                                    if (env.DEPLOY_NAMESPACE == 'dev') {
-                                        env.NODE_PORT = (config.devNodePort ?: error('ciPipeline: devNodePort is required when DEPLOY_NAMESPACE=dev')).toString()
-                                    } else if (env.DEPLOY_NAMESPACE == 'prod') {
-                                        env.NODE_PORT = (config.prodNodePort ?: error('ciPipeline: prodNodePort is required when DEPLOY_NAMESPACE=prod')).toString()
+                                    // Detect 階段尚未載入 Archive 的 build.env，APP_NAME 不一定存在；
+                                    // JOB_NAME 含 multibranch project/branch，可提供跨專案唯一性。
+                                    def appSlug = (env.JOB_NAME ?: env.JOB_BASE_NAME ?: 'app').toLowerCase()
+                                        .replaceAll('[^a-z0-9-]+', '-')
+                                        .replaceAll('^-+|-+$', '')
+                                    def buildSlug = (env.BUILD_NUMBER ?: '0').replaceAll('[^0-9]+', '') ?: '0'
+                                    def shaSlug = (env.GIT_COMMIT ?: 'unknown').take(7).toLowerCase()
+                                        .replaceAll('[^a-z0-9]+', '')
+                                    def suffix = "-${buildSlug}-${shaSlug}"
+                                    def prefix = "ci-${env.DEPLOY_NAMESPACE}-"
+                                    def appLimit = Math.max(1, 63 - prefix.length() - suffix.length())
+                                    env.CI_VERIFY_NAMESPACE = "${prefix}${appSlug.take(appLimit)}${suffix}"
+                                    env.DEPLOY_ENV = env.DEPLOY_NAMESPACE
+                                    env.NODE_PORT = ''
+                                    if (config.containsKey('devNodePort') || config.containsKey('prodNodePort') || config.containsKey('deployTeardown')) {
+                                        echo '[detect] devNodePort/prodNodePort/deployTeardown 已棄用；共用 K3D 驗證池改用 ClusterIP 與 finally 回收。'
                                     }
                                 }
 
@@ -228,11 +245,9 @@ def call(Map config = [:]) {
                                     echo "[detect] Additional images: ${env.ADDITIONAL_IMAGES}"
                                 }
 
-                                // 驗證後即撤（deployTeardown: true）：k3d pod 只是 CI/CD 驗證閘的專案，
-                                // 部署並通過 health 檢查後即刪除 Service/Deployment，不留到 TTL 到期。
-                                // 預設 false——其他專案的 k3d deployment 可能是常駐開發環境
-                                // （實測 claude-project 的已存活 108 天），一律撤除會毀掉別人的環境。
-                                env.DEPLOY_TEARDOWN = (config.deployTeardown ?: false).toString()
+                                // Pipeline verification 一律使用 ci-* 臨時 namespace，finally 會整個回收；
+                                // 既有 dev/prod 常駐 namespace 不在回收範圍，故不再需要專案 opt-in。
+                                env.DEPLOY_TEARDOWN = 'true'
 
                                 // 人工確認閘的專案級覆蓋（deployInputGate: false 可關掉 prod 那道 input）。
                                 // 適用情境：pod 部署本身不碰生產（只是驗證閘），真正動生產是管線之外
@@ -251,7 +266,7 @@ def call(Map config = [:]) {
                                 echo "[detect] Language: ${env.LANGUAGE}, BuildTool: ${env.BUILD_TOOL}"
                                 echo "[detect] Policy: event=${env.PIPELINE_EVENT}, trust=${env.PIPELINE_TRUST}, package=${env.DO_PACKAGE}, publish=${env.DO_ARTIFACT_PUBLISH}, tag=${env.DO_GIT_TAG}, " +
                                      "image=${env.DO_IMAGE_BUILD}/${env.DO_IMAGE_PUSH}, k3s=${env.DO_K3S_VERIFY}, runtime=${env.DO_RUNTIME_DEPLOY}, prod=${env.DO_PROD_DEPLOY}, " +
-                                     "ns=${env.DEPLOY_NAMESPACE}, port=${env.NODE_PORT}, TEST_LEVEL=${env.TEST_LEVEL}, GO_BUILD_TAGS=${env.GO_BUILD_TAGS ?: '(none)'}"
+                                     "env=${env.DEPLOY_NAMESPACE}, verify_ns=${env.CI_VERIFY_NAMESPACE ?: '(none)'}, TEST_LEVEL=${env.TEST_LEVEL}, GO_BUILD_TAGS=${env.GO_BUILD_TAGS ?: '(none)'}"
                             }
                         }
                     }
@@ -574,10 +589,24 @@ def call(Map config = [:]) {
                                           ok: "Deploy to ${env.DEPLOY_NAMESPACE}"
                                 }
                             }
-                            // KUBECONFIG 由 Jenkins Secret File credential（ID: k3s-kubeconfig）注入
-                            // Jenkins agent 使用 k3s-kubeconfig-agent（server: jenkins-network 內部 IP:6443）
-                            withCredentials([file(credentialsId: 'k3s-kubeconfig', variable: 'KUBECONFIG')]) {
-                                sh 'bash .pipeline/scripts/cd.sh deploy'
+                            // KUBECONFIG 只授權 trusted lane 操作共用驗證池；Harbor Robot Account
+                            // 僅建立目標 project 的 imagePullSecret，不把 Harbor admin 權限放入 k3d。
+                            withCredentials([
+                                file(credentialsId: 'k3s-kubeconfig', variable: 'KUBECONFIG'),
+                                usernamePassword(credentialsId: harborCredentials,
+                                    usernameVariable: 'HARBOR_USER', passwordVariable: 'HARBOR_PASS')
+                            ]) {
+                                script {
+                                    try {
+                                        sh 'bash .pipeline/scripts/cd.sh deploy'
+                                    } finally {
+                                        // cleanup 不得遮蔽 deploy 原始失敗；孤兒 namespace 另由全域 janitor 兜底。
+                                        def cleanupStatus = sh(script: 'bash .pipeline/scripts/cd.sh cleanup', returnStatus: true)
+                                        if (cleanupStatus != 0) {
+                                            echo "[k3d-pool] WARN: namespace cleanup failed (status=${cleanupStatus}); janitor will retry"
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

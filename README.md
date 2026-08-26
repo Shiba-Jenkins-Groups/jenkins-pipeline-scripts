@@ -88,7 +88,7 @@ Prepare（Checkout → Load Scripts → Detect）
 
 | Stage | 說明 |
 |-------|------|
-| Checkout | git checkout 專案程式碼 |
+| Checkout | 唯一一次 SCM checkout；全域停用 Declarative 預設 checkout，避免重複 fetch |
 | Load Scripts | 透過 `libraryResource()` 將 scripts 寫入 Agent `.pipeline/` |
 | Detect | 偵測語言、Build Tool、appName；`branch-policy.sh` 推導政策旗標注入 env |
 | Build | 依語言執行建置 |
@@ -99,7 +99,7 @@ Prepare（Checkout → Load Scripts → Detect）
 | Harbor Push | 推送 image 至 Harbor registry |
 | Harbor Vulnerability Report | 以 immutable digest 觸發 Harbor scan，等待完成後下載原始 JSON，轉成 JUnit 與 HTML 發佈。API/timeout 問題標記 UNSTABLE，不抹掉已推送 image。|
 | Smoke Test | 以 Harbor image 起容器驗證健康狀態 |
-| Deploy | 部署至 k3s（develop→dev、prod→prod namespace；prod 有 input 人工閘）|
+| Deploy | 從共用 K3D 池取得臨時 `ci-dev-*`／`ci-prod-*` namespace，驗證後釋放；prod 保留 input 人工閘 |
 
 ---
 
@@ -116,12 +116,24 @@ Detect stage 推導旗標注入 env，`ciPipeline.groovy` 的 `when` 與各腳�
 | SCAN_EXIT_CODE | 0 | 0（warn）| 1（fail）| 0 |
 | DO_PUSH（Harbor）| true | true | true | false |
 | DO_DEPLOY（k3s）| true | false | true | false |
-| DEPLOY_NAMESPACE / NODE_PORT | dev / 30090 | — | prod / 30091 | — |
+| DEPLOY_NAMESPACE | dev | — | prod | — |
 | DEPLOY_INPUT_GATE（人工閘）| false | false | true | false |
 | TEST_LEVEL | unit | coverage | coverage | unit |
 
 > Integration（TODO）附掛於 coverage 檔位；Security scan（gitleaks / OWASP）
 > 由 Phase 2（v1.7.x）以獨立政策旗標實作。
+
+### K3D 共用驗證池
+
+- `dev`／`prod` 是設定來源 namespace；每次 build 實際部署到獨立的 `ci-dev-*`／`ci-prod-*`。
+- 跨專案併發時自動建立更多 namespace，數量由 Jenkins `ci-image-builder` agent 上限控制。
+- 每個槽位自帶 LimitRange／ResourceQuota（最多 10 pods、requests 2 CPU/2Gi、limits 4 CPU/4Gi），
+  防止單一專案耗盡共用 DEV 叢集。
+- Service 在渲染後統一改成 ClusterIP，健康檢查使用臨時 `kubectl port-forward`，不保留 NodePort。
+- Pipeline `finally` 無論成功或失敗都刪除 namespace；每 15 分鐘執行的全域 maintenance job
+  兜底回收超過兩小時的異常孤兒。
+- `devNodePort`、`prodNodePort`、`deployTeardown` 已棄用；舊 Jenkinsfile 傳入時只顯示提示，
+  不再改變全域資源池行為。
 
 ### Harbor 掃描報告
 
