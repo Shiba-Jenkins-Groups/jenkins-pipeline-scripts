@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<flow-definition>
+  <actions/>
+  <description>Stage 3a DEV contract rehearsal only. No production credentials, application deployment, SCM push or automatic triggers. Full runtime rehearsal remains separate.</description>
+  <keepDependencies>false</keepDependencies>
+  <properties/>
+  <definition class="org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition" plugin="workflow-cps">
+    <script>@Library('jenkins-pipeline@aacb7a0e00fe07bababe9a426106592009a54f29') _
+releaseDevRehearsalPipeline(enabled: true, libraryRevision: 'aacb7a0e00fe07bababe9a426106592009a54f29')
+</script>
+    <sandbox>true</sandbox>
+  </definition>
+  <triggers/>
+  <disabled>true</disabled>
+</flow-definition>
