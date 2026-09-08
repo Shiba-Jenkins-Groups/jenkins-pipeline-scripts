@@ -271,7 +271,7 @@ def scan(evidence, source, root, harbor_url):
         "go_version": run(["go", "version"], source, env).strip(), "graphs": graphs})
     harbor = module("release_harbor", "harbor-vulnerability-report.py")
     api = harbor.HarborAPI(harbor_url, os.environ["HARBOR_USER"], os.environ["HARBOR_PASS"])
-    item = harbor.scan_image(api, evidence["immutable_image"], 600, 3)
+    item = harbor.scan_image(api, evidence["immutable_image"], timeout_seconds=600, poll_seconds=3)
     require(item.digest == evidence["image_digest"], "Harbor resolved different image")
     native_harbor = {"artifact": {"digest": item.digest}, "report": item.report}
     harbor_ref = save(root, "harbor-native.json", native_harbor)

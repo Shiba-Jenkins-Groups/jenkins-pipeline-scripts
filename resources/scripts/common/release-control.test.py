@@ -136,8 +136,11 @@ class Controls(unittest.TestCase):
                 return json.dumps(self.fixture.native["trivy"])
             return json.dumps({"Version": "test", "VulnerabilityDB": {"UpdatedAt": "2026-09-08"}})
         native = {"vulnerabilities": [], "scanner": {"version": "test"}, "generated_at": "2026-09-08"}
+        def scan_image(api, image, *, timeout_seconds, poll_seconds):
+            self.assertEqual((timeout_seconds, poll_seconds), (600, 3))
+            return types.SimpleNamespace(digest=self.fixture.digest, report=native)
         fake = types.SimpleNamespace(VULNERABILITY_MIME="mime", HarborAPI=lambda *args: None,
-                                     scan_image=lambda *args: types.SimpleNamespace(digest=self.fixture.digest, report=native))
+                                     scan_image=scan_image)
         with patch.object(adapter, "run", side_effect=run), patch.object(adapter, "module", return_value=fake), \
              patch.dict('os.environ', {"HARBOR_USER": "test", "HARBOR_PASS": "secret", "TRIVY_IGNORE_UNFIXED": "true"}):
             self.evidence["reports"] = []
