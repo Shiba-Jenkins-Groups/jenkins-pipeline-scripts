@@ -5,8 +5,8 @@
   <keepDependencies>false</keepDependencies>
   <properties/>
   <definition class="org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition" plugin="workflow-cps">
-    <script>@Library('jenkins-pipeline@aacb7a0e00fe07bababe9a426106592009a54f29') _
-releaseDevRehearsalPipeline(enabled: true, libraryRevision: 'aacb7a0e00fe07bababe9a426106592009a54f29')
+    <script>@Library('jenkins-pipeline@61135fdb9f823010358c1a630a3628c5ed9d0a86') _
+releaseDevRehearsalPipeline(enabled: true, libraryRevision: '61135fdb9f823010358c1a630a3628c5ed9d0a86')
 </script>
     <sandbox>true</sandbox>
   </definition>
