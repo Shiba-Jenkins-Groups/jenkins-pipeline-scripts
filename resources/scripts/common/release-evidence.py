@@ -47,7 +47,7 @@ def policy(approvers):
             "not_applicable_advisories": [{"id": "GO-2026-5932",
                 "affected_package_prefix": "golang.org/x/crypto/openpgp",
                 "required_package_graphs": [item["name"] for item in PACKAGE_GRAPHS],
-                "require_no_govuln_finding": True}],
+                "require_no_govuln_affected_package_finding": True}],
             "max_evidence_age_seconds": 3600, "max_exception_seconds": 900,
             "approvers": approvers, "revoked_approval_ids": []}
 
