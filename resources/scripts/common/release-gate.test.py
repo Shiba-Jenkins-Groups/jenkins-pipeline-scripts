@@ -226,6 +226,40 @@ class ReleaseGateTests(unittest.TestCase):
         with self.assertRaises(gate.InvalidEvidence):
             self.evaluate()
 
+    def configure_openpgp_not_applicable(self):
+        self.policy["not_applicable_advisories"] = [copy.deepcopy(gate.NOT_APPLICABLE_RULE)]
+        graph = {"schema_version": 1, "complete": True, "commit": self.evidence["commit"],
+                 "go_version": "go version go1.26.6 linux/arm64", "graphs": []}
+        for name in gate.NOT_APPLICABLE_RULE["required_package_graphs"]:
+            graph["graphs"].append({"name": name, "goos": "linux", "goarch": "arm64",
+                "cgo_enabled": "0", "tags": "nodynamic", "test": name.endswith("tests"),
+                "target": "./...", "packages": ["example/app", "golang.org/x/crypto/argon2"]})
+        self.evidence["package_graph"] = self.write("package-graphs.json", graph)
+        self.native["govulncheck"]["messages"].append({"osv": {"id": "GO-2026-5932",
+            "affected": [{"package": {"name": "golang.org/x/crypto"}}]}})
+        self.write_reports()
+        return graph
+
+    def test_approved_openpgp_not_applicable_rule_passes_with_exact_graph_evidence(self):
+        self.configure_openpgp_not_applicable()
+        result = self.evaluate()
+        self.assertEqual(result["decision"], "PASS")
+        self.assertEqual(result["not_applicable"], ["GO-2026-5932"])
+
+    def test_openpgp_rule_fails_closed_for_package_use_or_govuln_finding(self):
+        graph = self.configure_openpgp_not_applicable()
+        graph["graphs"][0]["packages"].append("golang.org/x/crypto/openpgp/packet")
+        self.evidence["package_graph"] = self.write("package-graphs-affected.json", graph)
+        with self.assertRaises(gate.InvalidEvidence):
+            self.evaluate()
+        graph["graphs"][0]["packages"].pop()
+        self.evidence["package_graph"] = self.write("package-graphs-safe.json", graph)
+        self.native["govulncheck"]["messages"].append({"finding": {"osv": "GO-2026-5932",
+            "trace": [{"module": "golang.org/x/crypto", "package": "golang.org/x/crypto/openpgp"}]}})
+        self.write_reports()
+        with self.assertRaises(gate.InvalidEvidence):
+            self.evaluate()
+
     def test_native_digest_mismatch_blocks(self):
         self.native["harbor"]["artifact"]["digest"] = "sha256:" + "f" * 64
         self.write_reports()

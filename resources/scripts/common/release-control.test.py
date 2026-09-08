@@ -122,6 +122,13 @@ class Controls(unittest.TestCase):
             if command[0] == "git": return ""
             if command[0] == "govulncheck":
                 return json.dumps({"config": {"scanner_version": "test", "db_last_modified": "2026-09-08"}})
+            if command[:2] == ["go", "list"]:
+                self.assertEqual(env["GOOS"], "linux")
+                self.assertEqual(env["GOARCH"], "arm64")
+                self.assertEqual(env["CGO_ENABLED"], "0")
+                return "example/app\ngolang.org/x/crypto/argon2\n"
+            if command[:2] == ["go", "version"]:
+                return "go version go1.26.6 linux/arm64"
             if "image" in command:
                 self.assertEqual(command[command.index("--ignorefile") + 1], "/dev/null")
                 self.assertEqual(command[command.index("--config") + 1], "/dev/null")
@@ -136,6 +143,7 @@ class Controls(unittest.TestCase):
             self.evidence["reports"] = []
             adapter.scan(self.evidence, self.root, out, "http://harbor.invalid")
         self.assertEqual(len(self.evidence["reports"]), 3)
+        self.assertTrue((out / "package-graphs.json").is_file())
         self.assertTrue((out / "evidence.json").is_file())
 
     def setup_git(self):

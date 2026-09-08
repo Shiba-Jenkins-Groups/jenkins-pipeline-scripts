@@ -31,6 +31,11 @@ STAGES = ["Checkout", "Load Scripts", "Detect", "Secret Scan", "Build", "Test",
           "Image Scan", "Harbor Push", "Harbor Vulnerability Report", "Smoke Test",
           "Deployment Verification — k3s", "Declarative: Post Actions"]
 FINALIZE = "Release Finalization — Artifact / Git Tag"
+PACKAGE_GRAPHS = [
+    {"name": "linux-arm64-nodynamic-tests", "tags": "nodynamic", "test": True, "target": "./..."},
+    {"name": "linux-arm64-devseed-nodynamic-tests", "tags": "devseed,nodynamic", "test": True, "target": "./..."},
+    {"name": "linux-arm64-nodynamic-server", "tags": "nodynamic", "test": False, "target": "./cmd/app/server"},
+]
 
 
 def policy(approvers):
@@ -38,6 +43,10 @@ def policy(approvers):
             "jobs": {"promotion": gate.PRODUCT + "/develop", "deployment": gate.PRODUCT + "/prod"},
             "required_stages": {"promotion": STAGES, "deployment": STAGES + [FINALIZE]},
             "required_scanners": ["trivy", "govulncheck", "harbor"],
+            "not_applicable_advisories": [{"id": "GO-2026-5932",
+                "affected_package_prefix": "golang.org/x/crypto/openpgp",
+                "required_package_graphs": [item["name"] for item in PACKAGE_GRAPHS],
+                "require_no_govuln_finding": True}],
             "max_evidence_age_seconds": 3600, "max_exception_seconds": 900,
             "approvers": approvers, "revoked_approval_ids": []}
 
@@ -246,6 +255,19 @@ def scan(evidence, source, root, harbor_url):
     configs = [m["config"] for m in go_messages if "config" in m]
     require(len(configs) == 1, "govulncheck config missing or duplicated")
     go_config = configs[0]
+    graphs = []
+    for spec in PACKAGE_GRAPHS:
+        graph_env = dict(env, GOOS="linux", GOARCH="arm64", CGO_ENABLED="0")
+        command = ["go", "list", "-mod=readonly", "-deps"]
+        if spec["test"]:
+            command.append("-test")
+        command.extend(["-tags=" + spec["tags"], spec["target"]])
+        packages = sorted(set(line for line in run(command, source, graph_env).splitlines() if line))
+        require(packages, "empty package graph")
+        graphs.append({**spec, "goos": "linux", "goarch": "arm64", "cgo_enabled": "0", "packages": packages})
+    evidence["package_graph"] = save(root, "package-graphs.json", {
+        "schema_version": 1, "complete": True, "commit": evidence["commit"],
+        "go_version": run(["go", "version"], source, env).strip(), "graphs": graphs})
     harbor = module("release_harbor", "harbor-vulnerability-report.py")
     api = harbor.HarborAPI(harbor_url, os.environ["HARBOR_USER"], os.environ["HARBOR_PASS"])
     item = harbor.scan_image(api, evidence["immutable_image"], 600, 3)

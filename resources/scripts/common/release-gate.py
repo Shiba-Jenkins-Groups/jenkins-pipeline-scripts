@@ -23,6 +23,14 @@ SHA = re.compile(r"[0-9a-f]{40}")
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 WAIVABLE_STAGES = {'Test', 'Fast Contract Test', 'Dependency Scan', 'Image Scan'}
 CANDIDATE_STAGES = WAIVABLE_STAGES | {'Harbor Vulnerability Report'}
+NOT_APPLICABLE_RULE = {
+    "id": "GO-2026-5932",
+    "affected_package_prefix": "golang.org/x/crypto/openpgp",
+    "required_package_graphs": ["linux-arm64-nodynamic-tests",
+                                "linux-arm64-devseed-nodynamic-tests",
+                                "linux-arm64-nodynamic-server"],
+    "require_no_govuln_finding": True,
+}
 
 
 class InvalidEvidence(ValueError):
@@ -181,6 +189,45 @@ def stage_findings(evidence, policy, root):
     return findings
 
 
+def verified_not_applicable(evidence, policy, root, native_reports, findings):
+    """Return exact advisory IDs proven outside this build's package graph.
+
+    Raw scanner findings remain archived.  This only implements the product's
+    explicitly approved GO-2026-5932 rule and fails closed if graph or
+    govulncheck evidence is missing, changed, or reachable.
+    """
+    candidate_ids = {item["id"] for item in findings}
+    if NOT_APPLICABLE_RULE["id"] not in candidate_ids:
+        return set()
+    rules = policy.get("not_applicable_advisories")
+    require(isinstance(rules, list) and rules == [NOT_APPLICABLE_RULE],
+            "not-applicable policy is missing or changed")
+    graph = verified_report(root, evidence.get("package_graph", {}))
+    require(graph.get("schema_version") == 1 and graph.get("complete") is True
+            and graph.get("commit") == evidence["commit"] and graph.get("go_version"),
+            "package graph evidence is incomplete")
+    graphs = graph.get("graphs")
+    require(isinstance(graphs, list) and len(graphs) == len(NOT_APPLICABLE_RULE["required_package_graphs"]),
+            "package graph set is incomplete")
+    require({item.get("name") for item in graphs} == set(NOT_APPLICABLE_RULE["required_package_graphs"]),
+            "package graph identity mismatch")
+    prefix = NOT_APPLICABLE_RULE["affected_package_prefix"]
+    for item in graphs:
+        require(item.get("goos") == "linux" and item.get("goarch") == "arm64"
+                and item.get("cgo_enabled") == "0" and item.get("tags")
+                and isinstance(item.get("test"), bool) and item.get("target")
+                and isinstance(item.get("packages"), list) and item["packages"],
+                "package graph build conditions are incomplete")
+        require(all(isinstance(pkg, str) and pkg and pkg != prefix and not pkg.startswith(prefix + "/")
+                    for pkg in item["packages"]), "affected openpgp package is in the build graph")
+    go_native = native_reports.get("govulncheck", {})
+    messages = go_native.get("messages")
+    require(isinstance(messages, list), "govulncheck evidence missing for not-applicable rule")
+    require(not any(message.get("finding", {}).get("osv") == NOT_APPLICABLE_RULE["id"]
+                    for message in messages), "govulncheck reports the advisory as affected")
+    return {NOT_APPLICABLE_RULE["id"]}
+
+
 def evaluate(evidence, policy, root, now, approval=None, approval_key=None):
     """Fail closed; callers must also authenticate the evidence and policy source."""
     require(evidence.get("schema_version") == 1 and policy.get("schema_version") == 1,
@@ -225,6 +272,7 @@ def evaluate(evidence, policy, root, now, approval=None, approval_key=None):
     require(set(policy["required_scanners"]) == {"trivy", "govulncheck", "harbor"},
             "required scanner policy cannot be weakened")
     findings = {finding_key(item): item for item in stage_findings(evidence, policy, root)}
+    native_reports = {}
     for record in reports:
         report = verified_report(root, record)
         # The adapter must retain native report bytes alongside this normalized
@@ -241,14 +289,18 @@ def evaluate(evidence, policy, root, now, approval=None, approval_key=None):
         scan_age = (now - timestamp(report["completed_at"])).total_seconds()
         require(0 <= scan_age <= policy["max_evidence_age_seconds"], "stale scan")
         native = verified_report(root, report["native_report"])
+        native_reports[record["scanner"]] = native
         require(native, "empty native report")
         for finding in native_findings(record["scanner"], native, evidence["image_digest"]):
             require(finding.get("scanner") == record["scanner"], "finding scanner mismatch")
             require(finding.get("severity") in SEVERITIES, "unknown severity encoding")
             findings[finding_key(finding)] = finding
+    not_applicable = verified_not_applicable(evidence, policy, root, native_reports, findings.values())
+    findings = {key: item for key, item in findings.items() if item["id"] not in not_applicable}
     if not findings:
         require(approval is None, "unexpected approval for clean evidence")
-        return {"decision": "PASS", "finding_count": 0}
+        return {"decision": "PASS", "finding_count": 0,
+                "not_applicable": sorted(not_applicable)}
     require(approval is not None, "unapproved vulnerabilities")
     require(isinstance(approval_key, bytes) and len(approval_key) >= 32, "missing approval verifier")
     payload = approval["payload"]

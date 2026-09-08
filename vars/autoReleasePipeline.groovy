@@ -51,6 +51,11 @@ def call(Map config = [:]) {
                     candidate_mode: true, waivable_stages: ['Test', 'Fast Contract Test', 'Dependency Scan', 'Image Scan'],
                     required_stages: [promotion: commonStages, deployment: commonStages],
                     required_scanners: ['trivy', 'govulncheck', 'harbor'], max_evidence_age_seconds: 3600,
+                    not_applicable_advisories: [[id: 'GO-2026-5932',
+                        affected_package_prefix: 'golang.org/x/crypto/openpgp',
+                        required_package_graphs: ['linux-arm64-nodynamic-tests',
+                            'linux-arm64-devseed-nodynamic-tests', 'linux-arm64-nodynamic-server'],
+                        require_no_govuln_finding: true]],
                     max_exception_seconds: 900, approvers: config.approvers,
                     revoked_approval_ids: config.revokedApprovalIds ?: []
                 ])
