@@ -118,9 +118,27 @@ def no_host_writer(runtime):
     # Inventory open file descriptors only. Never sqlite3/open/read the live DB.
     directory = runtime / "data/db/app"
     require(directory.is_dir(), "PROD DB directory missing")
-    result = subprocess.run(["lsof", "-t", "+D", str(directory)], capture_output=True, text=True, timeout=30)
+    result = subprocess.run(["lsof", "-Fpc", "+D", str(directory)], capture_output=True, text=True, timeout=30)
     require(result.returncode in {0, 1} and not result.stderr.strip(), "host file-owner inventory unavailable")
-    require(result.returncode == 1 and not result.stdout.strip(), "host process has PROD DB tree open")
+    if result.returncode == 1 and not result.stdout.strip():
+        return
+    pids = [line[1:] for line in result.stdout.splitlines() if line.startswith("p")]
+    require(pids and all(pid.isdigit() for pid in pids), "host file-owner inventory incomplete")
+    # Docker Desktop's backend and VM process necessarily hold bind-mounted DB
+    # files on behalf of the one validated Docker locking domain. They are not
+    # independent host SQLite clients. Every other host process still blocks.
+    docker_owners = {
+        "/Applications/Docker.app/Contents/MacOS/com.docker.backend",
+        "/System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/"
+        "com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine",
+    }
+    for pid in pids:
+        owner = subprocess.run(["ps", "-ww", "-p", pid, "-o", "command="],
+                               capture_output=True, text=True, timeout=5)
+        require(owner.returncode == 0 and owner.stdout.strip() and not owner.stderr.strip(),
+                "host file-owner identity unavailable")
+        executable = owner.stdout.strip().split()[0]
+        require(executable in docker_owners, "host process has PROD DB tree open")
 
 
 def final_identity(request, image_id, runtime):

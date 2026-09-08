@@ -114,11 +114,20 @@ class Deployment(unittest.TestCase):
             runner.target_container([self.container, other], self.root)
 
     def test_host_open_fds_and_inventory_errors_fail_closed(self):
-        for rc, out, err in [(0, '123\n', ''), (1, '', 'permission denied'), (2, '', '')]:
+        for rc, out, err in [(0, 'p123\ncsqlite3\n', ''), (1, '', 'permission denied'), (2, '', '')]:
             with patch.object(runner.subprocess, 'run', return_value=types.SimpleNamespace(returncode=rc, stdout=out, stderr=err)):
                 with self.assertRaises(ValueError):
                     runner.no_host_writer(self.root)
         with patch.object(runner.subprocess, 'run', return_value=types.SimpleNamespace(returncode=1, stdout='', stderr='')):
+            runner.no_host_writer(self.root)
+
+    def test_docker_vm_file_descriptors_are_the_validated_owner_domain(self):
+        allowed = '/Applications/Docker.app/Contents/MacOS/com.docker.backend services\n'
+        def process(command, **kwargs):
+            if command[0] == 'lsof':
+                return types.SimpleNamespace(returncode=0, stdout='p123\nccom.docke\n', stderr='')
+            return types.SimpleNamespace(returncode=0, stdout=allowed, stderr='')
+        with patch.object(runner.subprocess, 'run', side_effect=process):
             runner.no_host_writer(self.root)
 
     def test_image_commit_version_branch_and_digest_are_required(self):
