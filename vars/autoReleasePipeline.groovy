@@ -1,5 +1,11 @@
+import com.cloudbees.groovy.cps.NonCPS
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurperClassic
+
+@NonCPS
+def parseReleaseJson(String raw) {
+    new JsonSlurperClassic().parseText(raw)
+}
 
 // Called only from the centrally managed product coordinator job, never from a
 // branch Jenkinsfile. Installing/enabling the job is a separate release gate.
@@ -35,7 +41,6 @@ def call(Map config = [:]) {
         dir("auto-release-${env.BUILD_NUMBER}") {
             def root = pwd()
             def control = "${root}/control"
-            def parse = { path -> new JsonSlurperClassic().parseText(readFile(path)) }
             stage('Load Trusted Release Controls') {
                 ['release-gate.py', 'release-evidence.py', 'release-promotion.py',
                  'release-finalization.py', 'release-finalize.sh', 'error-handler.sh', 'nexus-upload.sh', 'git-tag.sh',
@@ -81,7 +86,7 @@ def call(Map config = [:]) {
                                 --jenkins-url "$RELEASE_JENKINS_URL" --branch "$RELEASE_BRANCH" \
                                 --build "$RELEASE_BUILD" --candidate-root "$RELEASE_PHASE/evidence" --output "$RELEASE_PHASE/identity.json"'''
                         }
-                        def identity = parse("${phase}/identity.json")
+                        def identity = parseReleaseJson(readFile("${phase}/identity.json"))
                         if (expectedCommit && identity.commit != expectedCommit) { error('PROD checkout differs from promoted commit') }
                         dir("${phase}/source") {
                             checkout([$class: 'GitSCM', branches: [[name: identity.commit]],
@@ -106,7 +111,7 @@ def call(Map config = [:]) {
                             --evidence "$RELEASE_PHASE/evidence/evidence.json" --policy "$RELEASE_CONTROL/policy.json" \
                             --output "$RELEASE_PHASE/review.json"'''
                         archiveArtifacts artifacts: "${branch}/evidence/*.json,${branch}/review.json", allowEmptyArchive: false
-                        def review = parse("${phase}/review.json")
+                        def review = parseReleaseJson(readFile("${phase}/review.json"))
                         if (review.decision == 'NEEDS_APPROVAL') {
                             def response
                             timeout(time: 15, unit: 'MINUTES') {
@@ -132,7 +137,7 @@ def call(Map config = [:]) {
                         } else if (review.decision != 'PASS') { error('Release gate blocked') }
                     }
                 }
-                return parse("${phase}/identity.json")
+                return parseReleaseJson(readFile("${phase}/identity.json"))
             }
 
             verifyPhase('develop', sourceBuild, null)
@@ -158,7 +163,7 @@ python3 control/release-promotion.py promote --source develop/source --state-dir
                 }
                 archiveArtifacts artifacts: 'promotion.json', allowEmptyArchive: false
             }
-            def promotion = parse('promotion.json')
+            def promotion = parseReleaseJson(readFile('promotion.json'))
             def prodRun
             stage('Run PROD CI/CD') {
                 prodRun = build(job: "${product}/prod", wait: true, propagate: false, quietPeriod: 0)

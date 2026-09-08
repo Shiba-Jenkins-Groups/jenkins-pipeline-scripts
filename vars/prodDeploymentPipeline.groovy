@@ -1,4 +1,10 @@
+import com.cloudbees.groovy.cps.NonCPS
 import groovy.json.JsonSlurperClassic
+
+@NonCPS
+def parseReleaseJson(String raw) {
+    new JsonSlurperClassic().parseText(raw)
+}
 
 // Centrally managed, restricted macOS job. Never load this from product SCM.
 def call(Map config = [:]) {
@@ -31,7 +37,7 @@ def call(Map config = [:]) {
                             sh 'PYTHONDONTWRITEBYTECODE=1 python3 control/release-deploy.py inspect --request request.json --key-file "$RECEIPT_KEY_FILE" --output identity.json'
                         }
                     }
-                    def identity = new JsonSlurperClassic().parseText(readFile('identity.json'))
+                    def identity = parseReleaseJson(readFile('identity.json'))
                     stage('Checkout Exact Promoted Source') {
                         dir('source') {
                             checkout([$class: 'GitSCM', branches: [[name: identity.commit]],
@@ -53,7 +59,7 @@ python3 control/release-deploy.py deploy --request request.json --key-file "$REC
                             }
                         }
                     }
-                    def receipt = new JsonSlurperClassic().parseText(readFile('runtime-receipt.json'))
+                    def receipt = parseReleaseJson(readFile('runtime-receipt.json'))
                     if (receipt.payload.status != 'SUCCESS') { error('Runtime receipt is not SUCCESS') }
                     currentBuild.description = "PROD ${identity.version} ${identity.commit.take(12)} ${identity.digest}"
                 } finally {
