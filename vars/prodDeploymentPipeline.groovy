@@ -3,14 +3,15 @@ import groovy.json.JsonSlurperClassic
 // Centrally managed, restricted macOS job. Never load this from product SCM.
 def call(Map config = [:]) {
     def product = 'shiba-go-ditch-api-project'
+    def releaseFolder = 'shiba-release-automation'
     if (config.enabled != true) { error('PROD deployment is not enabled') }
     ['nodeLabel', 'runtimeRoot', 'stateDirectory', 'dockerEngineId', 'receiptKeyCredentials', 'scmCredentials'].each { key ->
         if (!config[key]?.toString()?.trim()) { error("Missing trusted deployment configuration: ${key}") }
     }
-    if (env.JOB_NAME != "${product}-prod-deploy") { error('Deployment job identity mismatch') }
+    if (env.JOB_NAME != "${releaseFolder}/${product}-prod-deploy") { error('Deployment job identity mismatch') }
     properties([disableConcurrentBuilds(), parameters([text(name: 'SIGNED_RELEASE_REQUEST', defaultValue: '')])])
     def causes = currentBuild.getBuildCauses('hudson.model.Cause$UpstreamCause')
-    if (causes.size() != 1 || causes[0].upstreamProject != "${product}-auto-release") {
+    if (causes.size() != 1 || causes[0].upstreamProject != "${releaseFolder}/${product}-auto-release") {
         error('Deployment requires the trusted coordinator upstream cause')
     }
     if (!params.SIGNED_RELEASE_REQUEST?.trim() || params.SIGNED_RELEASE_REQUEST.size() > 65536) {

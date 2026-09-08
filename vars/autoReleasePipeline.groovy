@@ -5,6 +5,7 @@ import groovy.json.JsonSlurperClassic
 // branch Jenkinsfile. Installing/enabling the job is a separate release gate.
 def call(Map config = [:]) {
     def product = 'shiba-go-ditch-api-project'
+    def releaseFolder = 'shiba-release-automation'
     if (config.enabled != true) { error('Automatic release is not enabled') }
     ['jenkinsApiUrl', 'jenkinsReadCredentials', 'harborCredentials', 'harborApiUrl',
      'scmCredentials', 'mergeCredentials', 'approvalKeyCredentials', 'receiptKeyCredentials',
@@ -14,8 +15,8 @@ def call(Map config = [:]) {
     }
     if (!(config.approvers instanceof List) || !config.approvers) { error('Explicit approvers are required') }
     if (!(config.libraryRevision ==~ /[0-9a-f]{40}/)) { error('Pin the trusted library revision') }
-    if (config.deploymentJob != "${product}-prod-deploy") { error('Unexpected deployment job') }
-    if (env.JOB_NAME != "${product}-auto-release") { error('Coordinator job identity mismatch') }
+    if (config.deploymentJob != "${releaseFolder}/${product}-prod-deploy") { error('Unexpected deployment job') }
+    if (env.JOB_NAME != "${releaseFolder}/${product}-auto-release") { error('Coordinator job identity mismatch') }
     properties([
         disableConcurrentBuilds(),
         pipelineTriggers([upstream(upstreamProjects: "${product}/develop", threshold: 'UNSTABLE')])

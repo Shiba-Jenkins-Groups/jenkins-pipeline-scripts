@@ -3,10 +3,11 @@ import groovy.json.JsonOutput
 // Plain Groovy mocks only: sh, checkout, build, node and credentials NEVER run.
 def root = new File(args ? args[0] : '.').canonicalFile
 def product = 'shiba-go-ditch-api-project'
+def releaseFolder = 'shiba-release-automation'
 def config = [enabled: true, approvers: ['reviewer'], jenkinsApiUrl: 'http://jenkins.invalid',
     jenkinsReadCredentials: 'read', harborCredentials: 'harbor', harborApiUrl: 'http://harbor.invalid',
     scmCredentials: 'scm', mergeCredentials: 'merge', approvalKeyCredentials: 'approval', receiptKeyCredentials: 'receipt',
-    stateDirectory: '/fake/state', builderLabel: 'builder', deploymentJob: product + '-prod-deploy',
+    stateDirectory: '/fake/state', builderLabel: 'builder', deploymentJob: releaseFolder + '/' + product + '-prod-deploy',
     deploymentNodeLabel: 'mac-prod', nodeLabel: 'mac-prod', runtimeRoot: '/fake/runtime', dockerEngineId: 'fake-engine', libraryRevision: 'f' * 40,
     finalizationStateDirectory: '/fake/finalization', finalizationWriterCredentials: 'tag-writer', nexusCredentials: 'nexus', nexusBaseUrl: 'http://nexus.invalid']
 
@@ -14,10 +15,10 @@ def simulate = { String filename, Map options = [:] ->
     boolean deploy = filename == 'prodDeploymentPipeline.groovy'
     def calls = []
     def binding = new Binding()
-    binding.setVariable('env', [JOB_NAME: product + (deploy ? '-prod-deploy' : '-auto-release'), BUILD_NUMBER: '1'])
+    binding.setVariable('env', [JOB_NAME: releaseFolder + '/' + product + (deploy ? '-prod-deploy' : '-auto-release'), BUILD_NUMBER: '1'])
     binding.setVariable('params', [SIGNED_RELEASE_REQUEST: '{}'])
     binding.setVariable('currentBuild', [getBuildCauses: { String type ->
-        [[upstreamProject: options.wrongCause ? 'untrusted' : product + (deploy ? '-auto-release' : '/develop'), upstreamBuild: 188]]
+        [[upstreamProject: options.wrongCause ? 'untrusted' : (deploy ? releaseFolder + '/' + product + '-auto-release' : product + '/develop'), upstreamBuild: 188]]
     }])
     binding.setVariable('error', { String message -> throw new IllegalStateException(message) })
     ['properties', 'archiveArtifacts', 'checkout', 'writeFile'].each { name ->
@@ -73,7 +74,7 @@ int tests = 0
 def result = simulate('autoReleasePipeline.groovy')
 assert !result.failed
 assert result.calls.count('build:' + product + '/prod') == 1
-assert result.calls.count('build:' + product + '-prod-deploy') == 1
+assert result.calls.count('build:' + releaseFolder + '/' + product + '-prod-deploy') == 1
 assert result.calls.indexOf('prod: Release Gate') < result.calls.indexOf('Finalize Revalidated PROD Candidate')
 assert result.calls.indexOf('Finalize Revalidated PROD Candidate') < result.calls.indexOf('Authorize Deployment Handoff')
 tests++
@@ -88,7 +89,7 @@ for (options in [[disabled: true], [wrongCause: true], [upstreamResult: 'FAILURE
 for (options in [[prodResult: 'FAILURE'], [wrongProdSha: true], [failStage: 'prod: All Severity Scans'], [failStage: 'Finalize Revalidated PROD Candidate']]) {
     result = simulate('autoReleasePipeline.groovy', options)
     assert result.failed
-    assert !result.calls.contains('build:' + product + '-prod-deploy')
+    assert !result.calls.contains('build:' + releaseFolder + '/' + product + '-prod-deploy')
     tests++
 }
 result = simulate('autoReleasePipeline.groovy', [review: 'NEEDS_APPROVAL'])
