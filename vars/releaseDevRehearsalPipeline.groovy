@@ -48,7 +48,7 @@ root=pathlib.Path('.')
 receipt={'scope':'DEV_CONTRACT_ONLY','runtime_deployed':False,'prod_enabled':False,
          'result':'SUCCESS','library_revision':(root/'reviewed-library.txt').read_text().strip(),
          'source_sha256':{p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted((root/'suite').glob('*.py'))}}
-(root/'reports/contract-receipt.json').write_text(json.dumps(receipt,indent=2)+'\n')
+(root/'reports/contract-receipt.json').write_text(json.dumps(receipt,indent=2)+chr(10))
 PY
 '''
                     }
