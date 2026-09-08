@@ -29,7 +29,7 @@ NOT_APPLICABLE_RULE = {
     "required_package_graphs": ["linux-arm64-nodynamic-tests",
                                 "linux-arm64-devseed-nodynamic-tests",
                                 "linux-arm64-nodynamic-server"],
-    "require_no_govuln_finding": True,
+    "require_no_govuln_affected_package_finding": True,
 }
 
 
@@ -223,8 +223,16 @@ def verified_not_applicable(evidence, policy, root, native_reports, findings):
     go_native = native_reports.get("govulncheck", {})
     messages = go_native.get("messages")
     require(isinstance(messages, list), "govulncheck evidence missing for not-applicable rule")
-    require(not any(message.get("finding", {}).get("osv") == NOT_APPLICABLE_RULE["id"]
-                    for message in messages), "govulncheck reports the advisory as affected")
+    affected_findings = []
+    for message in messages:
+        finding = message.get("finding", {})
+        if finding.get("osv") != NOT_APPLICABLE_RULE["id"]:
+            continue
+        trace = finding.get("trace") or []
+        if any(frame.get("package") == prefix or str(frame.get("package", "")).startswith(prefix + "/")
+               for frame in trace if isinstance(frame, dict)):
+            affected_findings.append(finding)
+    require(not affected_findings, "govulncheck reports the affected openpgp package")
     return {NOT_APPLICABLE_RULE["id"]}
 
 

@@ -242,6 +242,9 @@ class ReleaseGateTests(unittest.TestCase):
 
     def test_approved_openpgp_not_applicable_rule_passes_with_exact_graph_evidence(self):
         self.configure_openpgp_not_applicable()
+        self.native["govulncheck"]["messages"].append({"finding": {"osv": "GO-2026-5932",
+            "trace": [{"module": "golang.org/x/crypto", "version": "v0.56.0"}]}})
+        self.write_reports()
         result = self.evaluate()
         self.assertEqual(result["decision"], "PASS")
         self.assertEqual(result["not_applicable"], ["GO-2026-5932"])
