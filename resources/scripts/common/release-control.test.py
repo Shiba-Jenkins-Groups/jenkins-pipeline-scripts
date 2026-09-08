@@ -87,10 +87,10 @@ class Controls(unittest.TestCase):
         with self.assertRaises(ValueError):
             adapter.key_values("IMAGE_DIGEST=x\nIMAGE_DIGEST=y")
 
-    def test_prod_routing_requires_all_trigger_suppression(self):
-        valid = '<project><properties><jenkins.branch.NoTriggerBranchProperty><strategy>ALL</strategy><triggeredBranchesRegex>^$</triggeredBranchesRegex></jenkins.branch.NoTriggerBranchProperty></properties></project>'
+    def test_prod_routing_requires_complete_trigger_suppression(self):
+        valid = '<project><properties><jenkins.branch.NoTriggerBranchProperty><strategy>NONE</strategy><triggeredBranchesRegex>^$</triggeredBranchesRegex></jenkins.branch.NoTriggerBranchProperty></properties></project>'
         adapter.prod_routing(valid)
-        for invalid in ['<project/>', valid.replace('ALL', 'INDEXING'), valid.replace('^$', '.*')]:
+        for invalid in ['<project/>', valid.replace('NONE', 'INDEXING'), valid.replace('^$', '.*')]:
             with self.subTest(xml=invalid), self.assertRaises(ValueError):
                 adapter.prod_routing(invalid)
 

@@ -54,7 +54,7 @@ Job 名稱固定為 `shiba-go-ditch-api-project-prod-deploy`，預先宣告 Text
 ## 啟用前必須逐項驗證
 
 1. Jenkins 設定、Shared Library 及 App 的來源都經審查與既有 CI/CD。不得連同既有 dirty lean-lane／backup 等修改混送。本機程式不是線上已生效設定。
-2. prod branch 的**有效子 job** 必須具有 `jenkins.branch.NoTriggerBranchProperty`、strategy=`ALL`、不匹配任何分支的 regex（例如 `^$`）。從 multibranch 的 named-branch property strategy 配置，不能只編輯下次 indexing 會覆寫的子 job。此配置在重建／indexing 後仍須 REST 驗證。develop 保留既有 branch event trigger。
+2. prod branch 的**有效子 job** 必須具有 `jenkins.branch.NoTriggerBranchProperty`。目前 branch-api 版本使用 strategy=`NONE` 搭配不匹配任何分支的 regex（`^$`）；handler 會在 strategy 判定前因 regex 不匹配而同時抑制 indexing 與 event cause。舊版若序列化為 strategy=`ALL` 亦可接受。此設定須從 multibranch 的 named-branch property strategy 配置，不能只編輯下次 indexing 會覆寫的子 job；重建／indexing 後仍須 REST 驗證。develop 保留既有 branch event trigger。
 3. 協調者與 runner 的 job Configure／Build／Replay、Library 修改權、agent 排程權、憑證使用權必須受控。禁止一般 branch job 取得簽章 key 或排入 deployment node。節點 label 本身不是安全隔離；目前 builder 的共享 Docker socket 仍是信任邊界缺口，必須先驗證隔離／存取控制，不能宣稱新 label 已解决。
 4. 兩個 HMAC Secret File 各使用至少 32 bytes 的獨立隨機 key；只在簽發／驗證 stage 綁定，不放 Git、參數、環境設定檔或報告。簽章 key 與對應 state 目錄須受限制且持久化。金鑰遺失、輪替及核准撤銷需人工核對在途收據。
 5. `approvers` 必須是真實 user ID。Input 15 分鐘逾時；核准單最長 15 分鐘，僅綁當次 gate、報告與 findings。PROD handoff 的有效期不延長 PROD CVE 核准期限。更新撤銷清單不會追溯改寫已簽發收據；撤銷在途 handoff 必須同步停止待執行部署。

@@ -168,7 +168,12 @@ def prod_routing(xml):
     properties = root.findall(".//jenkins.branch.NoTriggerBranchProperty")
     require(len(properties) == 1, "prod automatic SCM triggers are not suppressed")
     prop = properties[0]
-    require(prop.findtext("strategy", "ALL") == "ALL"
+    # branch-api 2.1268 uses INDEXING / EVENTS / NONE.  With a regex that
+    # matches no branch, the handler suppresses both indexing and event causes
+    # before consulting the strategy; NONE is therefore the explicit setting
+    # for this installed version.  Keep ALL accepted for older serialized
+    # configurations that exposed an all-causes enum.
+    require(prop.findtext("strategy", "NONE") in {"NONE", "ALL"}
             and prop.findtext("triggeredBranchesRegex", "^$") in {"", "^$", "(?!)"},
             "prod trigger suppression is incomplete")
 
