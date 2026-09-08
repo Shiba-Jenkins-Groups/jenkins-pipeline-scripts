@@ -141,6 +141,21 @@ class CandidateTests(unittest.TestCase):
         with self.assertRaises(ValueError): self.evaluate(approval=approval, approval_key=self.key)
         self.assertEqual(len(control.review(self.evidence, self.policy, self.root, self.now)['findings']), 2)
 
+    def test_scanner_stage_findings_are_not_duplicate_approval_items(self):
+        self.evidence['result'] = 'UNSTABLE'
+        next(s for s in self.evidence['stages'] if s['name'] == 'Image Scan')['result'] = 'UNSTABLE'
+        self.records['Image Scan'].update(finding_count=1, outcome='WAIVER_REQUIRED')
+        self.records['Image Scan']['reports'][0] = self.raw('image.log', gate.canonical({
+            'SchemaVersion': 2, 'Results': [{'Vulnerabilities': [{
+                'VulnerabilityID': 'CVE-TEST-IMAGE', 'PkgName': 'example',
+                'InstalledVersion': '1', 'Severity': 'LOW'}]}]}))
+        self.write_checks()
+        self.fixture.vulnerable('LOW')
+        review = control.review(self.evidence, self.policy, self.root, self.now)
+        self.assertEqual(review['decision'], 'NEEDS_APPROVAL')
+        self.assertEqual(len(review['findings']), 1)
+        self.assertEqual(next(iter(review['findings'].values()))['scanner'], 'trivy')
+
     def test_collector_rejects_previously_finalized_candidate(self):
         built = {'number': 1, 'building': False, 'result': 'SUCCESS', 'timestamp': 1788868800000, 'duration': 0,
                  'actions': [{'lastBuiltRevision': {'SHA1': self.evidence['commit'], 'branch': [{'name': 'prod'}]}}]}

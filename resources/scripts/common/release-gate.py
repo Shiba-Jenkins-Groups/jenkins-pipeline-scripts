@@ -87,7 +87,8 @@ def native_findings(scanner, native, digest):
                              "severity": vuln["severity"].upper()})
     elif scanner == "govulncheck":
         # govulncheck emits JSON objects as a stream; the collector stores that
-        # unmodified sequence in messages. Include OSVs even if unreachable.
+        # unmodified sequence in messages. OSV messages are advisory metadata;
+        # only explicit finding messages describe this build's modules/packages.
         messages = native.get("messages")
         require(isinstance(messages, list) and any("config" in m for m in messages),
                 "missing govulncheck config")
@@ -97,20 +98,16 @@ def native_findings(scanner, native, digest):
                 continue
             found = message["finding"]
             require(found["osv"] in osvs, "finding missing OSV evidence")
-            for trace in found["trace"]:
-                if trace.get("module"):
+            trace = found.get("trace")
+            require(isinstance(trace, list) and trace, "finding missing trace evidence")
+            identified = False
+            for frame in trace:
+                if frame.get("module"):
                     findings.append({"scanner": scanner, "id": found["osv"],
-                                     "package": trace["module"], "version": trace.get("version") or "unknown",
+                                     "package": frame["module"], "version": frame.get("version") or "unknown",
                                      "target": "source", "severity": "UNKNOWN"})
-        for vuln_id, osv in osvs.items():
-            # An OSV with no installed-version trace still blocks; exception
-            # identity is bound to the entire report and source commit.
-            if not any(f["id"] == vuln_id for f in findings):
-                for affected in osv["affected"]:
-                    findings.append({"scanner": scanner, "id": vuln_id,
-                                     "package": affected["package"]["name"], "version": "unknown",
-                                     "target": "source", "severity": "UNKNOWN"})
-            require(any(f["id"] == vuln_id for f in findings), "OSV missing package identity")
+                    identified = True
+            require(identified, "finding missing module identity")
     else:
         raise InvalidEvidence("unsupported scanner")
     return findings
@@ -143,6 +140,7 @@ def stage_findings(evidence, policy, root):
             'missing or duplicate candidate stage evidence')
     observed = {s['name']: s['result'] for s in evidence['stages']}
     findings = []
+    had_findings = False
     for record in records:
         name = record['stage']
         require(record.get('schema_version') == 1 and record.get('complete') is True and record.get('commit') == evidence['commit']
@@ -171,7 +169,7 @@ def stage_findings(evidence, policy, root):
                 require(isinstance(value, dict), 'invalid govulncheck stream')
                 messages.append(value)
             require(sum('config' in m for m in messages) == 1, 'missing govulncheck config')
-            count = sum('osv' in m for m in messages)
+            count = sum('finding' in m for m in messages)
         elif name == 'Image Scan':
             require(rc == 0, 'Trivy execution failed')
             native = json.loads(reports[0])
@@ -182,10 +180,15 @@ def stage_findings(evidence, policy, root):
         require(record['finding_count'] == count and record['outcome'] == ('WAIVER_REQUIRED' if count else 'PASS'), 'stage report outcome mismatch')
         require(observed[name] == ('UNSTABLE' if count else 'SUCCESS'), 'stage status differs from native evidence')
         if count:
+            had_findings = True
             require(name in WAIVABLE_STAGES, 'stage cannot be waived')
-            findings.append({'scanner': 'stage', 'id': name, 'package': evidence['job'], 'version': evidence['commit'],
-                'target': str(evidence['build']) + ':' + hashlib.sha256(canonical(record)).hexdigest(), 'severity': 'UNKNOWN', 'kind': 'stage'})
-    require(evidence['result'] == ('UNSTABLE' if findings else 'SUCCESS'), 'unexplained candidate build result')
+            # Scanner-backed stages prove execution/status consistency. Their
+            # native findings are reviewed below, so do not create a duplicate
+            # broad stage waiver alongside each exact vulnerability.
+            if name in {'Test', 'Fast Contract Test'}:
+                findings.append({'scanner': 'stage', 'id': name, 'package': evidence['job'], 'version': evidence['commit'],
+                    'target': str(evidence['build']) + ':' + hashlib.sha256(canonical(record)).hexdigest(), 'severity': 'UNKNOWN', 'kind': 'stage'})
+    require(evidence['result'] == ('UNSTABLE' if had_findings else 'SUCCESS'), 'unexplained candidate build result')
     return findings
 
 

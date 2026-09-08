@@ -219,9 +219,17 @@ class ReleaseGateTests(unittest.TestCase):
         with self.assertRaises(gate.InvalidEvidence):
             self.evaluate()
 
-    def test_unreachable_go_osv_blocks(self):
+    def test_unreachable_go_osv_metadata_does_not_create_a_finding(self):
         self.native["govulncheck"]["messages"].append({"osv": {
             "id": "GO-TEST-0001", "affected": [{"package": {"name": "example/module"}}]}})
+        self.write_reports()
+        self.assertEqual(self.evaluate()["decision"], "PASS")
+
+    def test_actual_other_govulncheck_finding_blocks(self):
+        self.native["govulncheck"]["messages"].extend([
+            {"osv": {"id": "GO-TEST-0001", "affected": [{"package": {"name": "example/module"}}]}},
+            {"finding": {"osv": "GO-TEST-0001",
+                         "trace": [{"module": "example/module", "version": "v1.0.0"}]}}])
         self.write_reports()
         with self.assertRaises(gate.InvalidEvidence):
             self.evaluate()
@@ -251,6 +259,9 @@ class ReleaseGateTests(unittest.TestCase):
 
     def test_openpgp_rule_fails_closed_for_package_use_or_govuln_finding(self):
         graph = self.configure_openpgp_not_applicable()
+        self.native["govulncheck"]["messages"].append({"finding": {"osv": "GO-2026-5932",
+            "trace": [{"module": "golang.org/x/crypto", "version": "v0.56.0"}]}})
+        self.write_reports()
         graph["graphs"][0]["packages"].append("golang.org/x/crypto/openpgp/packet")
         self.evidence["package_graph"] = self.write("package-graphs-affected.json", graph)
         with self.assertRaises(gate.InvalidEvidence):

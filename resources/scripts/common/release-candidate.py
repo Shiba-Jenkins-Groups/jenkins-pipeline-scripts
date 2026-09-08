@@ -66,7 +66,9 @@ def run_stage(root, name, command):
         require(result.returncode == 0, 'govulncheck execution failed')
         messages = adapter.stream_objects(raw.decode())
         require(sum('config' in m for m in messages) == 1, 'invalid govulncheck completion')
-        failures = sum('osv' in m for m in messages)
+        # OSV messages are advisory metadata. Only finding messages indicate
+        # that govulncheck matched this build's module/package/symbol graph.
+        failures = sum('finding' in m for m in messages)
     elif name == 'Image Scan':
         require(result.returncode == 0, 'Trivy execution failed')
         report = json.loads(raw)
