@@ -1,0 +1,105 @@
+import groovy.json.JsonOutput
+
+// Plain Groovy mocks only: sh, checkout, build, node and credentials NEVER run.
+def root = new File(args ? args[0] : '.').canonicalFile
+def product = 'shiba-go-ditch-api-project'
+def config = [enabled: true, approvers: ['reviewer'], jenkinsApiUrl: 'http://jenkins.invalid',
+    jenkinsReadCredentials: 'read', harborCredentials: 'harbor', harborApiUrl: 'http://harbor.invalid',
+    scmCredentials: 'scm', mergeCredentials: 'merge', approvalKeyCredentials: 'approval', receiptKeyCredentials: 'receipt',
+    stateDirectory: '/fake/state', builderLabel: 'builder', deploymentJob: product + '-prod-deploy',
+    deploymentNodeLabel: 'mac-prod', nodeLabel: 'mac-prod', runtimeRoot: '/fake/runtime', dockerEngineId: 'fake-engine', libraryRevision: 'f' * 40,
+    finalizationStateDirectory: '/fake/finalization', finalizationWriterCredentials: 'tag-writer', nexusCredentials: 'nexus', nexusBaseUrl: 'http://nexus.invalid']
+
+def simulate = { String filename, Map options = [:] ->
+    boolean deploy = filename == 'prodDeploymentPipeline.groovy'
+    def calls = []
+    def binding = new Binding()
+    binding.setVariable('env', [JOB_NAME: product + (deploy ? '-prod-deploy' : '-auto-release'), BUILD_NUMBER: '1'])
+    binding.setVariable('params', [SIGNED_RELEASE_REQUEST: '{}'])
+    binding.setVariable('currentBuild', [getBuildCauses: { String type ->
+        [[upstreamProject: options.wrongCause ? 'untrusted' : product + (deploy ? '-auto-release' : '/develop'), upstreamBuild: 188]]
+    }])
+    binding.setVariable('error', { String message -> throw new IllegalStateException(message) })
+    ['properties', 'archiveArtifacts', 'checkout', 'writeFile'].each { name ->
+        binding.setVariable(name, { Object value -> calls << name })
+    }
+    ['disableConcurrentBuilds', 'pipelineTriggers', 'upstream', 'usernamePassword', 'file', 'text', 'parameters'].each { name ->
+        binding.setVariable(name, { Object... value -> [step: name] })
+    }
+    ['node', 'dir', 'withEnv', 'withCredentials', 'timeout'].each { name ->
+        binding.setVariable(name, { Object value, Closure body -> body() })
+    }
+    binding.setVariable('stage', { String name, Closure body ->
+        calls << name
+        if (name == options.failStage) { throw new IllegalStateException('fake failed stage') }
+        body()
+    })
+    binding.setVariable('pwd', { -> '/fake/workspace' })
+    binding.setVariable('libraryResource', { String name -> '# fake trusted resource' })
+    binding.setVariable('sh', { Object script -> calls << script.toString() })
+    binding.setVariable('waitForBuild', { Map values ->
+        assert values.runId == product + '/develop#188'
+        [result: options.upstreamResult ?: 'SUCCESS']
+    })
+    binding.setVariable('build', { Map values ->
+        calls << 'build:' + values.job
+        [number: 103, result: options.prodResult ?: 'SUCCESS']
+    })
+    binding.setVariable('input', { Map values ->
+        calls << 'input'
+        [APPROVER: options.badApprover ? 'intruder' : 'reviewer', REASON: 'offline exact CVE review']
+    })
+    binding.setVariable('readFile', { String path ->
+        if (path.endsWith('review.json')) { return JsonOutput.toJson([decision: options.review ?: 'PASS', findings: [fake: [:]]]) }
+        if (path.endsWith('runtime-receipt.json')) { return JsonOutput.toJson([payload: [status: 'SUCCESS']]) }
+        if (path.endsWith('promotion.json')) { return JsonOutput.toJson([payload: [merge_commit: 'b' * 40]]) }
+        if (path.endsWith('identity.json')) {
+            return JsonOutput.toJson([commit: options.wrongProdSha && path.contains('/prod/') ? 'c' * 40 : 'b' * 40,
+                                      version: '1.0.32', digest: 'sha256:' + 'd' * 64])
+        }
+        return '{}'
+    })
+    def failed = false
+    try {
+        def pipeline = new GroovyShell(binding).parse(new File(root, 'vars/' + filename))
+        pipeline.call(config + (options.disabled ? [enabled: false] : [:]))
+    } catch (IllegalStateException expected) {
+        failed = true
+    }
+    [calls: calls, failed: failed]
+}
+
+int tests = 0
+def result = simulate('autoReleasePipeline.groovy')
+assert !result.failed
+assert result.calls.count('build:' + product + '/prod') == 1
+assert result.calls.count('build:' + product + '-prod-deploy') == 1
+assert result.calls.indexOf('prod: Release Gate') < result.calls.indexOf('Finalize Revalidated PROD Candidate')
+assert result.calls.indexOf('Finalize Revalidated PROD Candidate') < result.calls.indexOf('Authorize Deployment Handoff')
+tests++
+for (options in [[disabled: true], [wrongCause: true], [upstreamResult: 'FAILURE'],
+                 [failStage: 'develop: All Severity Scans'], [review: 'BLOCKED'],
+                 [review: 'NEEDS_APPROVAL', badApprover: true]]) {
+    result = simulate('autoReleasePipeline.groovy', options)
+    assert result.failed
+    assert !result.calls.any { it.toString().contains('release-promotion.py promote') || it.toString().startsWith('build:') }
+    tests++
+}
+for (options in [[prodResult: 'FAILURE'], [wrongProdSha: true], [failStage: 'prod: All Severity Scans'], [failStage: 'Finalize Revalidated PROD Candidate']]) {
+    result = simulate('autoReleasePipeline.groovy', options)
+    assert result.failed
+    assert !result.calls.contains('build:' + product + '-prod-deploy')
+    tests++
+}
+result = simulate('autoReleasePipeline.groovy', [review: 'NEEDS_APPROVAL'])
+assert !result.failed && result.calls.count('input') == 2 // Gate A approval never covers Gate B.
+tests++
+assert !simulate('prodDeploymentPipeline.groovy').failed
+tests++
+for (options in [[disabled: true], [wrongCause: true], [failStage: 'Verify Signed Deployment Request']]) {
+    result = simulate('prodDeploymentPipeline.groovy', options)
+    assert result.failed
+    assert !result.calls.any { it.toString().contains('release-deploy.py deploy') }
+    tests++
+}
+println "PASS: ${tests} offline Pipeline control-flow cases (not Jenkins CPS integration)"

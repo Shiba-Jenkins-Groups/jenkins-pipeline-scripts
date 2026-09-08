@@ -1,4 +1,20 @@
 def call(Map config = [:]) {
+    // Candidate mode never grants a waiver or publishes a release. Only this
+    // product may opt in, and finalization then belongs to the trusted coordinator.
+    def candidateMode = config.controlledReleaseCandidate == true
+    if (candidateMode && (!(env.JOB_NAME in ['shiba-go-ditch-api-project/develop', 'shiba-go-ditch-api-project/prod']) || env.CHANGE_ID)) {
+        error('Controlled candidate mode is product branch-only')
+    }
+    if (candidateMode && (config.developLeanFlow == true || config.profile && config.profile != 'full' || config.ciStages || config.cdStages)) {
+        error('Controlled candidates require the complete pipeline')
+    }
+    def candidateStage = { String name, String command ->
+        if (!candidateMode) { sh command; return }
+        def rc = sh(script: "python3 .pipeline/scripts/common/release-candidate.py --stage '${name}' run -- bash -c " +
+            "'${command.replace("'", "'\\''")}'", returnStatus: true)
+        if (rc == 10) { unstable("${name}: evidence requires exact release approval") }
+        else if (rc != 0) { error("${name}: execution/evidence failure is not waivable") }
+    }
     def githubCredentials = config.githubCredentials ?: error('githubCredentials is required')
     // release writer 與 SCM checkout 分權。未設定時沿用舊 credential，維持其他專案相容。
     def githubReleaseCredentials = config.githubReleaseCredentials ?: githubCredentials
@@ -155,6 +171,9 @@ def call(Map config = [:]) {
                                     'scripts/common/k3d-verify.sh',
                                     'scripts/common/harbor-vulnerability-report.py',
                                     'scripts/common/release-finalize.sh',
+                                    'scripts/common/release-candidate.py',
+                                    'scripts/common/release-evidence.py',
+                                    'scripts/common/release-gate.py',
                                 ]
                                 for (lang in LANGUAGES) {
                                     for (step in LANG_STEPS) {
@@ -209,6 +228,13 @@ def call(Map config = [:]) {
                                 def deferThisRelease = env.DEFER_RELEASE_FINALIZATION == 'true' && env.DO_PROD_DEPLOY == 'true'
                                 env.DO_ARCHIVE_ARTIFACT_PUBLISH = (env.DO_ARTIFACT_PUBLISH == 'true' && !deferThisRelease).toString()
                                 env.DO_ARCHIVE_GIT_TAG = (env.DO_GIT_TAG == 'true' && !deferThisRelease).toString()
+                                if (candidateMode) {
+                                    if (env.LANGUAGE != 'go' || !config.fastContractCommand || !primaryImageEnabled || additionalImages) {
+                                        error('Controlled candidate requires the complete single Go App contract')
+                                    }
+                                    env.DO_ARCHIVE_ARTIFACT_PUBLISH = 'false'
+                                    env.DO_ARCHIVE_GIT_TAG = 'false'
+                                }
 
                                 if (env.CHANGE_ID) {
                                     def forbidden = [
@@ -308,13 +334,16 @@ def call(Map config = [:]) {
                         // ciStages.test = false 時跳過（build: false 時依賴推導自動關閉）
                         when { expression { ciStages.test } }
                         steps {
-                            sh "bash .pipeline/scripts/${env.LANGUAGE}/${env.LANGUAGE}-test.sh"
+                            script { candidateStage('Test', "bash .pipeline/scripts/${env.LANGUAGE}/${env.LANGUAGE}-test.sh") }
                         }
                         post {
                             always {
                                 // 語言中立報告契約（#2）：各語言 test 腳本統一產 JUnit 至 reports/junit/
-                                junit allowEmptyResults: true,
-                                      testResults: 'reports/junit/*.xml'
+                                script {
+                                    if (!candidateMode) {
+                                        junit allowEmptyResults: true, testResults: 'reports/junit/*.xml'
+                                    }
+                                }
                             }
                         }
                     }
@@ -324,7 +353,7 @@ def call(Map config = [:]) {
                         steps {
                             // 命令來自 trusted Jenkinsfile；untrusted discovery 在具備中央固定
                             // Jenkinsfile 前保持關閉。此 stage 專注 API/config contract，不啟動 runtime。
-                            sh config.fastContractCommand.toString()
+                            script { candidateStage('Fast Contract Test', config.fastContractCommand.toString()) }
                         }
                     }
 
@@ -341,7 +370,7 @@ def call(Map config = [:]) {
                                         sh "bash .pipeline/scripts/common/dependency-check.sh"
                                     }
                                 } else {
-                                    sh "bash .pipeline/scripts/common/dependency-check.sh"
+                                    candidateStage('Dependency Scan', 'bash .pipeline/scripts/common/dependency-check.sh')
                                 }
                             }
                         }
@@ -427,7 +456,7 @@ def call(Map config = [:]) {
                             withEnv(["TRIVY_RAW_REPORT_ENABLED=${trivyRawReportEnabled}"]) {
                                 script {
                                     if (primaryImageEnabled) {
-                                        sh 'bash .pipeline/scripts/cd.sh image-scan'
+                                        candidateStage('Image Scan', 'bash .pipeline/scripts/cd.sh image-scan')
                                     }
                                     if (env.ADDITIONAL_IMAGES) {
                                         sh 'bash .pipeline/scripts/common/additional-images.sh scan'
@@ -552,10 +581,10 @@ def call(Map config = [:]) {
                                                     "HARBOR_API_URL=${harborApiUrl}",
                                                 ]) {
                                                     def insecureArg = harborApiInsecure ? '--insecure' : ''
-                                                    sh """python3 .pipeline/scripts/common/harbor-vulnerability-report.py scan \\
+                                                    candidateStage('Harbor Vulnerability Report', """python3 .pipeline/scripts/common/harbor-vulnerability-report.py scan \\
                                                         ${refArgs.join(' ')} \\
                                                         --output-dir reports/harbor-scan \\
-                                                        --timeout ${harborScanTimeoutSeconds} ${insecureArg}"""
+                                                        --timeout ${harborScanTimeoutSeconds} ${insecureArg}""")
                                                 }
                                             }
                                         }
@@ -611,6 +640,7 @@ def call(Map config = [:]) {
                                         // cleanup 不得遮蔽 deploy 原始失敗；孤兒 namespace 另由全域 janitor 兜底。
                                         def cleanupStatus = sh(script: 'bash .pipeline/scripts/cd.sh cleanup', returnStatus: true)
                                         if (cleanupStatus != 0) {
+                                            if (candidateMode) { error('Candidate verification cleanup failed; release is blocked') }
                                             echo "[k3d-pool] WARN: namespace cleanup failed (status=${cleanupStatus}); janitor will retry"
                                         }
                                     }
@@ -622,6 +652,7 @@ def call(Map config = [:]) {
                     stage('Release Finalization — Artifact / Git Tag') {
                         when {
                             allOf {
+                                expression { !candidateMode }
                                 expression { env.DEFER_RELEASE_FINALIZATION == 'true' }
                                 expression { env.DO_PROD_DEPLOY == 'true' }
                                 expression { env.DO_GIT_TAG == 'true' }
@@ -669,6 +700,13 @@ def call(Map config = [:]) {
                                  allowEmptyArchive: true
                 archiveArtifacts artifacts: 'reports/harbor-scan/**/*',
                                  allowEmptyArchive: true
+                script {
+                    if (candidateMode) {
+                        // A partial/failed collection cannot produce a release candidate.
+                        sh 'PYTHONDONTWRITEBYTECODE=1 python3 .pipeline/scripts/common/release-candidate.py manifest'
+                        archiveArtifacts artifacts: '.pipeline/candidate.json,.pipeline/candidate-artifact,.pipeline/candidate-stages/*,reports/junit/*.xml', allowEmptyArchive: false
+                    }
+                }
 
                 // 語言中立 Coverage HTML 契約（#2）：各語言 test 腳本統一產至 reports/coverage/index.html
                 // （Java=JaCoCo、Go=go tool cover）；coverage 檔位才產生，allowMissing 避免其他 branch fail
@@ -718,11 +756,13 @@ def call(Map config = [:]) {
                     }
                 }
                 // Trivy JUnit XML（main / prod branch 才產生，allowEmptyResults 避免其他 branch fail）
-                junit allowEmptyResults: true,
-                      testResults: 'trivy-results*.xml'
-                // Harbor API 回收結果：HIGH/CRITICAL 轉成 failure 供 Test Result 與趨勢圖顯示。
-                junit allowEmptyResults: true,
-                      testResults: 'reports/harbor-scan/*-junit.xml'
+                script {
+                  if (!candidateMode) {
+                    junit allowEmptyResults: true, testResults: 'trivy-results*.xml'
+                    // Harbor API 回收結果：HIGH/CRITICAL 轉成 failure 供 Test Result 與趨勢圖顯示。
+                    junit allowEmptyResults: true, testResults: 'reports/harbor-scan/*-junit.xml'
+                  }
+                }
 
                 // ── 交出「這次產出哪一顆 image」──────────────────────────────
                 // 原本 ref 只散落在中段 stage 的 log（Tagging/Pushing/smoke/Deploy 各一次），

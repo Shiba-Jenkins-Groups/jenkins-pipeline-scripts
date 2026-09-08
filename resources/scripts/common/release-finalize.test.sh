@@ -21,8 +21,7 @@ git -C "${WORKSPACE}" push -q -u origin prod
 # 模擬拋棄式 Jenkins agent：checkout 可存在，但沒有任何 committer identity。
 git -C "${WORKSPACE}" config --unset user.name
 git -C "${WORKSPACE}" config --unset user.email
-export HOME="${TEST_ROOT}/empty-home"
-mkdir -p "${HOME}"
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 
 mkdir -p "${WORKSPACE}/.pipeline"
 ARTIFACT="${TEST_ROOT}/app-prod-1.2.3"

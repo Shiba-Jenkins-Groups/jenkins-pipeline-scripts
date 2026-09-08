@@ -90,6 +90,14 @@ docker_build_if_needed() {
                       --build-arg REGISTRY_PREFIX=${REGISTRY_PREFIX:-} \
                       --build-arg JAR_FILE=.pipeline/${ARTIFACT_NAME} \
                       --build-arg ARTIFACT_FILE=.pipeline/${ARTIFACT_NAME}"
+    # Product-scoped source identity for the controlled runtime verifier.
+    if [[ "${APP_NAME}" == shiba-go-ditch-api-project ]]; then
+        [[ "${GIT_COMMIT:-}" =~ ^[0-9a-f]{40}$ ]] || { echo '[cd] Missing product commit identity' >&2; return 1; }
+        local artifact_sha
+        artifact_sha="$(sha256sum "${jar_dest}" | awk '{print $1}')"
+        [[ "${artifact_sha}" =~ ^[0-9a-f]{64}$ ]] || return 1
+        build_args="${build_args} --build-arg GIT_COMMIT=${GIT_COMMIT} --build-arg ARTIFACT_SHA256=${artifact_sha}"
+    fi
     # ARTIFACT_FILE：語言中立的通用名（Dockerfile-go 使用）；JAR_FILE 保留 Java 向下相容
     # REGISTRY_PREFIX：base image 來源前綴（agent env 提供；空＝Docker Hub 直抓）
     docker_build "${IMAGE_TAG}" "${LANGUAGE}" "${build_args}"
