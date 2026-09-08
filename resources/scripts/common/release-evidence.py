@@ -26,6 +26,7 @@ def module(name, filename):
 
 gate = module("release_gate", "release-gate.py")
 require = gate.require
+RELEASE_FOLDER = "shiba-release-automation"
 STAGES = ["Checkout", "Load Scripts", "Detect", "Secret Scan", "Build", "Test",
           "Fast Contract Test", "Dependency Scan", "Package / Publish / Tag", "Docker Build",
           "Image Scan", "Harbor Push", "Harbor Vulnerability Report", "Smoke Test",
@@ -188,7 +189,7 @@ def prod_routing(xml):
 
 
 def runtime_ready(job, computers, label):
-    require(job.get("fullName") == gate.PRODUCT + "-prod-deploy" and job.get("buildable") is True,
+    require(job.get("fullName") == RELEASE_FOLDER + "/" + gate.PRODUCT + "-prod-deploy" and job.get("buildable") is True,
             "trusted deployment job is unavailable")
     nodes = [node for node in computers.get("computer", [])
              if any(item.get("name") == label for item in node.get("assignedLabels", []))]
@@ -327,7 +328,7 @@ def main():
     try:
         if args.command == "check-routing":
             prod_routing(jenkins_get(args.jenkins_url, f"/job/{gate.PRODUCT}/job/prod/config.xml"))
-            runtime_ready(json.loads(jenkins_get(args.jenkins_url, f"/job/{gate.PRODUCT}-prod-deploy/api/json")),
+            runtime_ready(json.loads(jenkins_get(args.jenkins_url, f"/job/{RELEASE_FOLDER}/job/{gate.PRODUCT}-prod-deploy/api/json")),
                           json.loads(jenkins_get(args.jenkins_url, "/computer/api/json?depth=1")), args.deployment_label)
         elif args.command == "inspect":
             args.output.write_bytes(gate.canonical(inspect(args.jenkins_url, args.branch, args.build, args.candidate_root)))

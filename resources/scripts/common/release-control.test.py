@@ -101,7 +101,7 @@ class Controls(unittest.TestCase):
                 adapter.stream_objects(raw)
 
     def test_runtime_readiness_blocks_missing_disabled_offline_or_ambiguous_node(self):
-        job = {'fullName': adapter.gate.PRODUCT + '-prod-deploy', 'buildable': True}
+        job = {'fullName': adapter.RELEASE_FOLDER + '/' + adapter.gate.PRODUCT + '-prod-deploy', 'buildable': True}
         node = {'assignedLabels': [{'name': 'mac-prod'}], 'offline': False, 'temporarilyOffline': False, 'numExecutors': 1}
         adapter.runtime_ready(job, {'computer': [node]}, 'mac-prod')
         for computers in [[], [node, node], [dict(node, offline=True)], [dict(node, numExecutors=0)]]:
