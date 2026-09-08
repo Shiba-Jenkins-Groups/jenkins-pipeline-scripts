@@ -16,7 +16,10 @@ def call(Map config = [:]) {
     }
     if (env.JOB_NAME != "${releaseFolder}/${product}-prod-deploy") { error('Deployment job identity mismatch') }
     properties([disableConcurrentBuilds(), parameters([text(name: 'SIGNED_RELEASE_REQUEST', defaultValue: '')])])
-    def causes = currentBuild.getBuildCauses('hudson.model.Cause$UpstreamCause')
+    // Pipeline build() uses BuildUpstreamCause while an upstream trigger uses
+    // UpstreamCause. Inspect every cause so the trusted handoff cannot be
+    // rejected because of subtype serialization or hidden among extra causes.
+    def causes = currentBuild.getBuildCauses()
     if (causes.size() != 1 || causes[0].upstreamProject != "${releaseFolder}/${product}-auto-release") {
         error('Deployment requires the trusted coordinator upstream cause')
     }

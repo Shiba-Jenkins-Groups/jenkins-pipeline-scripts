@@ -17,8 +17,9 @@ def simulate = { String filename, Map options = [:] ->
     def binding = new Binding()
     binding.setVariable('env', [JOB_NAME: releaseFolder + '/' + product + (deploy ? '-prod-deploy' : '-auto-release'), BUILD_NUMBER: '1'])
     binding.setVariable('params', [SIGNED_RELEASE_REQUEST: '{}'])
-    binding.setVariable('currentBuild', [getBuildCauses: { String type ->
-        [[upstreamProject: options.wrongCause ? 'untrusted' : (deploy ? releaseFolder + '/' + product + '-auto-release' : product + '/develop'), upstreamBuild: 188]]
+    binding.setVariable('currentBuild', [getBuildCauses: { String type = null ->
+        def causes = [[upstreamProject: options.wrongCause ? 'untrusted' : (deploy ? releaseFolder + '/' + product + '-auto-release' : product + '/develop'), upstreamBuild: 188]]
+        options.multipleCause ? causes + [[upstreamProject: 'unexpected', upstreamBuild: 1]] : causes
     }])
     binding.setVariable('error', { String message -> throw new IllegalStateException(message) })
     ['properties', 'archiveArtifacts', 'checkout', 'writeFile'].each { name ->
@@ -97,7 +98,7 @@ assert !result.failed && result.calls.count('input') == 2 // Gate A approval nev
 tests++
 assert !simulate('prodDeploymentPipeline.groovy').failed
 tests++
-for (options in [[disabled: true], [wrongCause: true], [failStage: 'Verify Signed Deployment Request']]) {
+for (options in [[disabled: true], [wrongCause: true], [multipleCause: true], [failStage: 'Verify Signed Deployment Request']]) {
     result = simulate('prodDeploymentPipeline.groovy', options)
     assert result.failed
     assert !result.calls.any { it.toString().contains('release-deploy.py deploy') }
