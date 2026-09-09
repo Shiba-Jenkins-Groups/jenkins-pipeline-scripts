@@ -44,6 +44,10 @@ class CapacityTest(unittest.TestCase):
         report = module.docker_summary(DOCKER)
         self.assertEqual(1_500_000_000, report["images"]["size_bytes"])
         self.assertEqual(20_000, report["volumes"]["reclaimable_bytes"])
+        rows = module.docker_summary([{"Type": "Local Volumes", "TotalCount": "12", "Active": "3",
+                                       "Size": "4.5GB", "Reclaimable": "2GB (44%)"}])
+        self.assertEqual(12, rows["volumes"]["count"])
+        self.assertEqual(2_000_000_000, rows["volumes"]["reclaimable_bytes"])
 
     def test_cli_monitor_warning_is_nonzero_and_archived(self):
         nodes, summaries = fixtures(available_gib=18)

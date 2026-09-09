@@ -14,11 +14,15 @@ GIB = 1024 ** 3
 def load_json(path, command):
     if path:
         return json.loads(Path(path).read_text(encoding="utf-8"))
-    return json.loads(subprocess.check_output(command, text=True))
+    raw = subprocess.check_output(command, text=True)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return [json.loads(line) for line in raw.splitlines() if line.strip()]
 
 
 def size_bytes(value):
-    match = re.fullmatch(r"([0-9.]+)([kMGT]?B)", value or "0B")
+    match = re.match(r"([0-9.]+)([kMGT]?B)", value or "0B")
     if not match:
         return None
     factors = {"B": 1, "kB": 1000, "MB": 1000 ** 2, "GB": 1000 ** 3, "TB": 1000 ** 4}
@@ -26,6 +30,14 @@ def size_bytes(value):
 
 
 def docker_summary(raw):
+    if isinstance(raw, list):
+        aliases = {"Images": "images", "Containers": "containers", "Local Volumes": "volumes", "Build Cache": "buildcache"}
+        return {aliases.get(item.get("Type"), item.get("Type", "unknown").lower().replace(" ", "")): {
+            "count": int(item.get("TotalCount", item.get("Total", 0))),
+            "active": int(item.get("Active", 0)),
+            "size_bytes": size_bytes(item.get("Size")),
+            "reclaimable_bytes": size_bytes(item.get("Reclaimable")),
+        } for item in raw}
     result = {}
     for category in ("Images", "Containers", "Volumes", "BuildCache"):
         items = raw.get(category, [])
