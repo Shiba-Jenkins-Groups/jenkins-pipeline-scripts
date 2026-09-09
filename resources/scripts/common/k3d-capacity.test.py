@@ -22,6 +22,10 @@ def fixtures(available_gib=30, used_percent=None, pressure=False, taint=False):
     return {"items": [node]}, {"node-1": {"node": {"fs": {"capacityBytes": capacity, "availableBytes": available}}}}
 
 
+DOCKER = {"Images": [{"Size": "1.5GB", "Reclaimable": "500MB"}], "Containers": [],
+          "Volumes": [{"Size": "20kB", "Reclaimable": "20kB"}], "BuildCache": []}
+
+
 class CapacityTest(unittest.TestCase):
     def test_ok_warning_and_blocked(self):
         for available, expected in [(30, "OK"), (18, "WARNING"), (10, "BLOCKED")]:
@@ -36,14 +40,21 @@ class CapacityTest(unittest.TestCase):
     def test_no_nodes_fail_closed(self):
         self.assertEqual("BLOCKED", module.evaluate({"items": []}, {}, 20, 12, 80, 90)["status"])
 
+    def test_docker_inventory_is_summarized_without_selecting_cleanup_targets(self):
+        report = module.docker_summary(DOCKER)
+        self.assertEqual(1_500_000_000, report["images"]["size_bytes"])
+        self.assertEqual(20_000, report["volumes"]["reclaimable_bytes"])
+
     def test_cli_monitor_warning_is_nonzero_and_archived(self):
         nodes, summaries = fixtures(available_gib=18)
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             (root / "nodes.json").write_text(json.dumps(nodes))
             (root / "summaries.json").write_text(json.dumps(summaries))
+            (root / "docker.json").write_text(json.dumps(DOCKER))
             result = subprocess.run([sys.executable, str(SCRIPT), "--mode", "monitor", "--output", str(root / "report.json"),
-                                     "--nodes-file", str(root / "nodes.json"), "--summaries-file", str(root / "summaries.json")])
+                                     "--nodes-file", str(root / "nodes.json"), "--summaries-file", str(root / "summaries.json"),
+                                     "--docker-file", str(root / "docker.json")])
             self.assertEqual(1, result.returncode)
             self.assertEqual("WARNING", json.loads((root / "report.json").read_text())["status"])
 
