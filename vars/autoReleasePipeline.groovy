@@ -25,13 +25,29 @@ def call(Map config = [:]) {
     if (env.JOB_NAME != "${releaseFolder}/${product}-auto-release") { error('Coordinator job identity mismatch') }
     properties([
         disableConcurrentBuilds(),
+        parameters([
+            string(name: 'SOURCE_BUILD', defaultValue: '', description: 'Explicit recovery: completed develop build number'),
+            string(name: 'EXPECTED_COMMIT', defaultValue: '', description: 'Explicit recovery: full 40-character develop commit')
+        ]),
         pipelineTriggers([upstream(upstreamProjects: "${product}/develop", threshold: 'UNSTABLE')])
     ])
     def causes = currentBuild.getBuildCauses('hudson.model.Cause$UpstreamCause')
-    if (causes.size() != 1 || causes[0].upstreamProject != "${product}/develop") {
-        error('A unique completed develop upstream cause is required')
+    def requestedBuild = params.SOURCE_BUILD?.toString()?.trim() ?: ''
+    def requestedCommit = params.EXPECTED_COMMIT?.toString()?.trim() ?: ''
+    Integer sourceBuild
+    if (requestedBuild || requestedCommit) {
+        def users = currentBuild.getBuildCauses('hudson.model.Cause$UserIdCause')
+        if (causes || users.size() != 1 || !config.approvers.contains(users[0].userId) ||
+            !(requestedBuild ==~ /[1-9][0-9]{0,8}/) || !(requestedCommit ==~ /[0-9a-f]{40}/)) {
+            error('Recovery requires an authorized user, exact develop build and full commit')
+        }
+        sourceBuild = requestedBuild as Integer
+    } else {
+        if (causes.size() != 1 || causes[0].upstreamProject != "${product}/develop") {
+            error('A unique completed develop upstream cause is required')
+        }
+        sourceBuild = causes[0].upstreamBuild as Integer
     }
-    def sourceBuild = causes[0].upstreamBuild as Integer
     // Pipeline Build Step waits through upstream post actions and retains the
     // exact queue/run relationship across controller restarts.
     def upstreamRun = waitForBuild(runId: "${product}/develop#${sourceBuild}", propagate: false)
@@ -87,7 +103,7 @@ def call(Map config = [:]) {
                                 --build "$RELEASE_BUILD" --candidate-root "$RELEASE_PHASE/evidence" --output "$RELEASE_PHASE/identity.json"'''
                         }
                         def identity = parseReleaseJson(readFile("${phase}/identity.json"))
-                        if (expectedCommit && identity.commit != expectedCommit) { error('PROD checkout differs from promoted commit') }
+                        if (expectedCommit && identity.commit != expectedCommit) { error('Checkout differs from expected release commit') }
                         dir("${phase}/source") {
                             checkout([$class: 'GitSCM', branches: [[name: identity.commit]],
                                 userRemoteConfigs: [[url: 'https://github.com/ShibaDev2026/shiba-go-ditch-api-project.git',
@@ -140,7 +156,7 @@ def call(Map config = [:]) {
                 return parseReleaseJson(readFile("${phase}/identity.json"))
             }
 
-            verifyPhase('develop', sourceBuild, null)
+            verifyPhase('develop', sourceBuild, requestedCommit ?: null)
             stage('Promote Verified Commit') {
                 withCredentials([
                     usernamePassword(credentialsId: config.mergeCredentials,

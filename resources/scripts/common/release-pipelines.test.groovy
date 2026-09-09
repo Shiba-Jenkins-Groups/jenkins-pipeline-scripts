@@ -16,8 +16,12 @@ def simulate = { String filename, Map options = [:] ->
     def calls = []
     def binding = new Binding()
     binding.setVariable('env', [JOB_NAME: releaseFolder + '/' + product + (deploy ? '-prod-deploy' : '-auto-release'), BUILD_NUMBER: '1'])
-    binding.setVariable('params', [SIGNED_RELEASE_REQUEST: '{}'])
+    binding.setVariable('params', [SIGNED_RELEASE_REQUEST: '{}'] + (options.recoveryParams ?: [:]))
     binding.setVariable('currentBuild', [getBuildCauses: { String type = null ->
+        if (options.recoveryParams) {
+            if (type == 'hudson.model.Cause$UserIdCause') { return [[userId: options.badUser ? 'intruder' : 'reviewer']] }
+            return []
+        }
         def causes = [[upstreamProject: options.wrongCause ? 'untrusted' : (deploy ? releaseFolder + '/' + product + '-auto-release' : product + '/develop'), upstreamBuild: 188]]
         options.multipleCause ? causes + [[upstreamProject: 'unexpected', upstreamBuild: 1]] : causes
     }])
@@ -25,7 +29,7 @@ def simulate = { String filename, Map options = [:] ->
     ['properties', 'archiveArtifacts', 'checkout', 'writeFile'].each { name ->
         binding.setVariable(name, { Object value -> calls << name })
     }
-    ['disableConcurrentBuilds', 'pipelineTriggers', 'upstream', 'usernamePassword', 'file', 'text', 'parameters'].each { name ->
+    ['disableConcurrentBuilds', 'pipelineTriggers', 'upstream', 'usernamePassword', 'file', 'text', 'string', 'parameters'].each { name ->
         binding.setVariable(name, { Object... value -> [step: name] })
     }
     ['node', 'dir', 'withEnv', 'withCredentials', 'timeout'].each { name ->
@@ -72,6 +76,18 @@ def simulate = { String filename, Map options = [:] ->
 }
 
 int tests = 0
+def recovery = [SOURCE_BUILD: '188', EXPECTED_COMMIT: 'b' * 40]
+assert !simulate('autoReleasePipeline.groovy', [recoveryParams: recovery]).failed
+tests++
+for (options in [[recoveryParams: recovery, badUser: true],
+                 [recoveryParams: [SOURCE_BUILD: '188']],
+                 [recoveryParams: [SOURCE_BUILD: '-1', EXPECTED_COMMIT: 'b' * 40]],
+                 [recoveryParams: [SOURCE_BUILD: '188', EXPECTED_COMMIT: 'c' * 40]]]) {
+    def rejected = simulate('autoReleasePipeline.groovy', options)
+    assert rejected.failed
+    assert !rejected.calls.any { it.toString().contains('release-promotion.py promote') || it.toString().startsWith('build:') }
+    tests++
+}
 def result = simulate('autoReleasePipeline.groovy')
 assert !result.failed
 assert result.calls.count('build:' + product + '/prod') == 1
