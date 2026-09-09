@@ -61,6 +61,22 @@ class CapacityTest(unittest.TestCase):
                                      "--docker-file", str(root / "docker.json")])
             self.assertEqual(1, result.returncode)
             self.assertEqual("WARNING", json.loads((root / "report.json").read_text())["status"])
+            preflight = subprocess.run([sys.executable, str(SCRIPT), "--mode", "preflight", "--output", str(root / "preflight.json"),
+                                        "--nodes-file", str(root / "nodes.json"), "--summaries-file", str(root / "summaries.json"),
+                                        "--docker-file", str(root / "docker.json")])
+            self.assertEqual(0, preflight.returncode)
+
+    def test_cli_preflight_blocks_critical_capacity(self):
+        nodes, summaries = fixtures(available_gib=10)
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            for name, value in (("nodes.json", nodes), ("summaries.json", summaries), ("docker.json", DOCKER)):
+                (root / name).write_text(json.dumps(value))
+            result = subprocess.run([sys.executable, str(SCRIPT), "--mode", "preflight", "--output", str(root / "report.json"),
+                                     "--nodes-file", str(root / "nodes.json"), "--summaries-file", str(root / "summaries.json"),
+                                     "--docker-file", str(root / "docker.json")])
+            self.assertEqual(2, result.returncode)
+            self.assertEqual("BLOCKED", json.loads((root / "report.json").read_text())["status"])
 
 
 if __name__ == "__main__":
