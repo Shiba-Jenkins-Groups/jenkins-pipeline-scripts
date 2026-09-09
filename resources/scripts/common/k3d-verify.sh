@@ -216,6 +216,12 @@ deploy() {
         return 1
     }
 
+    local capacity_report="${WORKSPACE}/.pipeline/k3d-capacity-preflight.json"
+    python3 "${SCRIPT_DIR}/k3d-capacity.py" --mode preflight --output "${capacity_report}" || {
+        report_error "K3D_POOL" "007" "capacity preflight blocked verification; inspect ${capacity_report}"
+        return 1
+    }
+
     local registry="${HARBOR_K3S_REGISTRY:-host.docker.internal:9290}"
     local rendered="${WORKSPACE}/.pipeline/k8s-rendered"
     export APP_NAME HARBOR_IMAGE NAMESPACE DEPLOY_ENV DEPLOY_TIMESTAMP GIT_COMMIT
