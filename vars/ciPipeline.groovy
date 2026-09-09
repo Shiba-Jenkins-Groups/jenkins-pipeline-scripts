@@ -169,6 +169,7 @@ def call(Map config = [:]) {
                                     'scripts/common/secret-scan.sh',
                                     'scripts/common/dependency-check.sh',
                                     'scripts/common/k3d-verify.sh',
+                                    'scripts/common/k3d-capacity.py',
                                     'scripts/common/harbor-vulnerability-report.py',
                                     'scripts/common/release-finalize.sh',
                                     'scripts/common/release-candidate.py',
@@ -699,6 +700,8 @@ def call(Map config = [:]) {
                 archiveArtifacts artifacts: 'trivy-results*.xml,trivy-results-raw*.json',
                                  allowEmptyArchive: true
                 archiveArtifacts artifacts: 'reports/harbor-scan/**/*',
+                                 allowEmptyArchive: true
+                archiveArtifacts artifacts: '.pipeline/k3d-capacity-preflight.json',
                                  allowEmptyArchive: true
                 script {
                     if (candidateMode) {
