@@ -27,8 +27,12 @@ def simulate = { String filename, Map options = [:] ->
     }])
     binding.setVariable('error', { String message -> throw new IllegalStateException(message) })
     ['properties', 'archiveArtifacts', 'checkout', 'writeFile'].each { name ->
-        binding.setVariable(name, { Object value -> calls << name })
+        binding.setVariable(name, { Object value ->
+            calls << name
+            if (name == 'archiveArtifacts' && options.archiveFailure) { throw new IllegalStateException('archive unavailable') }
+        })
     }
+    binding.setVariable('deleteDir', { -> calls << 'deleteDir' })
     ['disableConcurrentBuilds', 'pipelineTriggers', 'upstream', 'usernamePassword', 'file', 'text', 'string', 'parameters'].each { name ->
         binding.setVariable(name, { Object... value -> [step: name] })
     }
@@ -76,6 +80,16 @@ def simulate = { String filename, Map options = [:] ->
 }
 
 int tests = 0
+for (options in [[:], [prodResult: 'FAILURE'], [review: 'BLOCKED'], [failStage: 'develop: All Severity Scans']]) {
+    def cleaned = simulate('autoReleasePipeline.groovy', options)
+    assert cleaned.calls.count('deleteDir') == 1
+    assert cleaned.calls[-2] == 'archiveArtifacts'
+    assert cleaned.calls[-1] == 'deleteDir'
+    tests++
+}
+def retained = simulate('autoReleasePipeline.groovy', [archiveFailure: true])
+assert retained.failed && !retained.calls.contains('deleteDir')
+tests++
 def recovery = [SOURCE_BUILD: '188', EXPECTED_COMMIT: 'b' * 40]
 assert !simulate('autoReleasePipeline.groovy', [recoveryParams: recovery]).failed
 tests++

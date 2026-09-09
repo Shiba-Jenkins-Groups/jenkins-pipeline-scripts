@@ -55,6 +55,7 @@ def call(Map config = [:]) {
 
     node(config.builderLabel.toString()) {
         dir("auto-release-${env.BUILD_NUMBER}") {
+          try {
             def root = pwd()
             def control = "${root}/control"
             stage('Load Trusted Release Controls') {
@@ -232,6 +233,17 @@ python3 control/release-promotion.py handoff --promotion promotion.json --finali
                 if (deployed.result != 'SUCCESS') { error('PROD runtime deployment failed; inspect its receipt') }
                 currentBuild.description = "prod ${promotion.payload.merge_commit.take(12)}; deploy #${deployed.number}"
             }
+          } finally {
+            stage('Archive Evidence and Release Workspace') {
+                // Preserve only release evidence, never source checkouts, scanner
+                // caches or credential files. If archival fails, retain the
+                // workspace for diagnosis instead of destroying the only copy.
+                archiveArtifacts artifacts: 'control/policy.json,develop/identity.json,prod/identity.json,develop/review.json,prod/review.json,develop/approval.json,prod/approval.json,develop/evidence/*.json,develop/evidence/*.jsonl,prod/evidence/*.json,prod/evidence/*.jsonl,develop/evidence/.pipeline/candidate*,prod/evidence/.pipeline/candidate*,develop/evidence/.pipeline/candidate-stages/*,prod/evidence/.pipeline/candidate-stages/*,develop/evidence/reports/junit/*,prod/evidence/reports/junit/*,promotion.json,finalization.json,deployment-request.json,prod/source/.pipeline/release-manifest.env', allowEmptyArchive: true
+                // This dir is scoped to this exact build, not the agent root,
+                // persistent dependency cache, release state or runtime data.
+                deleteDir()
+            }
+          }
         }
     }
 }
