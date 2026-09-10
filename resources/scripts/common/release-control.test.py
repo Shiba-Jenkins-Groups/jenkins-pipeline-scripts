@@ -180,6 +180,10 @@ class Controls(unittest.TestCase):
         return promotion.promote(source, state, self.evidence, self.policy, self.root, self.key, self.now,
                                  expected_remote=str(remote))
 
+    def recover(self, source, remote, state):
+        return promotion.promote(source, state, self.evidence, self.policy, self.root, self.key, self.now,
+                                 expected_remote=str(remote), recover=True)
+
     def test_exact_merge_persists_receipt_and_duplicate_is_rejected(self):
         cmd, source, remote, old, state = self.setup_git()
         receipt = self.promote(source, remote, state)
@@ -191,6 +195,56 @@ class Controls(unittest.TestCase):
         cmd('checkout', '--detach', self.evidence['commit'], cwd=source)
         with self.assertRaisesRegex(ValueError, 'already claimed'):
             self.promote(source, remote, state)
+
+    def test_recovery_reuses_signed_merged_receipt_without_another_push(self):
+        cmd, source, remote, old, state = self.setup_git()
+        receipt = self.promote(source, remote, state)
+        cmd('checkout', '--detach', self.evidence['commit'], cwd=source)
+        with patch.object(promotion, 'git', wraps=promotion.git) as git_call:
+            recovered = self.recover(source, remote, state)
+        self.assertEqual(recovered, receipt)
+        self.assertFalse(any(call.args[1] == 'push' for call in git_call.call_args_list))
+        self.assertEqual(promotion.heads(source)[1], promotion.verify(receipt, self.key)['merge_commit'])
+
+    def test_recovery_rejects_tampered_or_incomplete_claim(self):
+        cmd, source, remote, old, state = self.setup_git()
+        receipt = self.promote(source, remote, state)
+        cmd('checkout', '--detach', self.evidence['commit'], cwd=source)
+        saved = json.loads(state.path(self.evidence['commit']).read_bytes())
+        saved['signature'] = '0' * 64
+        state.path(self.evidence['commit']).write_text(json.dumps(saved))
+        with self.assertRaisesRegex(ValueError, 'signature'):
+            self.recover(source, remote, state)
+        receipt['payload']['status'] = 'PUSHING'
+        state.write(self.evidence['commit'], promotion.sign(receipt['payload'], self.key))
+        with self.assertRaisesRegex(ValueError, 'not safely resumable'):
+            self.recover(source, remote, state)
+
+        receipt['payload']['status'] = 'MERGED'
+        receipt['payload']['develop_build'] = self.evidence['build'] + 1
+        state.write(self.evidence['commit'], promotion.sign(receipt['payload'], self.key))
+        with self.assertRaisesRegex(ValueError, 'does not match recovered candidate'):
+            self.recover(source, remote, state)
+
+    def test_recovery_rejects_moved_prod_or_existing_tag(self):
+        cmd, source, remote, old, state = self.setup_git()
+        receipt = self.promote(source, remote, state)
+        merge = promotion.verify(receipt, self.key)['merge_commit']
+        cmd('checkout', '--detach', self.evidence['commit'], cwd=source)
+        cmd('tag', 'v1.0.32', merge, cwd=source)
+        cmd('push', '-q', 'origin', 'refs/tags/v1.0.32', cwd=source)
+        with self.assertRaisesRegex(ValueError, 'already finalized'):
+            self.recover(source, remote, state)
+
+        cmd('push', '-q', 'origin', ':refs/tags/v1.0.32', cwd=source)
+        cmd('checkout', '--detach', merge, cwd=source)
+        (source / 'after.txt').write_text('moved\n')
+        cmd('add', '.', cwd=source)
+        cmd('commit', '-qm', 'move prod', cwd=source)
+        cmd('push', '-q', 'origin', 'HEAD:prod', cwd=source)
+        cmd('checkout', '--detach', self.evidence['commit'], cwd=source)
+        with self.assertRaisesRegex(ValueError, 'PROD moved'):
+            self.recover(source, remote, state)
 
     def test_failed_gate_never_pushes_or_claims(self):
         cmd, source, remote, old, state = self.setup_git()

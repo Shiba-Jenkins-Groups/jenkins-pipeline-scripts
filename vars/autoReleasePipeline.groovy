@@ -159,6 +159,7 @@ def call(Map config = [:]) {
 
             verifyPhase('develop', sourceBuild, requestedCommit ?: null)
             stage('Promote Verified Commit') {
+                def promotionCommand = requestedBuild ? 'recover' : 'promote'
                 withCredentials([
                     usernamePassword(credentialsId: config.mergeCredentials,
                         usernameVariable: 'RELEASE_GIT_USER', passwordVariable: 'RELEASE_GIT_PASSWORD'),
@@ -171,7 +172,7 @@ set -euo pipefail
 chmod 700 "$GIT_ASKPASS"
 approval=()
 if [[ -f develop/approval.json ]]; then approval=(--approval develop/approval.json); fi
-python3 control/release-promotion.py promote --source develop/source --state-directory "$RELEASE_STATE" \
+python3 control/release-promotion.py ''' + promotionCommand + ''' --source develop/source --state-directory "$RELEASE_STATE" \
     --evidence develop/evidence/evidence.json --policy control/policy.json \
     --approval-key-file "$APPROVAL_KEY_FILE" --receipt-key-file "$RECEIPT_KEY_FILE" \
     "${approval[@]}" --output promotion.json

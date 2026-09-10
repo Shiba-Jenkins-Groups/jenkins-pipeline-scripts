@@ -91,7 +91,10 @@ def retained = simulate('autoReleasePipeline.groovy', [archiveFailure: true])
 assert retained.failed && !retained.calls.contains('deleteDir')
 tests++
 def recovery = [SOURCE_BUILD: '188', EXPECTED_COMMIT: 'b' * 40]
-assert !simulate('autoReleasePipeline.groovy', [recoveryParams: recovery]).failed
+def recovered = simulate('autoReleasePipeline.groovy', [recoveryParams: recovery])
+assert !recovered.failed
+assert recovered.calls.any { it.toString().contains('release-promotion.py recover') }
+assert !recovered.calls.any { it.toString().contains('release-promotion.py promote') }
 tests++
 for (options in [[recoveryParams: recovery, badUser: true],
                  [recoveryParams: [SOURCE_BUILD: '188']],

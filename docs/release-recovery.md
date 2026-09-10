@@ -24,6 +24,13 @@ run; the Pipeline maintains them thereafter. Update the trusted library pin in
 the managed job configuration when deploying this change. Normal upstream
 triggers leave both parameters empty.
 
+When both recovery parameters are supplied, the coordinator uses the `recover`
+promotion command. If no claim exists, it performs the normal promotion. If a
+claim exists, it may reuse only a correctly signed `MERGED` receipt whose source
+build, source commit, image digest, version, merge parents, and current remote
+develop/prod heads still match. `PREPARING`/`PUSHING` claims, moved branches,
+existing release tags, or invalid signatures remain fail-closed.
+
 Verification: run release-pipelines.test.groovy with the existing Groovy runtime
 and CPS annotation jar; run each release-*.test.py directly (their dotted names
 are not discovered by unittest discovery). Confirm launchd and Jenkins agree
