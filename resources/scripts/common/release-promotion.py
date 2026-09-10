@@ -155,10 +155,14 @@ def existing_promotion(source, state, evidence, policy, root, receipt_key, now, 
                 "existing promotion is not safely resumable")
         require(receipt.get("source_commit") == commit
                 and receipt.get("develop_job") == evidence["job"]
-                and receipt.get("develop_build") == evidence["build"]
-                and receipt.get("develop_image_digest") == evidence["image_digest"]
                 and receipt.get("version") == evidence["version"],
                 "existing promotion does not match recovered candidate")
+        require(isinstance(receipt.get("develop_build"), int)
+                and receipt["develop_build"] <= evidence["build"],
+                "recovery evidence predates existing promotion")
+        require(isinstance(receipt.get("develop_image_digest"), str)
+                and gate.DIGEST.fullmatch(receipt["develop_image_digest"]),
+                "invalid original promotion image digest")
         merge = receipt.get("merge_commit", "")
         previous = receipt.get("previous_prod_commit", "")
         require(gate.SHA.fullmatch(merge) and gate.SHA.fullmatch(previous), "invalid existing promotion identity")

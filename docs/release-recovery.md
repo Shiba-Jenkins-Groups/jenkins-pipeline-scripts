@@ -27,9 +27,11 @@ triggers leave both parameters empty.
 When both recovery parameters are supplied, the coordinator uses the `recover`
 promotion command. If no claim exists, it performs the normal promotion. If a
 claim exists, it may reuse only a correctly signed `MERGED` receipt whose source
-build, source commit, image digest, version, merge parents, and current remote
-develop/prod heads still match. `PREPARING`/`PUSHING` claims, moved branches,
-existing release tags, or invalid signatures remain fail-closed.
+commit, version, merge parents, and current remote develop/prod heads still
+match. The eligible recovery build must be the original or a newer complete
+build of that exact commit, so an expired candidate can be revalidated without
+rewriting its original signed claim. `PREPARING`/`PUSHING` claims, older builds,
+moved branches, existing release tags, or invalid signatures remain fail-closed.
 
 Verification: run release-pipelines.test.groovy with the existing Groovy runtime
 and CPS annotation jar; run each release-*.test.py directly (their dotted names

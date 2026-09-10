@@ -206,6 +206,18 @@ class Controls(unittest.TestCase):
         self.assertFalse(any(call.args[1] == 'push' for call in git_call.call_args_list))
         self.assertEqual(promotion.heads(source)[1], promotion.verify(receipt, self.key)['merge_commit'])
 
+        # A newer eligible build is required once the original build evidence
+        # expires. It may have a different non-reproducible develop image, but
+        # must revalidate the exact same source commit and version.
+        self.evidence['build'] += 1
+        new_digest = 'sha256:' + 'e' * 64
+        self.evidence['image_digest'] = new_digest
+        self.fixture.digest = new_digest
+        self.fixture.native['trivy']['Metadata']['RepoDigests'] = ['registry/app@' + new_digest]
+        self.fixture.native['harbor']['artifact']['digest'] = new_digest
+        self.fixture.write_reports()
+        self.assertEqual(self.recover(source, remote, state), receipt)
+
     def test_recovery_rejects_tampered_or_incomplete_claim(self):
         cmd, source, remote, old, state = self.setup_git()
         receipt = self.promote(source, remote, state)
@@ -223,7 +235,7 @@ class Controls(unittest.TestCase):
         receipt['payload']['status'] = 'MERGED'
         receipt['payload']['develop_build'] = self.evidence['build'] + 1
         state.write(self.evidence['commit'], promotion.sign(receipt['payload'], self.key))
-        with self.assertRaisesRegex(ValueError, 'does not match recovered candidate'):
+        with self.assertRaisesRegex(ValueError, 'predates existing promotion'):
             self.recover(source, remote, state)
 
     def test_recovery_rejects_moved_prod_or_existing_tag(self):
