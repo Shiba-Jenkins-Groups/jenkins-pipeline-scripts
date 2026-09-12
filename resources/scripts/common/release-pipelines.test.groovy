@@ -14,6 +14,7 @@ def config = [enabled: true, approvers: ['reviewer'], jenkinsApiUrl: 'http://jen
 def simulate = { String filename, Map options = [:] ->
     boolean deploy = filename == 'prodDeploymentPipeline.groovy'
     def calls = []
+    def credentialGroups = []
     def binding = new Binding()
     binding.setVariable('env', [JOB_NAME: releaseFolder + '/' + product + (deploy ? '-prod-deploy' : '-auto-release'), BUILD_NUMBER: '1'])
     binding.setVariable('params', [SIGNED_RELEASE_REQUEST: '{}'] + (options.recoveryParams ?: [:]))
@@ -39,6 +40,17 @@ def simulate = { String filename, Map options = [:] ->
     ['node', 'dir', 'withEnv', 'withCredentials', 'timeout'].each { name ->
         binding.setVariable(name, { Object value, Closure body -> body() })
     }
+    ['usernamePassword', 'file'].each { name ->
+        binding.setVariable(name, { Map value -> [step: name] + value })
+    }
+    binding.setVariable('withCredentials', { List values, Closure body ->
+        def ids = values.collect { it.credentialsId }
+        credentialGroups << ids
+        if (options.missingCredential && ids.contains(options.missingCredential)) {
+            throw new IllegalStateException('fake missing credential')
+        }
+        body()
+    })
     binding.setVariable('stage', { String name, Closure body ->
         calls << name
         if (name == options.failStage) { throw new IllegalStateException('fake failed stage') }
@@ -46,7 +58,12 @@ def simulate = { String filename, Map options = [:] ->
     })
     binding.setVariable('pwd', { -> '/fake/workspace' })
     binding.setVariable('libraryResource', { String name -> '# fake trusted resource' })
-    binding.setVariable('sh', { Object script -> calls << script.toString() })
+    binding.setVariable('sh', { Object script ->
+        calls << script.toString()
+        if (options.preflightFailure && script.toString().contains('release-preflight.py')) {
+            throw new IllegalStateException('fake invalid bound credential')
+        }
+    })
     binding.setVariable('waitForBuild', { Map values ->
         assert values.runId == product + '/develop#188'
         [result: options.upstreamResult ?: 'SUCCESS']
@@ -76,10 +93,25 @@ def simulate = { String filename, Map options = [:] ->
     } catch (IllegalStateException expected) {
         failed = true
     }
-    [calls: calls, failed: failed]
+    [calls: calls, credentialGroups: credentialGroups, failed: failed]
 }
 
 int tests = 0
+def preflight = simulate('autoReleasePipeline.groovy')
+assert !preflight.failed
+def allCredentials = ['read', 'harbor', 'scm', 'merge', 'tag-writer', 'nexus', 'approval', 'receipt']
+assert preflight.credentialGroups[0] == allCredentials
+assert preflight.calls.indexOf('python3 control/release-preflight.py') < preflight.calls.indexOf('develop: Complete Build Evidence')
+assert preflight.calls.findIndexOf { it.toString().contains('check-routing') } < preflight.calls.indexOf('develop: Complete Build Evidence')
+tests++
+for (options in allCredentials.collect { [missingCredential: it] } + [[preflightFailure: true]]) {
+    def rejected = simulate('autoReleasePipeline.groovy', options)
+    assert rejected.failed
+    assert !rejected.calls.contains('develop: Complete Build Evidence')
+    assert !rejected.calls.contains('checkout')
+    assert !rejected.calls.any { it.toString().startsWith('build:') }
+    tests++
+}
 for (options in [[:], [prodResult: 'FAILURE'], [review: 'BLOCKED'], [failStage: 'develop: All Severity Scans']]) {
     def cleaned = simulate('autoReleasePipeline.groovy', options)
     assert cleaned.calls.count('deleteDir') == 1

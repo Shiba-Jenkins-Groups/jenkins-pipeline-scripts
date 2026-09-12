@@ -59,7 +59,7 @@ def call(Map config = [:]) {
             def root = pwd()
             def control = "${root}/control"
             stage('Load Trusted Release Controls') {
-                ['release-gate.py', 'release-evidence.py', 'release-promotion.py',
+                ['release-gate.py', 'release-evidence.py', 'release-promotion.py', 'release-preflight.py',
                  'release-finalization.py', 'release-finalize.sh', 'error-handler.sh', 'nexus-upload.sh', 'git-tag.sh',
                  'harbor-vulnerability-report.py', 'release-askpass.sh'].each { name ->
                     writeFile file: "control/${name}", text: libraryResource("scripts/common/${name}")
@@ -82,9 +82,26 @@ def call(Map config = [:]) {
                     max_exception_seconds: 900, approvers: config.approvers,
                     revoked_approval_ids: config.revokedApprovalIds ?: []
                 ])
-                withCredentials([usernamePassword(credentialsId: config.jenkinsReadCredentials,
-                    usernameVariable: 'JENKINS_API_USER', passwordVariable: 'JENKINS_API_TOKEN')]) {
+                // Resolve every later credential before scanning or claiming a release.
+                // Existence alone is insufficient for Secret File credentials: a
+                // malformed XML import can bind successfully to an empty key file.
+                withCredentials([
+                    usernamePassword(credentialsId: config.jenkinsReadCredentials,
+                        usernameVariable: 'JENKINS_API_USER', passwordVariable: 'JENKINS_API_TOKEN'),
+                    usernamePassword(credentialsId: config.harborCredentials,
+                        usernameVariable: 'PREFLIGHT_HARBOR_USER', passwordVariable: 'PREFLIGHT_HARBOR_PASSWORD'),
+                    usernamePassword(credentialsId: config.scmCredentials,
+                        usernameVariable: 'PREFLIGHT_SCM_USER', passwordVariable: 'PREFLIGHT_SCM_PASSWORD'),
+                    usernamePassword(credentialsId: config.mergeCredentials,
+                        usernameVariable: 'PREFLIGHT_MERGE_USER', passwordVariable: 'PREFLIGHT_MERGE_PASSWORD'),
+                    usernamePassword(credentialsId: config.finalizationWriterCredentials,
+                        usernameVariable: 'PREFLIGHT_WRITER_USER', passwordVariable: 'PREFLIGHT_WRITER_PASSWORD'),
+                    usernamePassword(credentialsId: config.nexusCredentials,
+                        usernameVariable: 'PREFLIGHT_NEXUS_USER', passwordVariable: 'PREFLIGHT_NEXUS_PASSWORD'),
+                    file(credentialsId: config.approvalKeyCredentials, variable: 'APPROVAL_KEY_FILE'),
+                    file(credentialsId: config.receiptKeyCredentials, variable: 'RECEIPT_KEY_FILE')]) {
                     withEnv(["RELEASE_JENKINS_URL=${config.jenkinsApiUrl}", "RELEASE_DEPLOY_LABEL=${config.deploymentNodeLabel}"]) {
+                        sh 'python3 control/release-preflight.py'
                         sh 'python3 control/release-evidence.py check-routing --jenkins-url "$RELEASE_JENKINS_URL" --deployment-label "$RELEASE_DEPLOY_LABEL"'
                     }
                 }
