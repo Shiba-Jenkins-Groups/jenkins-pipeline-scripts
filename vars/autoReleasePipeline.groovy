@@ -27,14 +27,29 @@ def call(Map config = [:]) {
         disableConcurrentBuilds(),
         parameters([
             string(name: 'SOURCE_BUILD', defaultValue: '', description: 'Explicit recovery: completed develop build number'),
-            string(name: 'EXPECTED_COMMIT', defaultValue: '', description: 'Explicit recovery: full 40-character develop commit')
+            string(name: 'EXPECTED_COMMIT', defaultValue: '', description: 'Explicit recovery: full 40-character develop commit'),
+            string(name: 'RECOVER_COORDINATOR_BUILD', defaultValue: '', description: 'Finalized deployment recovery: exact failed coordinator'),
+            string(name: 'RECOVER_OWNER_BUILD', defaultValue: '', description: 'Finalized deployment recovery: exact failed owner build')
         ]),
         pipelineTriggers([upstream(upstreamProjects: "${product}/develop", threshold: 'UNSTABLE')])
     ])
     def causes = currentBuild.getBuildCauses('hudson.model.Cause$UpstreamCause')
     def requestedBuild = params.SOURCE_BUILD?.toString()?.trim() ?: ''
     def requestedCommit = params.EXPECTED_COMMIT?.toString()?.trim() ?: ''
+    def recoverCoordinator = params.RECOVER_COORDINATOR_BUILD?.toString()?.trim() ?: ''
+    def recoverOwner = params.RECOVER_OWNER_BUILD?.toString()?.trim() ?: ''
+    def deploymentRecovery = recoverCoordinator || recoverOwner
+    def recoveryApprover = ''
     Integer sourceBuild
+    if (deploymentRecovery) {
+        def allCauses = currentBuild.getBuildCauses()
+        if (!(recoverCoordinator ==~ /[1-9][0-9]{0,8}/) || !(recoverOwner ==~ /[1-9][0-9]{0,8}/) ||
+            !requestedBuild || !requestedCommit || allCauses.size() != 1 ||
+            allCauses[0]._class != 'hudson.model.Cause$UserIdCause' || !config.approvers.contains(allCauses[0].userId)) {
+            error('Deployment recovery requires a unique authorized user and four exact recovery fields')
+        }
+        recoveryApprover = allCauses[0].userId.toString()
+    }
     if (requestedBuild || requestedCommit) {
         def users = currentBuild.getBuildCauses('hudson.model.Cause$UserIdCause')
         if (causes || users.size() != 1 || !config.approvers.contains(users[0].userId) ||
@@ -61,7 +76,7 @@ def call(Map config = [:]) {
             stage('Load Trusted Release Controls') {
                 ['release-gate.py', 'release-evidence.py', 'release-promotion.py', 'release-preflight.py',
                  'release-finalization.py', 'release-finalize.sh', 'error-handler.sh', 'nexus-upload.sh', 'git-tag.sh',
-                 'harbor-vulnerability-report.py', 'release-askpass.sh'].each { name ->
+                 'harbor-vulnerability-report.py', 'release-askpass.sh', 'release-recovery.py'].each { name ->
                     writeFile file: "control/${name}", text: libraryResource("scripts/common/${name}")
                 }
                 def commonStages = ['Checkout', 'Load Scripts', 'Detect', 'Secret Scan', 'Build', 'Test',
@@ -105,6 +120,52 @@ def call(Map config = [:]) {
                         sh 'python3 control/release-evidence.py check-routing --jenkins-url "$RELEASE_JENKINS_URL" --deployment-label "$RELEASE_DEPLOY_LABEL"'
                     }
                 }
+            }
+
+            if (deploymentRecovery) {
+                // A finalized artifact is never rebuilt, re-promoted or re-tagged.
+                // Original gates and their original expiration remain in force.
+                withEnv(["RECOVERY_COORDINATOR=${recoverCoordinator}", "RECOVERY_OWNER=${recoverOwner}",
+                         "RECOVERY_SOURCE_BUILD=${sourceBuild}", "RECOVERY_SOURCE_COMMIT=${requestedCommit}",
+                         "RECOVERY_APPROVER=${recoveryApprover}", "RELEASE_JENKINS_URL=${config.jenkinsApiUrl}",
+                         "NEXUS_BASE_URL=${config.nexusBaseUrl}", "GIT_ASKPASS=${control}/release-askpass.sh",
+                         'GIT_TERMINAL_PROMPT=0', 'PYTHONDONTWRITEBYTECODE=1']) {
+                    stage('Revalidate Original Finalized Release') {
+                        withCredentials([usernamePassword(credentialsId: config.jenkinsReadCredentials,
+                            usernameVariable: 'JENKINS_API_USER', passwordVariable: 'JENKINS_API_TOKEN'),
+                            file(credentialsId: config.receiptKeyCredentials, variable: 'RECEIPT_KEY_FILE')]) {
+                            sh '''python3 control/release-recovery.py collect --root recovery --policy control/policy.json \
+                                --receipt-key-file "$RECEIPT_KEY_FILE" --jenkins-url "$RELEASE_JENKINS_URL" \
+                                --coordinator-build "$RECOVERY_COORDINATOR" --owner-build "$RECOVERY_OWNER" \
+                                --source-build "$RECOVERY_SOURCE_BUILD" --expected-commit "$RECOVERY_SOURCE_COMMIT"'''
+                        }
+                    }
+                    def recovered = parseReleaseJson(readFile('recovery/recovery-identity.json'))
+                    stage('Verify Existing Published Artifact') {
+                        dir('recovery-source') {
+                            checkout([$class: 'GitSCM', branches: [[name: recovered.commit]],
+                                userRemoteConfigs: [[url: 'https://github.com/ShibaDev2026/shiba-go-ditch-api-project.git',
+                                    credentialsId: config.scmCredentials]]])
+                        }
+                        withCredentials([file(credentialsId: config.receiptKeyCredentials, variable: 'RECEIPT_KEY_FILE'),
+                            usernamePassword(credentialsId: config.scmCredentials,
+                                usernameVariable: 'RELEASE_GIT_USER', passwordVariable: 'RELEASE_GIT_PASSWORD'),
+                            usernamePassword(credentialsId: config.nexusCredentials,
+                                usernameVariable: 'NEXUS_CRED_USR', passwordVariable: 'NEXUS_CRED_PSW')]) {
+                            sh '''chmod 700 "$GIT_ASKPASS"
+python3 control/release-recovery.py handoff --root recovery --source recovery-source --policy control/policy.json \
+    --receipt-key-file "$RECEIPT_KEY_FILE" --approver "$RECOVERY_APPROVER" --output deployment-request.json'''
+                        }
+                        archiveArtifacts artifacts: 'deployment-request.json,recovery/**/*.json', allowEmptyArchive: false
+                    }
+                    stage('PROD Runtime Deployment') {
+                        def deployed = build(job: config.deploymentJob, wait: true, propagate: false,
+                            parameters: [text(name: 'SIGNED_RELEASE_REQUEST', value: readFile('deployment-request.json'))])
+                        if (deployed.result != 'SUCCESS') { error('Recovered runtime deployment failed; preserve both receipts') }
+                        currentBuild.description = "recovered coordinator #${recoverCoordinator}; prod ${recovered.commit.take(12)}; deploy #${deployed.number}"
+                    }
+                }
+                return
             }
 
             def verifyPhase = { String branch, Integer number, String expectedCommit ->
@@ -256,7 +317,7 @@ python3 control/release-promotion.py handoff --promotion promotion.json --finali
                 // Preserve only release evidence, never source checkouts, scanner
                 // caches or credential files. If archival fails, retain the
                 // workspace for diagnosis instead of destroying the only copy.
-                archiveArtifacts artifacts: 'control/policy.json,develop/identity.json,prod/identity.json,develop/review.json,prod/review.json,develop/approval.json,prod/approval.json,develop/evidence/*.json,develop/evidence/*.jsonl,prod/evidence/*.json,prod/evidence/*.jsonl,develop/evidence/.pipeline/candidate*,prod/evidence/.pipeline/candidate*,develop/evidence/.pipeline/candidate-stages/*,prod/evidence/.pipeline/candidate-stages/*,develop/evidence/reports/junit/*,prod/evidence/reports/junit/*,promotion.json,finalization.json,deployment-request.json,prod/source/.pipeline/release-manifest.env', allowEmptyArchive: true
+                archiveArtifacts artifacts: 'control/policy.json,develop/identity.json,prod/identity.json,develop/review.json,prod/review.json,develop/approval.json,prod/approval.json,develop/evidence/*.json,develop/evidence/*.jsonl,prod/evidence/*.json,prod/evidence/*.jsonl,develop/evidence/.pipeline/candidate*,prod/evidence/.pipeline/candidate*,develop/evidence/.pipeline/candidate-stages/*,prod/evidence/.pipeline/candidate-stages/*,develop/evidence/reports/junit/*,prod/evidence/reports/junit/*,promotion.json,finalization.json,deployment-request.json,prod/source/.pipeline/release-manifest.env,recovery/**', allowEmptyArchive: true
                 // This dir is scoped to this exact build, not the agent root,
                 // persistent dependency cache, release state or runtime data.
                 deleteDir()

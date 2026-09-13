@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -25,6 +26,45 @@ spec.loader.exec_module(control)
 gate, require = control.gate, control.require
 PROJECT = "shiba-goditch-prod"
 DB_DESTINATION = "/app/data/db/app"
+SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+def failed_recovery_identity(request, key):
+    """A separately signed retry names one original, non-recursive failure."""
+    recovery = request["recovery"]
+    require(isinstance(recovery, dict) and set(recovery) == {
+        "kind", "attempt_id", "coordinator_build", "owner_build", "authorized_by", "failed_receipt"},
+        "invalid deployment recovery contract")
+    require(recovery["kind"] == "failed-deployment-retry", "invalid deployment recovery kind")
+    require(isinstance(recovery["attempt_id"], str) and re.fullmatch(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", recovery["attempt_id"]),
+        "invalid canonical recovery attempt UUID")
+    require(all(type(recovery[field]) is int and recovery[field] > 0
+                for field in ("coordinator_build", "owner_build")), "invalid failed build coordinates")
+    author = recovery["authorized_by"]
+    require(isinstance(author, str) and author == author.strip() and 0 < len(author) <= 256
+            and all(ord(char) >= 32 and ord(char) != 127 for char in author),
+            "missing valid deployment recovery authorization")
+    signed = recovery["failed_receipt"]
+    require(isinstance(signed, dict) and set(signed) == {"payload", "signature"}
+            and isinstance(signed["payload"], dict) and isinstance(signed["signature"], str)
+            and SHA256.fullmatch(signed["signature"]), "invalid signed failed deployment receipt")
+    failed = control.verify(signed, key)
+    require(type(failed.get("schema_version")) is int and failed["schema_version"] == 1
+            and failed.get("kind") == "runtime-deployment"
+            and failed.get("status") == "FAILED" and failed.get("product") == gate.PRODUCT,
+            "recovery requires an original signed FAILED deployment")
+    require(all(failed.get(field) == request[field] for field in ("commit", "version", "digest")),
+            "failed deployment identity mismatch")
+    require("recovery" not in failed and "failed_receipt_sha256" not in failed,
+            "recursive deployment recovery is forbidden")
+    require(isinstance(failed.get("request_sha256"), str) and SHA256.fullmatch(failed["request_sha256"])
+            and isinstance(failed.get("previous_container_id"), str) and SHA256.fullmatch(failed["previous_container_id"])
+            and isinstance(failed.get("previous_image_id"), str) and gate.DIGEST.fullmatch(failed["previous_image_id"]),
+            "failed deployment lacks exact original identities")
+    require(failed.get("new_backup_and_migration_files") == [] and failed.get("automatic_rollback") is False,
+            "failed deployment has mutation evidence requiring manual reconciliation")
+    return failed
 
 
 def request_identity(signed, key, now):
@@ -52,7 +92,46 @@ def request_identity(signed, key, now):
             and final.get('commit') == request['commit'] and final.get('digest') == request['digest']
             and final.get('version') == request['version'] and final.get('evidence_sha256') == request['evidence_sha256'],
             'deployment requires matching verified finalization')
+    if "recovery" in request:
+        failed_recovery_identity(request, key)
     return request
+
+
+def preserve_failed_attempt(state, commit, signed):
+    """Called only under both owner locks, before replacing the current claim.
+
+    No overwrite or reconciliation of an existing archive is automatic. Even a
+    matching archive may be evidence of an interrupted previous recovery.
+    """
+    data = gate.canonical(signed)
+    digest = hashlib.sha256(data).hexdigest()
+    root_fd = os.open(state.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        try:
+            os.mkdir("attempts", mode=0o700, dir_fd=root_fd)
+        except FileExistsError:
+            pass
+        directory = os.open("attempts", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
+        try:
+            info = os.fstat(directory)
+            require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and info.st_mode & 0o077 == 0,
+                    "failed attempt archive directory is not private and owned")
+            try:
+                fd = os.open(f"{commit}-{digest}.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                             0o600, dir_fd=directory)
+            except FileExistsError:
+                raise gate.InvalidEvidence("failed attempt archive already exists; reconcile interrupted recovery")
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.fsync(directory)
+            os.fsync(root_fd)
+        finally:
+            os.close(directory)
+    finally:
+        os.close(root_fd)
+    return digest
 
 
 def run(command, **kwargs):
@@ -175,12 +254,31 @@ def execute(signed, key, source, runtime, state, engine_id, now, output):
         except BlockingIOError:
             raise gate.InvalidEvidence("PROD lifecycle lock is busy")
         with state.lock():
-            require(not state.exists(request["commit"]), "deployment already claimed; inspect receipt before any retry")
-            require(control.heads(source)[1] == request["commit"], "prod branch advanced after promotion")
+            recovering = "recovery" in request
+            if recovering:
+                require(state.exists(request["commit"]), "failed deployment state missing; recovery is not a fresh claim")
+                existing = state.read(request["commit"])
+                control.verify(existing, key)
+                require(gate.canonical(existing) == gate.canonical(request["recovery"]["failed_receipt"]),
+                        "failed deployment state changed; recovery already claimed or ambiguous")
+                failed = failed_recovery_identity(request, key)
+            else:
+                require(not state.exists(request["commit"]), "deployment already claimed; inspect receipt before any retry")
+            develop, prod = control.heads(source)
+            require(prod == request["commit"], "prod branch advanced after promotion")
+            if recovering:
+                require(develop == request["promotion"]["payload"]["source_commit"],
+                        "develop candidate advanced after failed deployment")
             # Same runtime lock covers classification, deploy and final verification.
             previous = target_container(containers(), runtime)
             no_host_writer(runtime)
             image_id = image_identity(request)
+            if recovering:
+                require(previous["Id"] == failed["previous_container_id"]
+                        and previous["Image"] == failed["previous_image_id"]
+                        and previous["State"].get("Health", {}).get("Status") == "healthy",
+                        "failed deployment previous runtime changed or unhealthy")
+                require(previous["Image"] != image_id, "recovery candidate is already active")
             request_identity(signed, key, dt.datetime.now(dt.timezone.utc))
             record = {"schema_version": 1, "kind": "runtime-deployment", "product": gate.PRODUCT,
                       "status": "CLAIMED", "request_sha256": hashlib.sha256(gate.canonical(signed)).hexdigest(),
@@ -191,6 +289,9 @@ def execute(signed, key, source, runtime, state, engine_id, now, output):
             before = {p.name for p in backup_root.iterdir()} if backup_root.is_dir() else set()
             record.update(library_revision=request.get("library_revision"), deployment_script_revision=request["commit"],
                           deploy_journal=str(runtime / "data/logs/prod-deploy-journal.log"), backup_directory=str(backup_root))
+            if recovering:
+                failed_hash = preserve_failed_attempt(state, request["commit"], existing)
+                record.update(recovery=request["recovery"], failed_receipt_sha256=failed_hash)
             state.write(request["commit"], control.sign(record, key))
             try:
                 env = {k: v for k, v in os.environ.items() if not k.startswith(("RELEASE_", "RECEIPT_", "APPROVAL_", "JENKINS_API_"))}

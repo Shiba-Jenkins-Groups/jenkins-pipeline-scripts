@@ -20,6 +20,7 @@ def simulate = { String filename, Map options = [:] ->
     binding.setVariable('params', [SIGNED_RELEASE_REQUEST: '{}'] + (options.recoveryParams ?: [:]))
     binding.setVariable('currentBuild', [getBuildCauses: { String type = null ->
         if (options.recoveryParams) {
+            if (type == null) { return [[_class: options.replay ? 'org.jenkinsci.plugins.workflow.cps.replay.ReplayCause' : 'hudson.model.Cause$UserIdCause', userId: options.badUser ? 'intruder' : 'reviewer']] }
             if (type == 'hudson.model.Cause$UserIdCause') { return [[userId: options.badUser ? 'intruder' : 'reviewer']] }
             return []
         }
@@ -128,6 +129,26 @@ assert !recovered.failed
 assert recovered.calls.any { it.toString().contains('release-promotion.py recover') }
 assert !recovered.calls.any { it.toString().contains('release-promotion.py promote') }
 tests++
+def deploymentRecovery = recovery + [RECOVER_COORDINATOR_BUILD: '53', RECOVER_OWNER_BUILD: '19']
+def deployedRecovery = simulate('autoReleasePipeline.groovy', [recoveryParams: deploymentRecovery])
+assert !deployedRecovery.failed
+assert deployedRecovery.calls.count('build:' + releaseFolder + '/' + product + '-prod-deploy') == 1
+assert !deployedRecovery.calls.contains('build:' + product + '/prod')
+assert !deployedRecovery.calls.contains('Promote Verified Commit')
+assert !deployedRecovery.calls.contains('Finalize Revalidated PROD Candidate')
+assert deployedRecovery.calls.any { it.toString().contains('release-recovery.py collect') }
+assert deployedRecovery.calls.any { it.toString().contains('release-recovery.py handoff') }
+tests++
+for (options in [[recoveryParams: deploymentRecovery, badUser: true], [recoveryParams: deploymentRecovery, replay: true],
+                 [recoveryParams: recovery + [RECOVER_COORDINATOR_BUILD: '53']],
+                 [recoveryParams: [RECOVER_COORDINATOR_BUILD: '53', RECOVER_OWNER_BUILD: '19']],
+                 [recoveryParams: deploymentRecovery, failStage: 'Revalidate Original Finalized Release'],
+                 [recoveryParams: deploymentRecovery, failStage: 'Verify Existing Published Artifact']]) {
+    def rejected = simulate('autoReleasePipeline.groovy', options)
+    assert rejected.failed
+    assert !rejected.calls.any { it.toString().startsWith('build:') }
+    tests++
+}
 for (options in [[recoveryParams: recovery, badUser: true],
                  [recoveryParams: [SOURCE_BUILD: '188']],
                  [recoveryParams: [SOURCE_BUILD: '-1', EXPECTED_COMMIT: 'b' * 40]],

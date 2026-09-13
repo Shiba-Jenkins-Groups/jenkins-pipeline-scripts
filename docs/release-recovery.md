@@ -37,3 +37,32 @@ Verification: run release-pipelines.test.groovy with the existing Groovy runtime
 and CPS annotation jar; run each release-*.test.py directly (their dotted names
 are not discovered by unittest discovery). Confirm launchd and Jenkins agree
 that the single deployment node is running and online across separate sessions.
+
+## Finalized artifact, failed owner deployment
+
+This separate lane requires all four exact parameters: SOURCE_BUILD,
+EXPECTED_COMMIT, RECOVER_COORDINATOR_BUILD and RECOVER_OWNER_BUILD. A unique
+UserIdCause belonging to a configured approver is mandatory; Replay and mixed
+causes are rejected. It supports only a first failed owner attempt with no new
+backup/migration files and the original healthy runtime still present.
+
+The coordinator authenticates the original native build chain and signed
+promotion/finalization/request/FAILED receipt. It evaluates both complete
+original evidence bundles at the actual current time under unchanged security
+policy. Existing release heads, merge parents, peeled tag, published binary hash
+and immutable image identity are rechecked. No merge, build, publication or
+tagging occurs. Only clean PASS gates are supported; exceptions and stale
+evidence fail closed. The new request expires at the earliest original evidence
+or scan deadline, or fifteen minutes, whichever comes first.
+
+The existing owner job receives the new signed request through a native
+coordinator handoff. While holding both lifecycle and state locks, it requires
+the exact signed FAILED state, healthy original container/image, unchanged
+branches, engine and owner DB domain. It creates and fsyncs an immutable private
+attempt archive before recording the new claim. It never deletes the prior
+receipt or pretends the previous failure was a success. Replays, ambiguous state,
+changed runtime, existing attempt archives and recursive recovery are blocked.
+Failure preserves the new attempt too; rollback remains separately authorized.
+
+If the one-hour original evidence window expires, stop. This lane does not
+refresh timestamps or permit rebuilding an already finalized version.
