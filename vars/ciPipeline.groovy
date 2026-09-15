@@ -47,10 +47,11 @@ def call(Map config = [:]) {
     def additionalImagesSpec = additionalImages.collect { image ->
         "${image.name ?: ''}=${image.dockerfile ?: ''}"
     }.join(',')
-    // Fail closed：只有三個明確可信 branch 可取得 image-builder；PR 與所有未知 branch
-    // 以及 App lean develop 一律進無 Docker socket／無發布 credential 的 ci-untrusted。
+    // Fail closed：只有三個明確可信 branch 可使用既有 trusted agent；PR 與所有未知 branch
+    // 一律進 ci-untrusted。Lean develop 雖沿用 trusted agent 的可寫 Go cache，但下方會
+    // 關閉所有 Docker、Harbor、K3D 與發布 credential stage。
     def trustedBranch = !env.CHANGE_ID?.trim() && ['develop', 'main', 'prod'].contains(sourceBranch)
-    def selectedAgentLabel = trustedBranch && !leanDevelop ? 'ci-image-builder' : 'ci-untrusted'
+    def selectedAgentLabel = trustedBranch ? 'ci-image-builder' : 'ci-untrusted'
     // Opt-in is restricted to this product's trusted release branches. Other
     // projects and PRs retain the existing build path and cannot request GC.
     def appCapacityBuilder = config.ciCapacityBuilder == true
