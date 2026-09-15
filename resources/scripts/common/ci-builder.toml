@@ -1,0 +1,8 @@
+# App-only docker-container BuildKit. Values are bytes to make GiB exact.
+# 30 GiB is an upper bound, not a 30 GiB minimum retention floor: the latter
+# would conflict with the early-capacity gate on a shared Docker Desktop disk.
+[worker.oci]
+  gc = true
+  reservedSpace = 2147483648
+  maxUsedSpace = 32212254720
+  minFreeSpace = 21474836480

@@ -98,11 +98,26 @@ docker_build() {
     echo "[docker] Using Dockerfile: ${dockerfile}"
     echo "[docker] Building image: ${image_name}"
 
-    DOCKER_BUILDKIT=0 docker build \
-        -f "${dockerfile}" \
-        ${build_args} \
-        -t "${image_name}" \
-        "${WORKSPACE}"
+    if [[ -n "${CI_BUILDX_BUILDER:-}" ]]; then
+        # Product opt-in only: a docker-container builder keeps its cache separate
+        # from the shared daemon builder. --load preserves scan/push/smoke inputs.
+        [[ "${CI_BUILDX_BUILDER}" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || {
+            echo "[docker] invalid CI builder name" >&2
+            return 1
+        }
+        docker buildx build --builder "${CI_BUILDX_BUILDER}" \
+            --platform "${CI_BUILDX_PLATFORM:-linux/arm64}" --load \
+            -f "${dockerfile}" \
+            ${build_args} \
+            -t "${image_name}" \
+            "${WORKSPACE}"
+    else
+        DOCKER_BUILDKIT=0 docker build \
+            -f "${dockerfile}" \
+            ${build_args} \
+            -t "${image_name}" \
+            "${WORKSPACE}"
+    fi
 
     # build 完成後，為 base image 建立 shiba/base/ 別名，方便 docker images 識別用途
     tag_base_image "${dockerfile}" "${build_args}"

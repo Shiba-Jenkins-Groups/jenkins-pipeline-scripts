@@ -256,7 +256,41 @@ deploy() {
 cleanup() {
     require_pool_identity
     echo "[k3d-pool] releasing slot ${namespace}"
-    kubectl delete namespace "${namespace}" --ignore-not-found --wait=false
+    # Completion means resources are gone, not merely that an asynchronous
+    # deletion request was accepted. The janitor remains a crash-only fallback.
+    kubectl delete namespace "${namespace}" --ignore-not-found --wait=true --timeout=150s
+
+    # Remove only this build's immutable Harbor reference from each K3D node.
+    # Never run crictl prune: platform/base images may be shared by other slots.
+    : "${APP_NAME:?APP_NAME is required for exact K3D image cleanup}"
+    : "${APP_VERSION:?APP_VERSION is required for exact K3D image cleanup}"
+    : "${BUILD_NUMBER:?BUILD_NUMBER is required for exact K3D image cleanup}"
+    : "${BRANCH:?BRANCH is required for exact K3D image cleanup}"
+    local registry="${HARBOR_K3S_REGISTRY:-host.docker.internal:9290}"
+    local image node image_ids
+    image="$(harbor_image_ref "${registry}" "${APP_NAME}" "${BRANCH}" "${APP_VERSION}" "${BUILD_NUMBER}")"
+    if kubectl get pods -A -o json | TARGET_IMAGE="${image}" python3 -c '
+import json, os, sys
+for pod in json.load(sys.stdin).get("items", []):
+    spec = pod.get("spec", {})
+    containers = spec.get("containers", []) + spec.get("initContainers", []) + spec.get("ephemeralContainers", [])
+    if any(container.get("image") == os.environ["TARGET_IMAGE"] for container in containers):
+        raise SystemExit(1)
+'
+    then
+        while IFS= read -r node; do
+            [[ -n "${node}" && "${node}" =~ ^k3d-[A-Za-z0-9_.-]+$ ]] || continue
+            docker container inspect "${node}" >/dev/null
+            image_ids="$(docker exec "${node}" crictl images --quiet --no-trunc "${image}" 2>/dev/null || true)"
+            if [[ -n "${image_ids}" ]]; then
+                docker exec "${node}" crictl rmi "${image}"
+            fi
+        done < <(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
+        echo "[k3d-pool] exact verification image cache removed where present: ${image}"
+    else
+        report_error "K3D_POOL" "008" "image still referenced outside released namespace; cache removal refused: ${image}"
+        return 1
+    fi
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then

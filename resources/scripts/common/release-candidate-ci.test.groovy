@@ -51,7 +51,8 @@ def simulate = { boolean enabled, Map options = [:] ->
         new GroovyShell(binding).parse(new File(libraryRoot, 'vars/ciPipeline.groovy')).call([
             controlledReleaseCandidate: enabled, githubCredentials: 'offline-read', harborCredentials: 'offline-harbor',
             releaseFinalizeAfterVerification: true, fastContractCommand: "echo 'offline contract'", deployInputGate: false,
-            dockerPruneEnabled: false, profile: options.profile ?: 'full'
+            dockerPruneEnabled: false, ciCapacityBuilder: options.ciBuilder ?: false,
+            profile: options.profile ?: 'full'
         ])
     } catch (IllegalStateException expected) { failed = true }
     [calls: calls, failed: failed, environment: environment, result: current.currentResult]
@@ -67,6 +68,14 @@ assert !candidate.calls.contains('junit') // Raw reports archived; no post-stage
 assert candidate.environment.DO_ARCHIVE_ARTIFACT_PUBLISH == 'false'
 assert candidate.environment.DO_ARCHIVE_GIT_TAG == 'false'
 assert candidate.calls.any { it.contains('release-candidate.py manifest') }
+def capacity = simulate(true, [ciBuilder: true])
+assert !capacity.failed
+assert capacity.calls.any { it.contains('ci-capacity.py --builder') }
+assert capacity.calls.any { it.contains('ci-builder-ensure.sh') }
+assert capacity.calls.indexOf(capacity.calls.find { it.contains('ci-capacity.py --builder') }) <
+       capacity.calls.indexOf(capacity.calls.find { it.contains('/go-build.sh') })
+assert capacity.environment.CI_BUILDX_BUILDER == 'shiba-app-ci'
+assert candidate.environment.CI_BUILDX_BUILDER == null
 candidate = simulate(true, [testResult: 10])
 assert !candidate.failed && candidate.result == 'UNSTABLE'
 assert candidate.calls.contains('bash .pipeline/scripts/cd.sh harbor-push')
@@ -76,4 +85,4 @@ for (options in [[testResult: 2], [buildFailure: true], [profile: 'ci-only']]) {
     assert result.failed
     assert !result.calls.any { it == 'bash .pipeline/scripts/common/release-finalize.sh' }
 }
-println 'PASS: 6 offline candidate/legacy CI flow cases (not Jenkins CPS integration)'
+println 'PASS: 7 offline candidate/legacy CI flow cases (not Jenkins CPS integration)'

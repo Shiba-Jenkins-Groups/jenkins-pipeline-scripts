@@ -45,6 +45,13 @@ def call(Map config = [:]) {
     // 一律進無 Docker socket／無發布 credential 的 ci-untrusted。
     def trustedBranch = !env.CHANGE_ID?.trim() && ['develop', 'main', 'prod'].contains(sourceBranch)
     def selectedAgentLabel = trustedBranch ? 'ci-image-builder' : 'ci-untrusted'
+    // Opt-in is restricted to this product's trusted release branches. Other
+    // projects and PRs retain the existing build path and cannot request GC.
+    def appCapacityBuilder = config.ciCapacityBuilder == true
+    if (appCapacityBuilder && (!trustedBranch || !(env.JOB_NAME in [
+            'shiba-go-ditch-api-project/develop', 'shiba-go-ditch-api-project/prod']))) {
+        error('Dedicated CI builder is App trusted release branch-only')
+    }
 
     // ── 1. Profile 預設矩陣 ──────────────────────────────────────────────────
     // 組織策略層：預定義 pipeline 規模，統一由 Shared Library 維護
@@ -170,6 +177,9 @@ def call(Map config = [:]) {
                                     'scripts/common/dependency-check.sh',
                                     'scripts/common/k3d-verify.sh',
                                     'scripts/common/k3d-capacity.py',
+                                    'scripts/common/ci-capacity.py',
+                                    'scripts/common/ci-builder-ensure.sh',
+                                    'scripts/common/ci-builder.toml',
                                     'scripts/common/harbor-vulnerability-report.py',
                                     'scripts/common/release-finalize.sh',
                                     'scripts/common/release-candidate.py',
@@ -283,6 +293,13 @@ def call(Map config = [:]) {
                                 // Pipeline verification 一律使用 ci-* 臨時 namespace，finally 會整個回收；
                                 // 既有 dev/prod 常駐 namespace 不在回收範圍，故不再需要專案 opt-in。
                                 env.DEPLOY_TEARDOWN = 'true'
+                                if (appCapacityBuilder) {
+                                    env.CI_BUILDX_BUILDER = 'shiba-app-ci'
+                                    env.CI_BUILDX_PLATFORM = 'linux/arm64'
+                                    // The existing Docker agent cache volume survives agent
+                                    // replacement; builder metadata must use the same path.
+                                    env.BUILDX_CONFIG = '/home/jenkins/.cache/shiba-app-buildx'
+                                }
 
                                 // 人工確認閘的專案級覆蓋（deployInputGate: false 可關掉 prod 那道 input）。
                                 // 適用情境：pod 部署本身不碰生產（只是驗證閘），真正動生產是管線之外
@@ -320,6 +337,14 @@ def call(Map config = [:]) {
                         when { expression { env.DO_SECRET_SCAN == 'true' } }
                         steps {
                             sh "bash .pipeline/scripts/common/secret-scan.sh"
+                        }
+                    }
+
+                    stage('Early Capacity Admission') {
+                        when { expression { appCapacityBuilder && ciStages.build } }
+                        steps {
+                            sh 'python3 .pipeline/scripts/common/ci-capacity.py --builder "$CI_BUILDX_BUILDER" --capacity-script .pipeline/scripts/common/k3d-capacity.py --policy-config .pipeline/scripts/common/ci-builder.toml --output .pipeline/ci-capacity.json'
+                            sh 'bash .pipeline/scripts/common/ci-builder-ensure.sh .pipeline/scripts/common/ci-builder.toml'
                         }
                     }
 
@@ -702,6 +727,8 @@ def call(Map config = [:]) {
                 archiveArtifacts artifacts: 'reports/harbor-scan/**/*',
                                  allowEmptyArchive: true
                 archiveArtifacts artifacts: '.pipeline/k3d-capacity-preflight.json',
+                                 allowEmptyArchive: true
+                archiveArtifacts artifacts: '.pipeline/ci-capacity*.json,.pipeline/ci-capacity*.jsonl,.pipeline/ci-capacity*.log',
                                  allowEmptyArchive: true
                 script {
                     if (candidateMode) {
