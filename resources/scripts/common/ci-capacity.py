@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""App-only early capacity gate with one builder-scoped, age-bounded reclaim."""
+"""App-only early capacity gate with bounded reclaim and GC convergence wait."""
 import argparse
 import datetime as dt
 import hashlib
@@ -9,10 +9,13 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import time
 
 GIB = 1024 ** 3
 BUILDER_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 PINNED_IMAGE = "moby/buildkit@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8"
+RECOVERY_WAIT_SECONDS = 120
+RECOVERY_POLL_SECONDS = 10
 
 
 def run(argv, *, check=True):
@@ -56,6 +59,57 @@ def verify_ownership(builder, policy):
                  f"buildx_buildkit_{builder}0"]).stdout.strip()
     if image != PINNED_IMAGE:
         raise RuntimeError("dedicated builder image differs from pinned digest; refusing prune")
+
+
+def can_wait_for_async_reclaim(report):
+    """Wait only for a healthy node in the 12-20 GiB transient recovery band."""
+    nodes = report.get("nodes") or []
+    if not nodes:
+        return False
+    for node in nodes:
+        if node.get("disk_pressure") != "False" or node.get("disk_pressure_taint"):
+            return False
+        if node.get("available_bytes", 0) < 12 * GIB:
+            return False
+        if node.get("used_percent", 100) >= 90:
+            return False
+    return True
+
+
+def wait_for_async_reclaim(capacity_script, prefix, report):
+    recovery = {
+        "attempted": False,
+        "mode": "passive-reobserve-only",
+        "max_wait_seconds": RECOVERY_WAIT_SECONDS,
+        "poll_seconds": RECOVERY_POLL_SECONDS,
+        "observations": [],
+    }
+    current = report
+    if not can_wait_for_async_reclaim(current):
+        recovery["skipped"] = "node is outside the safe transient recovery band"
+        return current, recovery
+
+    recovery["attempted"] = True
+    for attempt in range(1, RECOVERY_WAIT_SECONDS // RECOVERY_POLL_SECONDS + 1):
+        time.sleep(RECOVERY_POLL_SECONDS)
+        path = Path(f"{prefix}-recovery-{attempt:02d}.json")
+        current = observe(capacity_script, path)
+        recovery["observations"].append({
+            "attempt": attempt,
+            "path": str(path),
+            "status": current.get("status"),
+            "observed_at": current.get("observed_at"),
+            "available_bytes": [node.get("available_bytes") for node in current.get("nodes", [])],
+        })
+        if current.get("status") != "BLOCKED":
+            recovery["outcome"] = "capacity-converged"
+            return current, recovery
+        if not can_wait_for_async_reclaim(current):
+            recovery["outcome"] = "left-safe-transient-band"
+            return current, recovery
+
+    recovery["outcome"] = "timeout"
+    return current, recovery
 
 
 def main():
@@ -104,7 +158,11 @@ def main():
             after = observe(args.capacity_script, Path(f"{prefix}-after.json"))
             report["after"] = after
             if after["status"] == "BLOCKED":
-                raise RuntimeError("insufficient capacity after one bounded reclaim")
+                after, recovery = wait_for_async_reclaim(args.capacity_script, prefix, after)
+                report["after"] = after
+                report["recovery_wait"] = recovery
+                if after["status"] == "BLOCKED":
+                    raise RuntimeError("insufficient capacity after bounded reclaim and GC convergence wait")
         report["status"] = "PASS"
         print(f"[ci-capacity] PASS: K3D free >= 20 GiB and no disk pressure; builder={args.builder}")
         return 0
