@@ -343,7 +343,9 @@ def call(Map config = [:]) {
                     stage('Early Capacity Admission') {
                         when { expression { appCapacityBuilder && ciStages.build } }
                         steps {
-                            sh 'python3 .pipeline/scripts/common/ci-capacity.py --builder "$CI_BUILDX_BUILDER" --capacity-script .pipeline/scripts/common/k3d-capacity.py --policy-config .pipeline/scripts/common/ci-builder.toml --output .pipeline/ci-capacity.json'
+                            withCredentials([file(credentialsId: 'k3s-kubeconfig', variable: 'KUBECONFIG')]) {
+                                sh 'python3 .pipeline/scripts/common/ci-capacity.py --builder "$CI_BUILDX_BUILDER" --capacity-script .pipeline/scripts/common/k3d-capacity.py --policy-config .pipeline/scripts/common/ci-builder.toml --output .pipeline/ci-capacity.json'
+                            }
                             sh 'bash .pipeline/scripts/common/ci-builder-ensure.sh .pipeline/scripts/common/ci-builder.toml'
                         }
                     }

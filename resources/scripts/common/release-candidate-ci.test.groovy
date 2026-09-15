@@ -35,7 +35,11 @@ def simulate = { boolean enabled, Map options = [:] ->
     ['withCredentials', 'withEnv', 'timeout', 'catchError'].each { name ->
         binding.setVariable(name, { Object value, Closure body -> body() })
     }
-    ['file', 'usernamePassword', 'string'].each { name -> binding.setVariable(name, { Map value -> value }) }
+    binding.setVariable('file', { Map value ->
+        calls << "credential-file:${value.credentialsId}:${value.variable}"
+        value
+    })
+    ['usernamePassword', 'string'].each { name -> binding.setVariable(name, { Map value -> value }) }
     binding.setVariable('sh', { Object value ->
         def command = value instanceof Map ? value.script.toString() : value.toString()
         calls << command
@@ -72,6 +76,7 @@ def capacity = simulate(true, [ciBuilder: true])
 assert !capacity.failed
 assert capacity.calls.any { it.contains('ci-capacity.py --builder') }
 assert capacity.calls.any { it.contains('ci-builder-ensure.sh') }
+assert capacity.calls.any { it == 'credential-file:k3s-kubeconfig:KUBECONFIG' }
 assert capacity.calls.indexOf(capacity.calls.find { it.contains('ci-capacity.py --builder') }) <
        capacity.calls.indexOf(capacity.calls.find { it.contains('/go-build.sh') })
 assert capacity.environment.CI_BUILDX_BUILDER == 'shiba-app-ci'
