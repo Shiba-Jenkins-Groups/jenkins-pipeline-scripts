@@ -62,6 +62,10 @@ class AdmissionTest(unittest.TestCase):
         self.assertEqual(0, result)
         self.assertEqual([], calls)
         self.assertFalse(report["reclaim"]["attempted"])
+        self.assertEqual(18, report["threshold_gib"]["early_gate"])
+        self.assertEqual(3, report["threshold_gib"]["observed_build_peak_rounded_up"])
+        self.assertEqual(3, report["threshold_gib"]["provisional_margin"])
+        self.assertEqual(20, report["threshold_gib"]["builder_gc_target_free"])
 
     def test_low_capacity_prunes_dedicated_old_cache_once_then_rechecks(self):
         inspect = mock.Mock(returncode=0, stdout="Name: shiba-app-ci\nDriver: docker-container\n", stderr="")
@@ -90,8 +94,8 @@ class AdmissionTest(unittest.TestCase):
 
     def test_waits_for_async_k3d_reclaim_then_passes(self):
         inspect = mock.Mock(returncode=0, stdout="Name: shiba-app-ci\nDriver: docker-container\n", stderr="")
-        blocked = self.capacity("BLOCKED", 19)
-        recovered = self.capacity("OK", 21, used_percent=79)
+        blocked = self.capacity("BLOCKED", 17)
+        recovered = self.capacity("OK", 19, used_percent=79)
         result, report, calls = self.invoke([blocked, blocked, recovered], inspect)
         self.assertEqual(0, result)
         self.assertEqual("PASS", report["status"])
@@ -102,7 +106,7 @@ class AdmissionTest(unittest.TestCase):
 
     def test_persistent_low_capacity_times_out_without_broadening_reclaim(self):
         inspect = mock.Mock(returncode=0, stdout="Name: shiba-app-ci\nDriver: docker-container\n", stderr="")
-        blocked = self.capacity("BLOCKED", 19)
+        blocked = self.capacity("BLOCKED", 17)
         result, report, calls = self.invoke([blocked] * 14, inspect)
         self.assertEqual(2, result)
         self.assertEqual("timeout", report["recovery_wait"]["outcome"])
@@ -121,7 +125,7 @@ class AdmissionTest(unittest.TestCase):
 
     def test_disk_pressure_never_waits(self):
         inspect = mock.Mock(returncode=0, stdout="Name: shiba-app-ci\nDriver: docker-container\n", stderr="")
-        blocked = self.capacity("BLOCKED", 19, disk_pressure="True")
+        blocked = self.capacity("BLOCKED", 17, disk_pressure="True")
         result, report, _calls = self.invoke([blocked, blocked], inspect)
         self.assertEqual(2, result)
         self.assertFalse(report["recovery_wait"]["attempted"])

@@ -14,6 +14,12 @@ import time
 GIB = 1024 ** 3
 BUILDER_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 PINNED_IMAGE = "moby/buildkit@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8"
+K3D_GATE_GIB = 12
+OBSERVED_BUILD_PEAK_GIB = 3
+PROVISIONAL_MARGIN_GIB = 3
+EARLY_GATE_GIB = K3D_GATE_GIB + OBSERVED_BUILD_PEAK_GIB + PROVISIONAL_MARGIN_GIB
+WARN_FREE_GIB = EARLY_GATE_GIB + 1
+BUILDER_TARGET_FREE_GIB = 20
 RECOVERY_WAIT_SECONDS = 120
 RECOVERY_POLL_SECONDS = 10
 
@@ -28,7 +34,7 @@ def run(argv, *, check=True):
 
 def observe(capacity_script, output):
     result = run([sys.executable, str(capacity_script), "--mode", "preflight",
-                  "--warn-free-gib", "21", "--block-free-gib", "20",
+                  "--warn-free-gib", str(WARN_FREE_GIB), "--block-free-gib", str(EARLY_GATE_GIB),
                   "--output", str(output)], check=False)
     if result.returncode not in (0, 2) or not output.exists():
         raise RuntimeError("K3D/Docker capacity observation failed")
@@ -62,14 +68,14 @@ def verify_ownership(builder, policy):
 
 
 def can_wait_for_async_reclaim(report):
-    """Wait only for a healthy node in the 12-20 GiB transient recovery band."""
+    """Wait only for a healthy node above the K3D hard gate."""
     nodes = report.get("nodes") or []
     if not nodes:
         return False
     for node in nodes:
         if node.get("disk_pressure") != "False" or node.get("disk_pressure_taint"):
             return False
-        if node.get("available_bytes", 0) < 12 * GIB:
+        if node.get("available_bytes", 0) < K3D_GATE_GIB * GIB:
             return False
         if node.get("used_percent", 100) >= 90:
             return False
@@ -127,8 +133,11 @@ def main():
     prefix = args.output.with_suffix("")
     report = {"schema_version": 1, "observed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
               "builder": args.builder,
-              "threshold_gib": {"k3d_gate": 12, "observed_lower_bound": 2, "provisional_margin": 6,
-                                 "early_gate": 20},
+              "threshold_gib": {"k3d_gate": K3D_GATE_GIB,
+                                 "observed_build_peak_rounded_up": OBSERVED_BUILD_PEAK_GIB,
+                                 "provisional_margin": PROVISIONAL_MARGIN_GIB,
+                                 "early_gate": EARLY_GATE_GIB,
+                                 "builder_gc_target_free": BUILDER_TARGET_FREE_GIB},
               "reclaim": {"attempted": False, "scope": "dedicated-builder-only",
                           "age_filter": "until=24h", "reserved_space_gib": 2}}
     try:
@@ -143,7 +152,7 @@ def main():
                 verify_ownership(args.builder, args.policy_config)
                 report["reclaim"]["inventory_before_count"] = inventory(args.builder, Path(f"{prefix}-cache-before.jsonl"))
                 command = ["docker", "buildx", "prune", "--builder", args.builder,
-                           "--filter", "until=24h", "--min-free-space", str(20 * GIB),
+                           "--filter", "until=24h", "--min-free-space", str(BUILDER_TARGET_FREE_GIB * GIB),
                            "--reserved-space", str(2 * GIB), "--force"]
                 report["reclaim"]["attempted"] = True
                 report["reclaim"]["command"] = command
@@ -164,7 +173,7 @@ def main():
                 if after["status"] == "BLOCKED":
                     raise RuntimeError("insufficient capacity after bounded reclaim and GC convergence wait")
         report["status"] = "PASS"
-        print(f"[ci-capacity] PASS: K3D free >= 20 GiB and no disk pressure; builder={args.builder}")
+        print(f"[ci-capacity] PASS: K3D free >= {EARLY_GATE_GIB} GiB and no disk pressure; builder={args.builder}")
         return 0
     except Exception as exc:
         report["status"] = "BLOCKED"
