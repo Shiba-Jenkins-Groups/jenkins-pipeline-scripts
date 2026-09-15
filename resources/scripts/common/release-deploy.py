@@ -69,6 +69,11 @@ def failed_recovery_identity(request, key):
 
 def request_identity(signed, key, now):
     request = control.verify(signed, key)
+    if request.get("schema_version") == 3:
+        spec = importlib.util.spec_from_file_location("published_rebuild", Path(__file__).with_name("release-rebuild.py"))
+        rebuild = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(rebuild)
+        return rebuild.validate_identity(request, key, now)
     require(request.get("schema_version") == 2 and request.get("kind") == "deployment"
             and request.get("product") == gate.PRODUCT, "wrong deployment request")
     require(gate.SHA.fullmatch(request.get("commit", "")) and gate.DIGEST.fullmatch(request.get("digest", "")),
@@ -175,6 +180,27 @@ def target_container(containers, runtime):
     return target
 
 
+
+def missing_runtime(containers, runtime):
+    """只允許已授權的災難恢復；保留原 DB，拒絕任何殘留 owner 或其他 writer。"""
+    require(not any(c["Config"].get("Labels", {}).get("com.docker.compose.project") == PROJECT
+                    and c["Config"]["Labels"].get("com.docker.compose.service") == "app" for c in containers),
+            "disaster rebuild requires missing PROD runtime; existing owner must be reconciled")
+    db = (runtime / "data/db/app").resolve()
+    main = db / "shiba-go-ditch-api.db"
+    require(main.is_file() and not main.is_symlink() and main.stat().st_size > 0,
+            "original PROD DB missing; refusing empty bootstrap")
+    for container in containers:
+        if not container["State"].get("Running"):
+            continue
+        for mount in container.get("Mounts", []):
+            if mount.get("Type") == "bind":
+                path = Path(mount["Source"]).resolve()
+                require(not (db.is_relative_to(path) or path.is_relative_to(db)),
+                        "another container owns the PROD database tree")
+    return {"Id": None, "Image": None}
+
+
 def containers():
     ids = run(["docker", "ps", "-aq"]).splitlines()
     require(ids, "Docker has no runtime containers")
@@ -255,7 +281,21 @@ def execute(signed, key, source, runtime, state, engine_id, now, output):
             raise gate.InvalidEvidence("PROD lifecycle lock is busy")
         with state.lock():
             recovering = "recovery" in request
-            if recovering:
+            rebuilding = request.get("mode") == "published-prod-disaster-rebuild"
+            state_key = request["commit"]
+            if rebuilding:
+                require(request["target_engine_id"] == engine_id, "restored engine differs from signed authorization")
+                require(state.exists(request["commit"]), "original successful PROD deployment state missing")
+                original = control.verify(state.read(request["commit"]), key)
+                published = control.verify(request["published"]["finalization"], key)
+                require(original.get("kind") == "runtime-deployment" and original.get("status") == "SUCCESS"
+                        and original.get("product") == gate.PRODUCT and original.get("commit") == request["commit"]
+                        and original.get("version") == request["version"] and original.get("digest") == published["digest"],
+                        "original successful deployment does not match published provenance")
+                # 同一 engine／commit 只允許一次災難恢復；不覆寫先前正式部署或失敗紀錄。
+                state_key = hashlib.sha256((request["commit"] + ":disaster:" + engine_id).encode()).hexdigest()[:40]
+                require(not state.exists(state_key), "disaster restore already claimed; inspect receipt before retry")
+            elif recovering:
                 require(state.exists(request["commit"]), "failed deployment state missing; recovery is not a fresh claim")
                 existing = state.read(request["commit"])
                 control.verify(existing, key)
@@ -270,7 +310,7 @@ def execute(signed, key, source, runtime, state, engine_id, now, output):
                 require(develop == request["promotion"]["payload"]["source_commit"],
                         "develop candidate advanced after failed deployment")
             # Same runtime lock covers classification, deploy and final verification.
-            previous = target_container(containers(), runtime)
+            previous = missing_runtime(containers(), runtime) if rebuilding else target_container(containers(), runtime)
             no_host_writer(runtime)
             image_id = image_identity(request)
             if recovering:
@@ -292,7 +332,11 @@ def execute(signed, key, source, runtime, state, engine_id, now, output):
             if recovering:
                 failed_hash = preserve_failed_attempt(state, request["commit"], existing)
                 record.update(recovery=request["recovery"], failed_receipt_sha256=failed_hash)
-            state.write(request["commit"], control.sign(record, key))
+            if rebuilding:
+                record.update(mode=request["mode"], target_engine_id=engine_id,
+                              original_deployment_sha256=hashlib.sha256(gate.canonical(state.read(request["commit"]))).hexdigest(),
+                              prod_build=request["prod_build"], state_key=state_key)
+            state.write(state_key, control.sign(record, key))
             try:
                 env = {k: v for k, v in os.environ.items() if not k.startswith(("RELEASE_", "RECEIPT_", "APPROVAL_", "JENKINS_API_"))}
                 env.update(SHIBA_CONTROLLED_DEPLOY="true", SHIBA_RUNTIME_ROOT=str(runtime),
@@ -322,7 +366,7 @@ def execute(signed, key, source, runtime, state, engine_id, now, output):
                 record["new_backup_and_migration_files"] = sorted(str(p) for p in backup_root.iterdir()
                     if p.name not in before) if backup_root.is_dir() else []
                 receipt = control.sign(record, key)
-                state.write(request["commit"], receipt)
+                state.write(state_key, receipt)
                 with output.open("xb") as stream:
                     stream.write(gate.canonical(receipt))
             return receipt

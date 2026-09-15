@@ -26,6 +26,8 @@ def call(Map config = [:]) {
     properties([
         disableConcurrentBuilds(),
         parameters([
+            string(name: 'REBUILD_PROD_COMMIT', defaultValue: '', description: 'Authorized disaster rebuild: exact already-published prod commit'),
+            string(name: 'PUBLISHED_COORDINATOR_BUILD', defaultValue: '', description: 'Exact successful original publication coordinator'),
             string(name: 'SOURCE_BUILD', defaultValue: '', description: 'Explicit recovery: completed develop build number'),
             string(name: 'EXPECTED_COMMIT', defaultValue: '', description: 'Explicit recovery: full 40-character develop commit'),
             string(name: 'RECOVER_COORDINATOR_BUILD', defaultValue: '', description: 'Finalized deployment recovery: exact failed coordinator'),
@@ -41,32 +43,47 @@ def call(Map config = [:]) {
     def deploymentRecovery = recoverCoordinator || recoverOwner
     def recoveryApprover = ''
     Integer sourceBuild
-    if (deploymentRecovery) {
+    def rebuildCommit = params.REBUILD_PROD_COMMIT?.toString()?.trim() ?: ''
+    def publishedBuild = params.PUBLISHED_COORDINATOR_BUILD?.toString()?.trim() ?: ''
+    def rebuilding = rebuildCommit || publishedBuild
+    def rebuildAuthor = ''
+    if (rebuilding) {
         def allCauses = currentBuild.getBuildCauses()
-        if (!(recoverCoordinator ==~ /[1-9][0-9]{0,8}/) || !(recoverOwner ==~ /[1-9][0-9]{0,8}/) ||
-            !requestedBuild || !requestedCommit || allCauses.size() != 1 ||
-            allCauses[0]._class != 'hudson.model.Cause$UserIdCause' || !config.approvers.contains(allCauses[0].userId)) {
-            error('Deployment recovery requires a unique authorized user and four exact recovery fields')
+        if (!(rebuildCommit ==~ /[0-9a-f]{40}/) || !(publishedBuild ==~ /[1-9][0-9]{0,8}/) ||
+            requestedBuild || requestedCommit || deploymentRecovery || allCauses.size() != 1 ||
+            allCauses[0]._class != 'hudson.model.Cause$UserIdCause' || !config.approvers.contains(allCauses[0].userId) ||
+            !(config.rebuildDockerEngineId ==~ /[0-9a-f-]{36}/)) {
+            error('Published PROD rebuild requires one authorized user, exact publication and fixed restored Docker engine')
         }
-        recoveryApprover = allCauses[0].userId.toString()
-    }
-    if (requestedBuild || requestedCommit) {
-        def users = currentBuild.getBuildCauses('hudson.model.Cause$UserIdCause')
-        if (causes || users.size() != 1 || !config.approvers.contains(users[0].userId) ||
-            !(requestedBuild ==~ /[1-9][0-9]{0,8}/) || !(requestedCommit ==~ /[0-9a-f]{40}/)) {
-            error('Recovery requires an authorized user, exact develop build and full commit')
-        }
-        sourceBuild = requestedBuild as Integer
+        rebuildAuthor = allCauses[0].userId.toString()
     } else {
-        if (causes.size() != 1 || causes[0].upstreamProject != "${product}/develop") {
-            error('A unique completed develop upstream cause is required')
+        if (deploymentRecovery) {
+            def allCauses = currentBuild.getBuildCauses()
+            if (!(recoverCoordinator ==~ /[1-9][0-9]{0,8}/) || !(recoverOwner ==~ /[1-9][0-9]{0,8}/) ||
+                !requestedBuild || !requestedCommit || allCauses.size() != 1 ||
+                allCauses[0]._class != 'hudson.model.Cause$UserIdCause' || !config.approvers.contains(allCauses[0].userId)) {
+                error('Deployment recovery requires a unique authorized user and four exact recovery fields')
+            }
+            recoveryApprover = allCauses[0].userId.toString()
         }
-        sourceBuild = causes[0].upstreamBuild as Integer
+        if (requestedBuild || requestedCommit) {
+            def users = currentBuild.getBuildCauses('hudson.model.Cause$UserIdCause')
+            if (causes || users.size() != 1 || !config.approvers.contains(users[0].userId) ||
+                !(requestedBuild ==~ /[1-9][0-9]{0,8}/) || !(requestedCommit ==~ /[0-9a-f]{40}/)) {
+                error('Recovery requires an authorized user, exact develop build and full commit')
+            }
+            sourceBuild = requestedBuild as Integer
+        } else {
+            if (causes.size() != 1 || causes[0].upstreamProject != "${product}/develop") {
+                error('A unique completed develop upstream cause is required')
+            }
+            sourceBuild = causes[0].upstreamBuild as Integer
+        }
+        // Pipeline Build Step waits through upstream post actions and retains the
+        // exact queue/run relationship across controller restarts.
+        def upstreamRun = waitForBuild(runId: "${product}/develop#${sourceBuild}", propagate: false)
+        if (upstreamRun.result != 'SUCCESS') { error('Develop build must complete with SUCCESS before promotion') }
     }
-    // Pipeline Build Step waits through upstream post actions and retains the
-    // exact queue/run relationship across controller restarts.
-    def upstreamRun = waitForBuild(runId: "${product}/develop#${sourceBuild}", propagate: false)
-    if (upstreamRun.result != 'SUCCESS') { error('Develop build must complete with SUCCESS before promotion') }
 
     node(config.builderLabel.toString()) {
         dir("auto-release-${env.BUILD_NUMBER}") {
@@ -76,7 +93,7 @@ def call(Map config = [:]) {
             stage('Load Trusted Release Controls') {
                 ['release-gate.py', 'release-evidence.py', 'release-promotion.py', 'release-preflight.py',
                  'release-finalization.py', 'release-finalize.sh', 'error-handler.sh', 'nexus-upload.sh', 'git-tag.sh',
-                 'harbor-vulnerability-report.py', 'release-askpass.sh', 'release-recovery.py'].each { name ->
+                 'harbor-vulnerability-report.py', 'release-askpass.sh', 'release-recovery.py', 'release-rebuild.py'].each { name ->
                     writeFile file: "control/${name}", text: libraryResource("scripts/common/${name}")
                 }
                 def commonStages = ['Checkout', 'Load Scripts', 'Detect', 'Early Capacity Admission', 'Secret Scan', 'Build', 'Test',
@@ -253,6 +270,57 @@ python3 control/release-recovery.py handoff --root recovery --source recovery-so
                 return parseReleaseJson(readFile("${phase}/identity.json"))
             }
 
+            if (rebuilding) {
+                stage('Load Successful Published PROD Provenance') {
+                    withCredentials([usernamePassword(credentialsId: config.jenkinsReadCredentials,
+                        usernameVariable: 'JENKINS_API_USER', passwordVariable: 'JENKINS_API_TOKEN'),
+                        file(credentialsId: config.receiptKeyCredentials, variable: 'RECEIPT_KEY_FILE')]) {
+                        withEnv(["REBUILD_JENKINS_URL=${config.jenkinsApiUrl}", "REBUILD_PUBLISHED=${publishedBuild}",
+                                 "REBUILD_COMMIT=${rebuildCommit}"]) {
+                            sh 'python3 control/release-rebuild.py collect --root published --jenkins-url "$REBUILD_JENKINS_URL" --coordinator-build "$REBUILD_PUBLISHED" --expected-commit "$REBUILD_COMMIT" --receipt-key-file "$RECEIPT_KEY_FILE"'
+                        }
+                    }
+                    archiveArtifacts artifacts: 'published/published.json', allowEmptyArchive: false
+                }
+                def rebuilt
+                stage('Rebuild Published PROD Through Full CI/CD') {
+                    rebuilt = build(job: "${product}/prod", wait: true, propagate: false, quietPeriod: 0)
+                    if (!(rebuilt.result in ['SUCCESS', 'UNSTABLE'])) { error('Rebuilt PROD CI/CD failed; no deployment') }
+                }
+                verifyPhase('prod', rebuilt.number as Integer, rebuildCommit)
+                stage('Authorize Published PROD Rebuild Handoff') {
+                    withCredentials([usernamePassword(credentialsId: config.scmCredentials,
+                        usernameVariable: 'RELEASE_GIT_USER', passwordVariable: 'RELEASE_GIT_PASSWORD'),
+                        usernamePassword(credentialsId: config.nexusCredentials,
+                        usernameVariable: 'NEXUS_CRED_USR', passwordVariable: 'NEXUS_CRED_PSW'),
+                        file(credentialsId: config.receiptKeyCredentials, variable: 'RECEIPT_KEY_FILE'),
+                        file(credentialsId: config.approvalKeyCredentials, variable: 'APPROVAL_KEY_FILE')]) {
+                        withEnv(["REBUILD_APPROVER=${rebuildAuthor}", "REBUILD_ENGINE=${config.rebuildDockerEngineId}",
+                                 "NEXUS_BASE_URL=${config.nexusBaseUrl}", "GIT_ASKPASS=${control}/release-askpass.sh",
+                                 'GIT_TERMINAL_PROMPT=0']) {
+                            sh '''#!/usr/bin/env bash
+set -euo pipefail
+chmod 700 "$GIT_ASKPASS"
+approval=()
+if [[ -f prod/approval.json ]]; then approval=(--approval prod/approval.json); fi
+python3 control/release-rebuild.py handoff --root published --source prod/source \
+    --evidence prod/evidence/evidence.json --policy control/policy.json \
+    --receipt-key-file "$RECEIPT_KEY_FILE" --approval-key-file "$APPROVAL_KEY_FILE" \
+    --approver "$REBUILD_APPROVER" --engine-id "$REBUILD_ENGINE" "${approval[@]}" --output deployment-request.json
+'''
+                        }
+                    }
+                    archiveArtifacts artifacts: 'deployment-request.json', allowEmptyArchive: false
+                }
+                stage('PROD Runtime Disaster Restore') {
+                    def deployed = build(job: config.deploymentJob, wait: true, propagate: false,
+                        parameters: [text(name: 'SIGNED_RELEASE_REQUEST', value: readFile('deployment-request.json'))])
+                    if (deployed.result != 'SUCCESS') { error('Published PROD restore failed; preserve the new attempt') }
+                    currentBuild.description = "rebuilt prod ${rebuildCommit.take(12)}; CI #${rebuilt.number}; deploy #${deployed.number}"
+                }
+                return
+            }
+
             verifyPhase('develop', sourceBuild, requestedCommit ?: null)
             stage('Promote Verified Commit') {
                 def promotionCommand = requestedBuild ? 'recover' : 'promote'
@@ -335,7 +403,7 @@ python3 control/release-promotion.py handoff --promotion promotion.json --finali
                 // Preserve only release evidence, never source checkouts, scanner
                 // caches or credential files. If archival fails, retain the
                 // workspace for diagnosis instead of destroying the only copy.
-                archiveArtifacts artifacts: 'control/policy.json,develop/identity.json,prod/identity.json,develop/review.json,prod/review.json,develop/approval.json,prod/approval.json,develop/evidence/*.json,develop/evidence/*.jsonl,prod/evidence/*.json,prod/evidence/*.jsonl,develop/evidence/.pipeline/candidate*,prod/evidence/.pipeline/candidate*,develop/evidence/.pipeline/candidate-stages/*,prod/evidence/.pipeline/candidate-stages/*,develop/evidence/reports/junit/*,prod/evidence/reports/junit/*,promotion.json,finalization.json,deployment-request.json,prod/source/.pipeline/release-manifest.env,recovery/**', allowEmptyArchive: true
+                archiveArtifacts artifacts: 'control/policy.json,develop/identity.json,prod/identity.json,develop/review.json,prod/review.json,develop/approval.json,prod/approval.json,develop/evidence/*.json,develop/evidence/*.jsonl,prod/evidence/*.json,prod/evidence/*.jsonl,develop/evidence/.pipeline/candidate*,prod/evidence/.pipeline/candidate*,develop/evidence/.pipeline/candidate-stages/*,prod/evidence/.pipeline/candidate-stages/*,develop/evidence/reports/junit/*,prod/evidence/reports/junit/*,promotion.json,finalization.json,deployment-request.json,prod/source/.pipeline/release-manifest.env,recovery/**,published/**', allowEmptyArchive: true
                 // This dir is scoped to this exact build, not the agent root,
                 // persistent dependency cache, release state or runtime data.
                 deleteDir()

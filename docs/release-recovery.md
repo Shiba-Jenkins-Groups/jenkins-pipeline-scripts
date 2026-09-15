@@ -66,3 +66,31 @@ Failure preserves the new attempt too; rollback remains separately authorized.
 
 If the one-hour original evidence window expires, stop. This lane does not
 refresh timestamps or permit rebuilding an already finalized version.
+
+## Published PROD disaster rebuild (2026-09-16)
+
+An explicitly authorized operator may submit `REBUILD_PROD_COMMIT` and
+`PUBLISHED_COORDINATOR_BUILD` to the pinned coordinator. This is separate from
+failed-attempt recovery and rejects mixed parameters, Replay and non-approvers.
+The original successful coordinator and signed promotion/finalization/request
+prove publication; the current prod head and immutable version tag must still
+match. No develop run, promotion, tag overwrite or old evidence timestamp refresh
+occurs. The prod branch executes its full CI once, then all native evidence,
+package graphs and scanners are revalidated under the existing gate policy.
+
+New binary bytes use the new build-specific Nexus path; the old published binary
+and tag remain intact. A schema 3 signed deployment handoff binds fresh evidence,
+new image digest, source, operator and the configured restored Docker engine.
+Only the existing owner job may consume it. The owner requires the original
+signed successful deployment record, missing PROD app containers, the existing
+nonempty PROD DB file, and no competing database owner. It calls the original
+source's `scripts/deploy.sh prod deploy` under both existing locks. Normal schema
+2 deployment and failed-attempt recovery guards remain unchanged.
+
+The disaster attempt gets a deterministic separate state key derived from prod
+commit and restored engine ID. The original successful receipt is not replaced.
+A claimed/failed/successful disaster attempt blocks another attempt on the same
+engine; reconciliation needs separately scoped repair. Automatic rollback and
+empty-database bootstrap are forbidden. There are 3 focused offline data/owner
+contract tests and 7 mocked normal/rebuild control-flow checks, with no product
+DB, model execution or live deployment in those checks.
