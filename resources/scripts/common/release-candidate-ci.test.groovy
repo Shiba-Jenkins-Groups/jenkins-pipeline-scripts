@@ -2,7 +2,8 @@
 def libraryRoot = new File(args ? args[0] : '.').canonicalFile
 def simulate = { boolean enabled, Map options = [:] ->
     def calls = [], stack = []
-    def environment = [JOB_NAME: 'shiba-go-ditch-api-project/prod', BRANCH_NAME: 'prod', BUILD_NUMBER: '1',
+    def branch = (options.branch ?: 'prod').toString()
+    def environment = [JOB_NAME: "shiba-go-ditch-api-project/${branch}".toString(), BRANCH_NAME: branch, BUILD_NUMBER: '1',
                        BUILD_URL: 'http://offline/build/1/', GIT_COMMIT: 'b' * 40, CHANGE_ID: null]
     def current = [currentResult: 'SUCCESS', durationString: 'offline']
     def binding = new Binding([env: environment, currentBuild: current, scm: [:]])
@@ -23,7 +24,7 @@ def simulate = { boolean enabled, Map options = [:] ->
     ['agent', 'options'].each { name -> binding.setVariable(name, { Closure body -> }) }
     binding.setVariable('echo', { Object text -> })
     binding.setVariable('error', { String reason -> throw new IllegalStateException(reason) })
-    binding.setVariable('checkout', { Object value -> [GIT_BRANCH: 'origin/prod', GIT_COMMIT: 'b' * 40] })
+    binding.setVariable('checkout', { Object value -> [GIT_BRANCH: "origin/${branch}", GIT_COMMIT: 'b' * 40] })
     binding.setVariable('libraryResource', { String path -> 'offline resource' })
     binding.setVariable('writeFile', { Map value -> })
     binding.setVariable('archiveArtifacts', { Map value -> calls << 'archive:' + value.artifacts })
@@ -44,22 +45,27 @@ def simulate = { boolean enabled, Map options = [:] ->
         def command = value instanceof Map ? value.script.toString() : value.toString()
         calls << command
         if (command.contains('detect.sh &&')) {
-            return 'LANGUAGE=go\nBUILD_TOOL=go\nPOLICY_NAME=prod\nDO_PROD_DEPLOY=true\nDO_ARTIFACT_PUBLISH=true\nDO_GIT_TAG=true\nDO_PACKAGE=true\nDO_DOCKER_BUILD=true\nDO_SCAN=true\nDO_PUSH=true\nDO_DEPLOY=true\nDO_K3S_VERIFY=true\nDEPLOY_NAMESPACE=prod\nPIPELINE_TRUST=trusted\nDO_SECRET_SCAN=true'
+            return "LANGUAGE=go\nBUILD_TOOL=go\nPOLICY_NAME=${branch}\nDO_PROD_DEPLOY=${branch == 'prod'}\nDO_ARTIFACT_PUBLISH=true\nDO_GIT_TAG=true\nDO_PACKAGE=true\nDO_DOCKER_BUILD=true\nDO_SCAN=true\nDO_PUSH=true\nDO_DEPLOY=true\nDO_K3S_VERIFY=true\nDEPLOY_NAMESPACE=${branch == 'prod' ? 'prod' : 'dev'}\nPIPELINE_TRUST=trusted\nDO_SECRET_SCAN=true"
         }
         if (options.buildFailure && command.contains('/go-build.sh')) { throw new IllegalStateException('Build is not waivable') }
         if (command.contains("--stage 'Test'")) { return options.testResult ?: 0 }
         return 0
     })
     def failed = false
+    def failureReason = ''
     try {
         new GroovyShell(binding).parse(new File(libraryRoot, 'vars/ciPipeline.groovy')).call([
             controlledReleaseCandidate: enabled, githubCredentials: 'offline-read', harborCredentials: 'offline-harbor',
             releaseFinalizeAfterVerification: true, fastContractCommand: "echo 'offline contract'", deployInputGate: false,
             dockerPruneEnabled: false, ciCapacityBuilder: options.ciBuilder ?: false,
+            developLeanFlow: options.lean ?: false,
             profile: options.profile ?: 'full'
         ])
-    } catch (IllegalStateException expected) { failed = true }
-    [calls: calls, failed: failed, environment: environment, result: current.currentResult]
+    } catch (IllegalStateException expected) {
+        failed = true
+        failureReason = expected.message ?: expected.class.name
+    }
+    [calls: calls, failed: failed, failureReason: failureReason, environment: environment, result: current.currentResult]
 }
 def original = simulate(false)
 assert !original.failed
@@ -81,6 +87,17 @@ assert capacity.calls.indexOf(capacity.calls.find { it.contains('ci-capacity.py 
        capacity.calls.indexOf(capacity.calls.find { it.contains('/go-build.sh') })
 assert capacity.environment.CI_BUILDX_BUILDER == 'shiba-app-ci'
 assert candidate.environment.CI_BUILDX_BUILDER == null
+def lean = simulate(true, [branch: 'develop', lean: true, ciBuilder: true])
+assert !lean.failed
+assert !lean.calls.any { it.contains('ci-capacity.py --builder') }
+assert !lean.calls.any { it.contains('release-candidate.py') }
+assert !lean.calls.any { it.contains('dependency-check.sh') }
+assert !lean.calls.any { it == 'bash .pipeline/scripts/cd.sh docker-build' }
+assert !lean.calls.any { it == 'bash .pipeline/scripts/cd.sh deploy' }
+assert lean.calls.any { it.contains('/go-build.sh') }
+assert lean.calls.any { it.contains('/go-test.sh') }
+assert lean.environment.DO_ARTIFACT_PUBLISH == 'false'
+assert lean.environment.DO_K3S_VERIFY == 'false'
 candidate = simulate(true, [testResult: 10])
 assert !candidate.failed && candidate.result == 'UNSTABLE'
 assert candidate.calls.contains('bash .pipeline/scripts/cd.sh harbor-push')
@@ -90,4 +107,4 @@ for (options in [[testResult: 2], [buildFailure: true], [profile: 'ci-only']]) {
     assert result.failed
     assert !result.calls.any { it == 'bash .pipeline/scripts/common/release-finalize.sh' }
 }
-println 'PASS: 7 offline candidate/legacy CI flow cases (not Jenkins CPS integration)'
+println 'PASS: 8 offline candidate/lean-develop/legacy CI flow cases (not Jenkins CPS integration)'

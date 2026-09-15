@@ -1,11 +1,18 @@
 def call(Map config = [:]) {
+    def sourceBranch = (env.CHANGE_BRANCH ?: env.BRANCH_NAME ?: env.GIT_BRANCH ?: '').replaceFirst('^origin/', '')
+    def leanDevelop = config.developLeanFlow == true && !env.CHANGE_ID?.trim() &&
+        sourceBranch == 'develop' && env.JOB_NAME == 'shiba-go-ditch-api-project/develop'
+    if (config.developLeanFlow == true && sourceBranch == 'develop' && !leanDevelop) {
+        error('Develop lean flow is App develop branch-only')
+    }
     // Candidate mode never grants a waiver or publishes a release. Only this
-    // product may opt in, and finalization then belongs to the trusted coordinator.
-    def candidateMode = config.controlledReleaseCandidate == true
+    // product may opt in. Lean develop emits no release candidate; PROD retains
+    // the complete candidate and trusted coordinator finalization contract.
+    def candidateMode = config.controlledReleaseCandidate == true && !leanDevelop
     if (candidateMode && (!(env.JOB_NAME in ['shiba-go-ditch-api-project/develop', 'shiba-go-ditch-api-project/prod']) || env.CHANGE_ID)) {
         error('Controlled candidate mode is product branch-only')
     }
-    if (candidateMode && (config.developLeanFlow == true || config.profile && config.profile != 'full' || config.ciStages || config.cdStages)) {
+    if (candidateMode && (config.profile && config.profile != 'full' || config.ciStages || config.cdStages)) {
         error('Controlled candidates require the complete pipeline')
     }
     def candidateStage = { String name, String command ->
@@ -40,11 +47,10 @@ def call(Map config = [:]) {
     def additionalImagesSpec = additionalImages.collect { image ->
         "${image.name ?: ''}=${image.dockerfile ?: ''}"
     }.join(',')
-    def sourceBranch = (env.CHANGE_BRANCH ?: env.BRANCH_NAME ?: env.GIT_BRANCH ?: '').replaceFirst('^origin/', '')
     // Fail closed：只有三個明確可信 branch 可取得 image-builder；PR 與所有未知 branch
-    // 一律進無 Docker socket／無發布 credential 的 ci-untrusted。
+    // 以及 App lean develop 一律進無 Docker socket／無發布 credential 的 ci-untrusted。
     def trustedBranch = !env.CHANGE_ID?.trim() && ['develop', 'main', 'prod'].contains(sourceBranch)
-    def selectedAgentLabel = trustedBranch ? 'ci-image-builder' : 'ci-untrusted'
+    def selectedAgentLabel = trustedBranch && !leanDevelop ? 'ci-image-builder' : 'ci-untrusted'
     // Opt-in is restricted to this product's trusted release branches. Other
     // projects and PRs retain the existing build path and cannot request GC.
     def appCapacityBuilder = config.ciCapacityBuilder == true
@@ -73,7 +79,7 @@ def call(Map config = [:]) {
     ]
 
     // ── 2. 套用 profile（預設 full）──────────────────────────────────────────
-    def profileName = config.profile ?: 'full'
+    def profileName = leanDevelop ? 'ci-only' : (config.profile ?: 'full')
     def base        = profiles[profileName] ?: profiles['full']
 
     // 複製 profile 預設值（避免直接修改 profiles map）
@@ -232,6 +238,24 @@ def call(Map config = [:]) {
                                 if (config.developGitTagEnabled == false && env.POLICY_NAME == 'develop') {
                                     env.DO_GIT_TAG = 'false'
                                 }
+                                if (leanDevelop) {
+                                    // Develop proves source integration only. All publishing, scanners that
+                                    // require release policy, Docker/Harbor/K3D and finalization run once on PROD.
+                                    env.DO_DEP_SCAN = 'false'
+                                    env.DO_ARTIFACT_PUBLISH = 'false'
+                                    env.DO_GIT_TAG = 'false'
+                                    env.DO_IMAGE_BUILD = 'false'
+                                    env.DO_IMAGE_SCAN = 'false'
+                                    env.DO_IMAGE_PUSH = 'false'
+                                    env.DO_K3S_VERIFY = 'false'
+                                    env.DO_RUNTIME_DEPLOY = 'false'
+                                    env.DO_PROD_DEPLOY = 'false'
+                                    env.DO_DOCKER_BUILD = 'false'
+                                    env.DO_SCAN = 'false'
+                                    env.DO_PUSH = 'false'
+                                    env.DO_DEPLOY = 'false'
+                                    env.DEPLOY_NAMESPACE = ''
+                                }
 
                                 // shiba 的 PROD release 必須等 strict scan、image 與 k3s verification
                                 // 全數通過後才發布 artifact/tag。其他專案預設維持既有時序。
@@ -293,7 +317,7 @@ def call(Map config = [:]) {
                                 // Pipeline verification 一律使用 ci-* 臨時 namespace，finally 會整個回收；
                                 // 既有 dev/prod 常駐 namespace 不在回收範圍，故不再需要專案 opt-in。
                                 env.DEPLOY_TEARDOWN = 'true'
-                                if (appCapacityBuilder) {
+                                if (appCapacityBuilder && !leanDevelop) {
                                     env.CI_BUILDX_BUILDER = 'shiba-app-ci'
                                     env.CI_BUILDX_PLATFORM = 'linux/arm64'
                                     // The existing Docker agent cache volume survives agent
@@ -341,7 +365,7 @@ def call(Map config = [:]) {
                     }
 
                     stage('Early Capacity Admission') {
-                        when { expression { appCapacityBuilder && ciStages.build } }
+                        when { expression { appCapacityBuilder && !leanDevelop && ciStages.build } }
                         steps {
                             withCredentials([file(credentialsId: 'k3s-kubeconfig', variable: 'KUBECONFIG')]) {
                                 sh 'python3 .pipeline/scripts/common/ci-capacity.py --builder "$CI_BUILDX_BUILDER" --capacity-script .pipeline/scripts/common/k3d-capacity.py --policy-config .pipeline/scripts/common/ci-builder.toml --output .pipeline/ci-capacity.json'
@@ -377,7 +401,7 @@ def call(Map config = [:]) {
                     }
 
                     stage('Fast Contract Test') {
-                        when { expression { ciStages.test && config.fastContractCommand } }
+                        when { expression { !leanDevelop && ciStages.test && config.fastContractCommand } }
                         steps {
                             // 命令來自 trusted Jenkinsfile；untrusted discovery 在具備中央固定
                             // Jenkinsfile 前保持關閉。此 stage 專注 API/config contract，不啟動 runtime。
@@ -389,7 +413,7 @@ def call(Map config = [:]) {
                         // 語言分派：Go → govulncheck；Java/Maven → OWASP Dependency-Check。
                         // Go 保留既有「每個 branch 都掃」行為；其他語言由 DO_DEP_SCAN 政策控制。
                         // 置 Archive 前：prod 依賴含高危 CVE 時擋在打 tag／發佈 artifact 之前
-                        when { expression { env.LANGUAGE == 'go' || env.DO_DEP_SCAN == 'true' } }
+                        when { expression { !leanDevelop && (env.LANGUAGE == 'go' || env.DO_DEP_SCAN == 'true') } }
                         steps {
                             script {
                                 // NVD key 只供 OWASP Dependency-Check 使用；Go govulncheck 不應取得此 credential。
