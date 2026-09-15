@@ -139,7 +139,9 @@ def collect(base, coordinator_build, owner_build, source_build, expected_commit,
     write(root / 'recovery-identity.json', {'source_commit': expected_commit, 'source_build': source_build,
           'commit': original['commit'], 'coordinator_build': coordinator_build, 'owner_build': owner_build})
     for branch, number in [('develop', source_build), ('prod', prod_build)]:
-        native = adapter.inspect(base, branch, number, root / branch / 'native')
+        lean = branch == 'develop'
+        candidate_root = None if lean else root / branch / 'native'
+        native = adapter.inspect(base, branch, number, candidate_root, lean=lean)
         evidence = json.loads(get(coord_prefix + 'artifact/' + branch + '/evidence/evidence.json'))
         # inspect has not scanned yet, so its reports list is intentionally empty.
         # Original scanner reports are separately signature-bound and fully gated.

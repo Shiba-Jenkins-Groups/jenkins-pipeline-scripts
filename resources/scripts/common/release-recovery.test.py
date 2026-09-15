@@ -44,10 +44,11 @@ class RecoveryBundle(unittest.TestCase):
         self.policy = {
             'schema_version': 1, 'product': gate.PRODUCT,
             'jobs': {'promotion': gate.PRODUCT + '/develop', 'deployment': gate.PRODUCT + '/prod'},
-            'required_stages': {'promotion': ['Build', 'Scan', 'Reports'],
+            'required_stages': {'promotion': recovery.adapter.LEAN_STAGES,
                                 'deployment': ['Build', 'Scan', 'Reports']},
             'required_scanners': ['trivy', 'govulncheck', 'harbor'],
-            'candidate_mode': True, 'waivable_stages': sorted(gate.WAIVABLE_STAGES),
+            'candidate_mode': True, 'develop_mode': 'lean-success-v1',
+            'waivable_stages': sorted(gate.WAIVABLE_STAGES),
             'max_evidence_age_seconds': 3600, 'max_exception_seconds': 600,
             'approvers': ['test-approver'], 'revoked_approval_ids': [],
             'library_revision': 'e' * 40,
@@ -67,6 +68,18 @@ class RecoveryBundle(unittest.TestCase):
         root = self.base / f'original-{self.fixture_index}' / branch / 'evidence'
         root.mkdir(parents=True)
         completed = (self.now - dt.timedelta(minutes=age)).isoformat()
+        if branch == 'develop':
+            result = {'schema_version': 1, 'product': gate.PRODUCT,
+                      'mode': 'lean-develop-success-v1', 'gate': 'promotion',
+                      'branch': branch, 'event': 'branch', 'trusted': True,
+                      'job': gate.PRODUCT + '/' + branch, 'build': build, 'commit': commit,
+                      'version': self.version, 'building': False, 'post_complete': True,
+                      'result': 'SUCCESS', 'completed_at': completed,
+                      'stages': [{'name': name, 'result': 'SUCCESS'}
+                                 for name in recovery.adapter.LEAN_STAGES],
+                      'reports': []}
+            self.save(root, 'evidence.json', result)
+            return result, root
         scanner_completed = (self.now - dt.timedelta(minutes=scanner_age if scanner_age is not None else age)).isoformat()
         digest = self.digest
         artifact_name = f'{gate.PRODUCT}-{branch}-{self.version}'
@@ -101,7 +114,7 @@ class RecoveryBundle(unittest.TestCase):
                      'commit': commit, 'job': gate.PRODUCT + '/' + branch, 'build': build,
                      'exit_code': 0, 'reports': refs, 'finding_count': 0, 'outcome': 'PASS'}
             stage_checks.append(self.save(root, f'stages/{slug}.json', check))
-        names = sorted(set(self.policy['required_stages']['promotion']) | gate.CANDIDATE_STAGES)
+        names = sorted(set(self.policy['required_stages']['deployment']) | gate.CANDIDATE_STAGES)
         image_ref = f'localhost:9290/{gate.PRODUCT}/{branch}/{self.version}:{build}'
         result = {'schema_version': 1, 'product': gate.PRODUCT,
                   'gate': 'promotion' if branch == 'develop' else 'deployment',
@@ -191,12 +204,16 @@ class RecoveryBundle(unittest.TestCase):
     def collect(self):
         def get(_base, path):
             return self.archive[path]
-        def inspect(_base, branch, number, _root):
+        def inspect(_base, branch, number, candidate_root=None, lean=False):
             self.assertEqual(number, self.source_build if branch == 'develop' else self.prod_build)
+            self.assertEqual(lean, branch == 'develop')
+            self.assertEqual(candidate_root is None, branch == 'develop')
             # Native completed_build cannot have the coordinator's archived
             # normalized scanner reports; those are a separate signed archive.
             native = copy.deepcopy(self.evidences[branch])
             native['reports'] = []
+            if lean:
+                native.pop('version')
             return native
         with patch.object(recovery.adapter, 'jenkins_get', side_effect=get) as get_call, \
              patch.object(recovery.adapter, 'inspect', side_effect=inspect):
@@ -294,14 +311,14 @@ class RecoveryBundle(unittest.TestCase):
         self.root.rename(self.base / 'failed-forged')
         self.archive[cp + 'artifact/promotion.json'] = gate.canonical(self.promotion)
         with patch.object(recovery.adapter, 'jenkins_get', side_effect=lambda _base, path: self.archive[path]), \
-             patch.object(recovery.adapter, 'inspect', side_effect=lambda _base, branch, _number, _root: self.evidences[branch]), \
+             patch.object(recovery.adapter, 'inspect', side_effect=lambda _base, branch, _number, _root=None, lean=False: self.evidences[branch]), \
              self.assertRaisesRegex(ValueError, 'original promotion binding mismatch'):
             recovery.collect('http://jenkins.invalid', self.coordinator_build, self.owner_build,
                              self.source_build, '0' * 40, self.root, self.policy, self.key, self.now)
         self.root.rename(self.base / 'failed-source')
         changed = dict(self.policy, max_evidence_age_seconds=7200)
         with patch.object(recovery.adapter, 'jenkins_get', side_effect=lambda _base, path: self.archive[path]), \
-             patch.object(recovery.adapter, 'inspect', side_effect=lambda _base, branch, _number, _root: self.evidences[branch]), \
+             patch.object(recovery.adapter, 'inspect', side_effect=lambda _base, branch, _number, _root=None, lean=False: self.evidences[branch]), \
              self.assertRaisesRegex(ValueError, 'recovery policy changed'):
             recovery.collect('http://jenkins.invalid', self.coordinator_build, self.owner_build,
                              self.source_build, self.source_commit, self.root, changed, self.key, self.now)
@@ -319,9 +336,11 @@ class RecoveryBundle(unittest.TestCase):
     def test_collect_rejects_native_timestamp_or_stage_mismatch(self):
         for field in ('completed_at', 'stages'):
             with self.subTest(field=field):
-                def inspect(_base, branch, _number, _root):
+                def inspect(_base, branch, _number, _root=None, lean=False):
                     native = copy.deepcopy(self.evidences[branch])
                     native['reports'] = []
+                    if lean:
+                        native.pop('version')
                     if branch == 'prod':
                         if field == 'completed_at':
                             native[field] = (self.now - dt.timedelta(minutes=9)).isoformat()
