@@ -251,7 +251,14 @@ def evaluate(evidence, policy, root, now, approval=None, approval_key=None):
     require(evidence.get("event") == "branch" and evidence.get("trusted") is True,
             "untrusted event")
     require(SHA.fullmatch(evidence.get("commit", "")) is not None, "invalid commit")
-    require(DIGEST.fullmatch(evidence.get("image_digest", "")) is not None, "invalid digest")
+    lean = evidence.get('mode') == 'lean-develop-success-v1'
+    if lean:
+        require(gate == 'promotion' and policy.get('develop_mode') == 'lean-success-v1',
+                'lean develop policy is missing or mismatched')
+        require('image_digest' not in evidence and 'image_ref' not in evidence
+                and 'immutable_image' not in evidence, 'lean develop must not claim image evidence')
+    else:
+        require(DIGEST.fullmatch(evidence.get("image_digest", "")) is not None, "invalid digest")
     require(type(evidence.get("build")) is int and evidence["build"] > 0, "invalid build")
     require(evidence.get("job") == policy["jobs"][gate], "wrong job")
     require(evidence.get("building") is False and evidence.get("post_complete") is True,
@@ -259,7 +266,7 @@ def evaluate(evidence, policy, root, now, approval=None, approval_key=None):
     # A failed run may have skipped necessary work. Approval never fabricates
     # missing artifacts: resume in a separately authorized verification run.
     candidate = evidence.get('mode') == 'controlled-candidate-v1'
-    require(not policy.get('candidate_mode') or candidate, 'controlled candidate evidence required')
+    require(lean or not policy.get('candidate_mode') or candidate, 'controlled candidate evidence required')
     if candidate:
         require(verified_bytes(root, evidence['artifact']), 'candidate artifact missing')
     require(evidence.get("result") in ({'SUCCESS', 'UNSTABLE'} if candidate else {'SUCCESS'}), "upstream run requires revalidation")
@@ -276,6 +283,9 @@ def evaluate(evidence, policy, root, now, approval=None, approval_key=None):
     age = (now - timestamp(evidence["completed_at"])).total_seconds()
     require(0 <= age <= policy["max_evidence_age_seconds"], "stale or future evidence")
     reports = evidence["reports"]
+    if lean:
+        require(reports == [] and approval is None, 'lean develop cannot carry scanner evidence or approval')
+        return {"decision": "PASS", "finding_count": 0, "not_applicable": []}
     require(isinstance(reports, list) and reports, "missing reports")
     scanners = [report["scanner"] for report in reports]
     require(len(scanners) == len(set(scanners)), "duplicate scanner report")

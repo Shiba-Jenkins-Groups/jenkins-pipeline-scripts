@@ -31,7 +31,7 @@ def call(Map config = [:]) {
             string(name: 'RECOVER_COORDINATOR_BUILD', defaultValue: '', description: 'Finalized deployment recovery: exact failed coordinator'),
             string(name: 'RECOVER_OWNER_BUILD', defaultValue: '', description: 'Finalized deployment recovery: exact failed owner build')
         ]),
-        pipelineTriggers([upstream(upstreamProjects: "${product}/develop", threshold: 'UNSTABLE')])
+        pipelineTriggers([upstream(upstreamProjects: "${product}/develop", threshold: 'SUCCESS')])
     ])
     def causes = currentBuild.getBuildCauses('hudson.model.Cause$UpstreamCause')
     def requestedBuild = params.SOURCE_BUILD?.toString()?.trim() ?: ''
@@ -66,7 +66,7 @@ def call(Map config = [:]) {
     // Pipeline Build Step waits through upstream post actions and retains the
     // exact queue/run relationship across controller restarts.
     def upstreamRun = waitForBuild(runId: "${product}/develop#${sourceBuild}", propagate: false)
-    if (!(upstreamRun.result in ['SUCCESS', 'UNSTABLE'])) { error('Develop build is not an eligible completed candidate') }
+    if (upstreamRun.result != 'SUCCESS') { error('Develop build must complete with SUCCESS before promotion') }
 
     node(config.builderLabel.toString()) {
         dir("auto-release-${env.BUILD_NUMBER}") {
@@ -79,15 +79,18 @@ def call(Map config = [:]) {
                  'harbor-vulnerability-report.py', 'release-askpass.sh', 'release-recovery.py'].each { name ->
                     writeFile file: "control/${name}", text: libraryResource("scripts/common/${name}")
                 }
-                def commonStages = ['Checkout', 'Load Scripts', 'Detect', 'Secret Scan', 'Build', 'Test',
+                def commonStages = ['Checkout', 'Load Scripts', 'Detect', 'Early Capacity Admission', 'Secret Scan', 'Build', 'Test',
                     'Fast Contract Test', 'Dependency Scan', 'Package / Publish / Tag', 'Docker Build',
                     'Image Scan', 'Harbor Push', 'Harbor Vulnerability Report', 'Smoke Test',
                     'Deployment Verification — k3s', 'Declarative: Post Actions']
+                def developStages = ['Checkout', 'Load Scripts', 'Detect', 'Secret Scan', 'Build', 'Test',
+                    'Package / Publish / Tag', 'Declarative: Post Actions']
                 writeFile file: 'control/policy.json', text: JsonOutput.toJson([
                     schema_version: 1, product: product, library_revision: config.libraryRevision,
                     jobs: [promotion: "${product}/develop", deployment: "${product}/prod"],
-                    candidate_mode: true, waivable_stages: ['Test', 'Fast Contract Test', 'Dependency Scan', 'Image Scan'],
-                    required_stages: [promotion: commonStages, deployment: commonStages],
+                    candidate_mode: true, develop_mode: 'lean-success-v1',
+                    waivable_stages: ['Test', 'Fast Contract Test', 'Dependency Scan', 'Image Scan'],
+                    required_stages: [promotion: developStages, deployment: commonStages],
                     required_scanners: ['trivy', 'govulncheck', 'harbor'], max_evidence_age_seconds: 3600,
                     not_applicable_advisories: [[id: 'GO-2026-5932',
                         affected_package_prefix: 'golang.org/x/crypto/openpgp',
@@ -177,9 +180,15 @@ python3 control/release-recovery.py handoff --root recovery --source recovery-so
                         sh 'mkdir -p "$RELEASE_PHASE"'
                         withCredentials([usernamePassword(credentialsId: config.jenkinsReadCredentials,
                             usernameVariable: 'JENKINS_API_USER', passwordVariable: 'JENKINS_API_TOKEN')]) {
-                            sh '''python3 "$RELEASE_CONTROL/release-evidence.py" inspect \
-                                --jenkins-url "$RELEASE_JENKINS_URL" --branch "$RELEASE_BRANCH" \
-                                --build "$RELEASE_BUILD" --candidate-root "$RELEASE_PHASE/evidence" --output "$RELEASE_PHASE/identity.json"'''
+                            if (branch == 'develop') {
+                                sh '''python3 "$RELEASE_CONTROL/release-evidence.py" inspect \
+                                    --jenkins-url "$RELEASE_JENKINS_URL" --branch develop \
+                                    --build "$RELEASE_BUILD" --lean-develop --output "$RELEASE_PHASE/identity.json"'''
+                            } else {
+                                sh '''python3 "$RELEASE_CONTROL/release-evidence.py" inspect \
+                                    --jenkins-url "$RELEASE_JENKINS_URL" --branch prod \
+                                    --build "$RELEASE_BUILD" --candidate-root "$RELEASE_PHASE/evidence" --output "$RELEASE_PHASE/identity.json"'''
+                            }
                         }
                         def identity = parseReleaseJson(readFile("${phase}/identity.json"))
                         if (expectedCommit && identity.commit != expectedCommit) { error('Checkout differs from expected release commit') }
@@ -188,17 +197,24 @@ python3 control/release-recovery.py handoff --root recovery --source recovery-so
                                 userRemoteConfigs: [[url: 'https://github.com/ShibaDev2026/shiba-go-ditch-api-project.git',
                                     credentialsId: config.scmCredentials]]])
                         }
-                    }
-                    stage("${branch}: All Severity Scans") {
-                        try {
-                          withCredentials([usernamePassword(credentialsId: config.harborCredentials,
-                            usernameVariable: 'HARBOR_USER', passwordVariable: 'HARBOR_PASS')]) {
-                            sh '''python3 "$RELEASE_CONTROL/release-evidence.py" scan \
+                        if (branch == 'develop') {
+                            sh '''python3 "$RELEASE_CONTROL/release-evidence.py" bind-source \
                                 --identity "$RELEASE_PHASE/identity.json" --source "$RELEASE_PHASE/source" \
-                                --output "$RELEASE_PHASE/evidence" --harbor-url "$RELEASE_HARBOR_URL"'''
-                          }
-                        } finally {
-                            archiveArtifacts artifacts: "${branch}/identity.json,${branch}/evidence/*.json,${branch}/evidence/*.jsonl,${branch}/evidence/.pipeline/candidate*,${branch}/evidence/.pipeline/candidate-stages/*,${branch}/evidence/reports/junit/*", allowEmptyArchive: true
+                                --output "$RELEASE_PHASE/evidence"'''
+                        }
+                    }
+                    if (branch == 'prod') {
+                        stage("${branch}: All Severity Scans") {
+                            try {
+                              withCredentials([usernamePassword(credentialsId: config.harborCredentials,
+                                usernameVariable: 'HARBOR_USER', passwordVariable: 'HARBOR_PASS')]) {
+                                sh '''python3 "$RELEASE_CONTROL/release-evidence.py" scan \
+                                    --identity "$RELEASE_PHASE/identity.json" --source "$RELEASE_PHASE/source" \
+                                    --output "$RELEASE_PHASE/evidence" --harbor-url "$RELEASE_HARBOR_URL"'''
+                              }
+                            } finally {
+                                archiveArtifacts artifacts: "${branch}/identity.json,${branch}/evidence/*.json,${branch}/evidence/*.jsonl,${branch}/evidence/.pipeline/candidate*,${branch}/evidence/.pipeline/candidate-stages/*,${branch}/evidence/reports/junit/*", allowEmptyArchive: true
+                            }
                         }
                     }
                     stage("${branch}: Release Gate") {
@@ -207,7 +223,9 @@ python3 control/release-recovery.py handoff --root recovery --source recovery-so
                             --output "$RELEASE_PHASE/review.json"'''
                         archiveArtifacts artifacts: "${branch}/evidence/*.json,${branch}/review.json", allowEmptyArchive: false
                         def review = parseReleaseJson(readFile("${phase}/review.json"))
-                        if (review.decision == 'NEEDS_APPROVAL') {
+                        if (branch == 'develop') {
+                            if (review.decision != 'PASS') { error('Lean develop SUCCESS gate blocked') }
+                        } else if (review.decision == 'NEEDS_APPROVAL') {
                             def response
                             timeout(time: 15, unit: 'MINUTES') {
                                 response = input(id: "${branch}-cve-exception", submitter: config.approvers.join(','),

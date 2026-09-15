@@ -113,7 +113,7 @@ for (options in allCredentials.collect { [missingCredential: it] } + [[preflight
     assert !rejected.calls.any { it.toString().startsWith('build:') }
     tests++
 }
-for (options in [[:], [prodResult: 'FAILURE'], [review: 'BLOCKED'], [failStage: 'develop: All Severity Scans']]) {
+for (options in [[:], [prodResult: 'FAILURE'], [review: 'BLOCKED'], [failStage: 'develop: Release Gate']]) {
     def cleaned = simulate('autoReleasePipeline.groovy', options)
     assert cleaned.calls.count('deleteDir') == 1
     assert cleaned.calls[-2] == 'archiveArtifacts'
@@ -162,11 +162,14 @@ def result = simulate('autoReleasePipeline.groovy')
 assert !result.failed
 assert result.calls.count('build:' + product + '/prod') == 1
 assert result.calls.count('build:' + releaseFolder + '/' + product + '-prod-deploy') == 1
+assert !result.calls.contains('develop: All Severity Scans')
+assert result.calls.any { it.toString().contains('--lean-develop') }
+assert result.calls.any { it.toString().contains('bind-source') }
 assert result.calls.indexOf('prod: Release Gate') < result.calls.indexOf('Finalize Revalidated PROD Candidate')
 assert result.calls.indexOf('Finalize Revalidated PROD Candidate') < result.calls.indexOf('Authorize Deployment Handoff')
 tests++
 for (options in [[disabled: true], [wrongCause: true], [upstreamResult: 'FAILURE'],
-                 [failStage: 'develop: All Severity Scans'], [review: 'BLOCKED'],
+                 [failStage: 'develop: Release Gate'], [review: 'BLOCKED'],
                  [review: 'NEEDS_APPROVAL', badApprover: true]]) {
     result = simulate('autoReleasePipeline.groovy', options)
     assert result.failed
@@ -180,7 +183,7 @@ for (options in [[prodResult: 'FAILURE'], [wrongProdSha: true], [failStage: 'pro
     tests++
 }
 result = simulate('autoReleasePipeline.groovy', [review: 'NEEDS_APPROVAL'])
-assert !result.failed && result.calls.count('input') == 2 // Gate A approval never covers Gate B.
+assert result.failed && result.calls.count('input') == 0 // Lean develop cannot be waived into PROD.
 tests++
 assert !simulate('prodDeploymentPipeline.groovy').failed
 tests++

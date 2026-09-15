@@ -96,6 +96,15 @@ class ReleaseGateTests(unittest.TestCase):
     def test_clean_completed_build_passes(self):
         self.assertEqual(self.evaluate()["decision"], "PASS")
 
+    def test_lean_develop_success_has_no_image_or_scanner_claims(self):
+        self.policy.update(develop_mode='lean-success-v1')
+        self.evidence.update(mode='lean-develop-success-v1', reports=[])
+        self.evidence.pop('image_digest')
+        self.assertEqual(self.evaluate()['decision'], 'PASS')
+        self.evidence['image_digest'] = self.digest
+        with self.assertRaisesRegex(gate.InvalidEvidence, 'must not claim image'):
+            self.evaluate()
+
     def test_each_non_success_run_blocks(self):
         for result in ["UNSTABLE", "FAILURE", "ABORTED", "NOT_BUILT", None]:
             with self.subTest(result=result), self.assertRaises(gate.InvalidEvidence):

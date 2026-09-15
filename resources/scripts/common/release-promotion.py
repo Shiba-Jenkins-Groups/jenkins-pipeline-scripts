@@ -160,9 +160,13 @@ def existing_promotion(source, state, evidence, policy, root, receipt_key, now, 
         require(isinstance(receipt.get("develop_build"), int)
                 and receipt["develop_build"] <= evidence["build"],
                 "recovery evidence predates existing promotion")
-        require(isinstance(receipt.get("develop_image_digest"), str)
-                and gate.DIGEST.fullmatch(receipt["develop_image_digest"]),
-                "invalid original promotion image digest")
+        if evidence.get('mode') == 'lean-develop-success-v1':
+            require(receipt.get('develop_image_digest') is None,
+                    'lean promotion unexpectedly claims a develop image digest')
+        else:
+            require(isinstance(receipt.get("develop_image_digest"), str)
+                    and gate.DIGEST.fullmatch(receipt["develop_image_digest"]),
+                    "invalid original promotion image digest")
         merge = receipt.get("merge_commit", "")
         previous = receipt.get("previous_prod_commit", "")
         require(gate.SHA.fullmatch(merge) and gate.SHA.fullmatch(previous), "invalid existing promotion identity")
@@ -204,7 +208,7 @@ def promote(source, state, evidence, policy, root, receipt_key, now, approval=No
         record = {"schema_version": 1, "kind": "promotion", "product": gate.PRODUCT,
                   "source_commit": commit, "previous_prod_commit": prod,
                   "develop_job": evidence["job"], "develop_build": evidence["build"],
-                  "develop_image_digest": evidence["image_digest"], "decision": decision,
+                  "develop_image_digest": evidence.get("image_digest"), "decision": decision,
                   "library_revision": policy.get("library_revision"),
                   "policy_sha256": hashlib.sha256(gate.canonical(policy)).hexdigest(),
                   "evidence_sha256": hashlib.sha256(gate.canonical(evidence)).hexdigest(),

@@ -49,11 +49,40 @@ class Controls(unittest.TestCase):
                  f"IMAGE_REF=localhost:9290/{adapter.gate.PRODUCT}/{branch}/1.0.32:188\nIMAGE_DIGEST={self.fixture.digest}\n")
         return built, workflow, image
 
+    def lean_inputs(self):
+        built, _, _ = self.build_inputs('develop')
+        stages = ([{"name": name, "status": "SUCCESS"} for name in adapter.LEAN_STAGES]
+                  + [{"name": name, "status": "NOT_EXECUTED"} for name in adapter.LEAN_SKIPPED]
+                  + [{"name": "Prepare（準備）", "status": "SUCCESS"},
+                     {"name": "Continuous Integration（持續整合）", "status": "SUCCESS"},
+                     {"name": "Continuous Delivery（持續交付）", "status": "NOT_EXECUTED"}])
+        return built, {"id": "188", "status": "SUCCESS", "stages": stages}
+
     def test_real_shape_selects_product_commit_not_library(self):
         evidence = adapter.completed_build(*self.build_inputs(), "develop", 188)
         self.assertEqual(evidence["commit"], "b" * 40)
         self.assertTrue(evidence["post_complete"])
         self.assertTrue(evidence["immutable_image"].endswith("@" + self.fixture.digest))
+
+    def test_lean_develop_requires_success_and_proves_skipped_release_work(self):
+        built, workflow = self.lean_inputs()
+        evidence = adapter.completed_build(built, workflow, None, 'develop', 188, lean=True)
+        self.assertEqual(evidence['mode'], 'lean-develop-success-v1')
+        self.assertNotIn('image_digest', evidence)
+        workflow['stages'][len(adapter.LEAN_STAGES)]['status'] = 'SUCCESS'
+        with self.assertRaisesRegex(ValueError, 'unexpectedly executed'):
+            adapter.completed_build(built, workflow, None, 'develop', 188, lean=True)
+
+    def test_lean_source_binding_uses_exact_clean_checkout_version(self):
+        built, workflow = self.lean_inputs()
+        identity = adapter.completed_build(built, workflow, None, 'develop', 188, lean=True)
+        source, output = self.root / 'lean-source', self.root / 'lean-evidence'
+        source.mkdir()
+        (source / 'VERSION').write_text('1.0.60\n')
+        with patch.object(adapter, 'run', side_effect=[identity['commit'], '']):
+            evidence = adapter.bind_source(identity, source, output)
+        self.assertEqual(evidence['version'], '1.0.60')
+        self.assertEqual(json.loads((output / 'evidence.json').read_bytes()), evidence)
 
     def test_post_failure_or_absence_blocks(self):
         for missing in [False, True]:
@@ -195,6 +224,16 @@ class Controls(unittest.TestCase):
         cmd('checkout', '--detach', self.evidence['commit'], cwd=source)
         with self.assertRaisesRegex(ValueError, 'already claimed'):
             self.promote(source, remote, state)
+
+    def test_lean_success_promotes_without_a_develop_image_claim(self):
+        cmd, source, remote, old, state = self.setup_git()
+        self.policy.update(develop_mode='lean-success-v1')
+        self.policy['required_stages']['promotion'] = adapter.LEAN_STAGES
+        self.evidence.update(mode='lean-develop-success-v1', reports=[],
+                             stages=[{'name': name, 'result': 'SUCCESS'} for name in adapter.LEAN_STAGES])
+        self.evidence.pop('image_digest')
+        receipt = self.promote(source, remote, state)
+        self.assertIsNone(promotion.verify(receipt, self.key)['develop_image_digest'])
 
     def test_recovery_reuses_signed_merged_receipt_without_another_push(self):
         cmd, source, remote, old, state = self.setup_git()
