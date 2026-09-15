@@ -267,7 +267,7 @@ cleanup() {
     : "${BUILD_NUMBER:?BUILD_NUMBER is required for exact K3D image cleanup}"
     : "${BRANCH:?BRANCH is required for exact K3D image cleanup}"
     local registry="${HARBOR_K3S_REGISTRY:-host.docker.internal:9290}"
-    local image node image_ids
+    local image node node_container candidate image_ids
     image="$(harbor_image_ref "${registry}" "${APP_NAME}" "${BRANCH}" "${APP_VERSION}" "${BUILD_NUMBER}")"
     if kubectl get pods -A -o json | TARGET_IMAGE="${image}" python3 -c '
 import json, os, sys
@@ -279,11 +279,31 @@ for pod in json.load(sys.stdin).get("items", []):
 '
     then
         while IFS= read -r node; do
-            [[ -n "${node}" && "${node}" =~ ^k3d-[A-Za-z0-9_.-]+$ ]] || continue
-            docker container inspect "${node}" >/dev/null
-            image_ids="$(docker exec "${node}" crictl images --quiet --no-trunc "${image}" 2>/dev/null || true)"
+            [[ -n "${node}" && "${node}" =~ ^k3d-[a-z0-9_.-]+$ ]] || continue
+            node_container=""
+            while IFS= read -r candidate; do
+                [[ "$(printf '%s' "${candidate}" | tr '[:upper:]' '[:lower:]')" == "${node}" ]] || continue
+                [[ -z "${node_container}" ]] || {
+                    report_error "K3D_POOL" "009" "multiple Docker containers map to K3D node ${node}"
+                    return 1
+                }
+                node_container="${candidate}"
+            done < <(docker ps --filter 'label=app=k3d' --format '{{.Names}}')
+            [[ -n "${node_container}" && "${node_container}" =~ ^k3d-[A-Za-z0-9_.-]+$ ]] || {
+                report_error "K3D_POOL" "010" "Docker container not found for K3D node ${node}"
+                return 1
+            }
+            docker container inspect "${node_container}" >/dev/null
+            image_ids="$(docker exec "${node_container}" crictl images --output json \
+                | TARGET_IMAGE="${image}" python3 -c '
+import json, os, sys
+target = os.environ["TARGET_IMAGE"]
+for item in json.load(sys.stdin).get("images", []):
+    if target in (item.get("repoTags") or []):
+        print(item.get("id", ""))
+')"
             if [[ -n "${image_ids}" ]]; then
-                docker exec "${node}" crictl rmi "${image}"
+                docker exec "${node_container}" crictl rmi "${image}"
             fi
         done < <(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
         echo "[k3d-pool] exact verification image cache removed where present: ${image}"

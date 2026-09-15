@@ -17,15 +17,17 @@ kubectl() {
 }
 docker() {
     printf 'docker %s\n' "$*" >>"${log}"
-    if [[ "$*" == exec\ k3d-offline-server-0\ crictl\ images* ]]; then
-        printf '%s\n' 'sha256:offline'
+    if [[ "$*" == ps\ --filter* ]]; then
+        printf '%s\n' 'k3d-OFFLINE-server-0'
+    elif [[ "$*" == 'exec k3d-OFFLINE-server-0 crictl images --output json' ]]; then
+        printf '%s\n' '{"images":[{"id":"sha256:offline","repoTags":["host.docker.internal:9290/offline-app/develop/1:2"]}]}'
     fi
 }
 
 cleanup
 
 grep -Fq 'kubectl delete namespace ci-dev-offline-1-abcdef0 --ignore-not-found --wait=true --timeout=150s' "${log}"
-grep -Fq 'docker exec k3d-offline-server-0 crictl rmi host.docker.internal:9290/offline-app/develop/1:2' "${log}"
+grep -Fq 'docker exec k3d-OFFLINE-server-0 crictl rmi host.docker.internal:9290/offline-app/develop/1:2' "${log}"
 if grep -Eq 'crictl (rmi --prune|image prune)|docker (system|builder) prune' "${log}"; then
     echo 'broad K3D/Docker prune unexpectedly used' >&2
     exit 1
