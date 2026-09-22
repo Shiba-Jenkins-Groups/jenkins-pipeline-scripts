@@ -67,6 +67,33 @@ def upstream(build, job, number):
             and found[0].get('upstreamBuild') == number, 'recovery upstream chain mismatch')
 
 
+def coordinator_source(build, source_build, expected_commit, policy):
+    """Accept native promotion or the existing exact-source operator retry lane.
+
+    This authenticates only the original coordinator's trigger. Signed receipt,
+    native develop/PROD evidence, and owner handoff checks remain mandatory.
+    """
+    found = causes(build)
+    if len(found) == 1 and found[0].get('_class') == 'hudson.model.Cause$UserIdCause':
+        require(found[0].get('userId') in policy['approvers'], 'unauthorized original recovery operator')
+        parameters = [p for action in build.get('actions', []) for p in action.get('parameters', [])]
+        allowed = {'SOURCE_BUILD', 'EXPECTED_COMMIT', 'RECOVER_COORDINATOR_BUILD',
+                   'RECOVER_OWNER_BUILD', 'REBUILD_PROD_COMMIT', 'PUBLISHED_COORDINATOR_BUILD'}
+        values = {}
+        for parameter in parameters:
+            name, value = parameter.get('name'), parameter.get('value')
+            require(name in allowed and name not in values and isinstance(value, str),
+                    'invalid original recovery parameters')
+            values[name] = value
+        require(values.get('SOURCE_BUILD') == str(source_build)
+                and values.get('EXPECTED_COMMIT') == expected_commit
+                and all(not value for name, value in values.items()
+                        if name not in {'SOURCE_BUILD', 'EXPECTED_COMMIT'}),
+                'original recovery source mismatch')
+    else:
+        upstream(build, gate.PRODUCT + '/develop', source_build)
+
+
 def validate_bundle(root, policy, key, now):
     promotion, finalization = read(root / 'promotion.json'), read(root / 'finalization.json')
     original, failed = read(root / 'original-request.json'), read(root / 'failed-receipt.json')
@@ -125,7 +152,7 @@ def collect(base, coordinator_build, owner_build, source_build, expected_commit,
     for build, number in [(coord, coordinator_build), (owner, owner_build)]:
         require(build.get('number') == number and build.get('building') is False
                 and build.get('result') == 'FAILURE', 'recovery requires completed failed coordinator and owner')
-    upstream(coord, gate.PRODUCT + '/develop', source_build)
+    coordinator_source(coord, source_build, expected_commit, policy)
     upstream(owner, COORDINATOR, coordinator_build)
     for target, origin in [('promotion.json', 'promotion.json'), ('finalization.json', 'finalization.json'),
                            ('original-request.json', 'deployment-request.json'), ('original-policy.json', 'control/policy.json')]:
@@ -139,7 +166,9 @@ def collect(base, coordinator_build, owner_build, source_build, expected_commit,
     write(root / 'recovery-identity.json', {'source_commit': expected_commit, 'source_build': source_build,
           'commit': original['commit'], 'coordinator_build': coordinator_build, 'owner_build': owner_build})
     for branch, number in [('develop', source_build), ('prod', prod_build)]:
-        native = adapter.inspect(base, branch, number, root / branch / 'native')
+        lean = branch == 'develop'
+        candidate_root = None if lean else root / branch / 'native'
+        native = adapter.inspect(base, branch, number, candidate_root, lean=lean)
         evidence = json.loads(get(coord_prefix + 'artifact/' + branch + '/evidence/evidence.json'))
         # inspect has not scanned yet, so its reports list is intentionally empty.
         # Original scanner reports are separately signature-bound and fully gated.

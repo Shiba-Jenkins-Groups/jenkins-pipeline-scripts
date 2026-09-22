@@ -55,6 +55,14 @@ tagging occurs. Only clean PASS gates are supported; exceptions and stale
 evidence fail closed. The new request expires at the earliest original evidence
 or scan deadline, or fifteen minutes, whichever comes first.
 
+The original coordinator may have been triggered by the native develop upstream
+or by the existing exact-source operator retry lane. The latter requires one
+configured approver's UserIdCause and matching SOURCE_BUILD/EXPECTED_COMMIT;
+duplicate, unknown, rebuild, recursive recovery, Replay, and mixed causes are
+rejected. PROD and owner still require their exact native upstream links, and
+all archived artifacts remain bound to the original signed receipts. Develop
+is inspected as lean SUCCESS evidence; PROD retains complete candidate evidence.
+
 The existing owner job receives the new signed request through a native
 coordinator handoff. While holding both lifecycle and state locks, it requires
 the exact signed FAILED state, healthy original container/image, unchanged

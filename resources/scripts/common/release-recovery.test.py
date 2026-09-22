@@ -44,10 +44,11 @@ class RecoveryBundle(unittest.TestCase):
         self.policy = {
             'schema_version': 1, 'product': gate.PRODUCT,
             'jobs': {'promotion': gate.PRODUCT + '/develop', 'deployment': gate.PRODUCT + '/prod'},
-            'required_stages': {'promotion': ['Build', 'Scan', 'Reports'],
+            'required_stages': {'promotion': recovery.adapter.LEAN_STAGES,
                                 'deployment': ['Build', 'Scan', 'Reports']},
             'required_scanners': ['trivy', 'govulncheck', 'harbor'],
-            'candidate_mode': True, 'waivable_stages': sorted(gate.WAIVABLE_STAGES),
+            'candidate_mode': True, 'develop_mode': 'lean-success-v1',
+            'waivable_stages': sorted(gate.WAIVABLE_STAGES),
             'max_evidence_age_seconds': 3600, 'max_exception_seconds': 600,
             'approvers': ['test-approver'], 'revoked_approval_ids': [],
             'library_revision': 'e' * 40,
@@ -67,6 +68,18 @@ class RecoveryBundle(unittest.TestCase):
         root = self.base / f'original-{self.fixture_index}' / branch / 'evidence'
         root.mkdir(parents=True)
         completed = (self.now - dt.timedelta(minutes=age)).isoformat()
+        if branch == 'develop':
+            result = {'schema_version': 1, 'product': gate.PRODUCT,
+                      'mode': 'lean-develop-success-v1', 'gate': 'promotion',
+                      'branch': branch, 'event': 'branch', 'trusted': True,
+                      'job': gate.PRODUCT + '/' + branch, 'build': build, 'commit': commit,
+                      'version': self.version, 'building': False, 'post_complete': True,
+                      'result': 'SUCCESS', 'completed_at': completed,
+                      'stages': [{'name': name, 'result': 'SUCCESS'}
+                                 for name in recovery.adapter.LEAN_STAGES],
+                      'reports': []}
+            self.save(root, 'evidence.json', result)
+            return result, root
         scanner_completed = (self.now - dt.timedelta(minutes=scanner_age if scanner_age is not None else age)).isoformat()
         digest = self.digest
         artifact_name = f'{gate.PRODUCT}-{branch}-{self.version}'
@@ -101,7 +114,7 @@ class RecoveryBundle(unittest.TestCase):
                      'commit': commit, 'job': gate.PRODUCT + '/' + branch, 'build': build,
                      'exit_code': 0, 'reports': refs, 'finding_count': 0, 'outcome': 'PASS'}
             stage_checks.append(self.save(root, f'stages/{slug}.json', check))
-        names = sorted(set(self.policy['required_stages']['promotion']) | gate.CANDIDATE_STAGES)
+        names = sorted(set(self.policy['required_stages']['deployment']) | gate.CANDIDATE_STAGES)
         image_ref = f'localhost:9290/{gate.PRODUCT}/{branch}/{self.version}:{build}'
         result = {'schema_version': 1, 'product': gate.PRODUCT,
                   'gate': 'promotion' if branch == 'develop' else 'deployment',
@@ -191,12 +204,16 @@ class RecoveryBundle(unittest.TestCase):
     def collect(self):
         def get(_base, path):
             return self.archive[path]
-        def inspect(_base, branch, number, _root):
+        def inspect(_base, branch, number, candidate_root=None, lean=False):
             self.assertEqual(number, self.source_build if branch == 'develop' else self.prod_build)
+            self.assertEqual(lean, branch == 'develop')
+            self.assertEqual(candidate_root is None, branch == 'develop')
             # Native completed_build cannot have the coordinator's archived
             # normalized scanner reports; those are a separate signed archive.
             native = copy.deepcopy(self.evidences[branch])
             native['reports'] = []
+            if lean:
+                native.pop('version')
             return native
         with patch.object(recovery.adapter, 'jenkins_get', side_effect=get) as get_call, \
              patch.object(recovery.adapter, 'inspect', side_effect=inspect):
@@ -204,6 +221,44 @@ class RecoveryBundle(unittest.TestCase):
                                      self.source_build, self.source_commit, self.root, self.policy, self.key, self.now)
         self.assertTrue(all(call.args[1].startswith('/') for call in get_call.call_args_list))
         return value
+
+    def operator_coordinator(self):
+        return {'number': self.coordinator_build, 'building': False, 'result': 'FAILURE',
+                'actions': [{'causes': [{'_class': 'hudson.model.Cause$UserIdCause',
+                                         'userId': 'test-approver'}]},
+                            {'parameters': [{'name': 'SOURCE_BUILD', 'value': str(self.source_build)},
+                                            {'name': 'EXPECTED_COMMIT', 'value': self.source_commit}]}]}
+
+    def test_collect_operator_retry_still_verifies_signed_bundle(self):
+        cp = recovery.prefix(recovery.COORDINATOR, self.coordinator_build)
+        self.archive[cp + 'api/json'] = gate.canonical(self.operator_coordinator())
+        self.assertEqual(self.collect()['commit'], self.merge)
+        forged = copy.deepcopy(self.promotion)
+        forged['payload']['source_commit'] = '0' * 40
+        self.archive[cp + 'artifact/promotion.json'] = gate.canonical(forged)
+        self.root.rename(self.base / 'valid-operator-bundle')
+        with self.assertRaisesRegex(ValueError, 'signature'):
+            self.collect()
+
+    def test_operator_retry_rejects_wrong_identity_or_source(self):
+        for kind in ['operator', 'build', 'commit', 'missing', 'duplicate', 'unknown',
+                     'recursive', 'rebuild', 'replay', 'mixed', 'numeric']:
+            with self.subTest(kind=kind):
+                build = self.operator_coordinator()
+                cause, params = build['actions'][0]['causes'][0], build['actions'][1]['parameters']
+                if kind == 'operator': cause['userId'] = 'not-an-approver'
+                elif kind == 'build': params[0]['value'] = str(self.source_build + 1)
+                elif kind == 'commit': params[1]['value'] = '0' * 40
+                elif kind == 'missing': params.pop()
+                elif kind == 'duplicate': params.append(dict(params[0]))
+                elif kind == 'unknown': params.append({'name': 'BYPASS', 'value': ''})
+                elif kind == 'recursive': params.append({'name': 'RECOVER_OWNER_BUILD', 'value': '1'})
+                elif kind == 'rebuild': params.append({'name': 'REBUILD_PROD_COMMIT', 'value': self.merge})
+                elif kind == 'replay': cause['_class'] = 'org.jenkinsci.plugins.workflow.cps.replay.ReplayCause'
+                elif kind == 'mixed': build['actions'][0]['causes'].append(dict(cause))
+                elif kind == 'numeric': params[0]['value'] = self.source_build
+                with self.assertRaises(ValueError):
+                    recovery.coordinator_source(build, self.source_build, self.source_commit, self.policy)
 
     def live(self, *, git_override=None, image_override=None, published=None, heads=None):
         evidence = self.evidences['prod']
@@ -270,7 +325,7 @@ class RecoveryBundle(unittest.TestCase):
         variants = [
             (cp + 'api/json', self.build(self.coordinator_build, 'wrong/develop', self.source_build), 'upstream chain mismatch'),
             (cp + 'api/json', self.build(self.coordinator_build, gate.PRODUCT + '/develop',
-                                        self.source_build, cause_class='hudson.model.Cause$UserIdCause'), 'upstream chain mismatch'),
+                                        self.source_build, cause_class='hudson.model.Cause$UserIdCause'), 'unauthorized original recovery operator'),
             (op + 'api/json', self.build(self.owner_build, recovery.COORDINATOR, self.coordinator_build + 1), 'upstream chain mismatch'),
             (op + 'api/json', self.build(self.owner_build, recovery.COORDINATOR, self.coordinator_build, result='SUCCESS'), 'completed failed coordinator and owner'),
             (recovery.prefix(gate.PRODUCT + '/prod', self.prod_build) + 'api/json',
@@ -294,14 +349,14 @@ class RecoveryBundle(unittest.TestCase):
         self.root.rename(self.base / 'failed-forged')
         self.archive[cp + 'artifact/promotion.json'] = gate.canonical(self.promotion)
         with patch.object(recovery.adapter, 'jenkins_get', side_effect=lambda _base, path: self.archive[path]), \
-             patch.object(recovery.adapter, 'inspect', side_effect=lambda _base, branch, _number, _root: self.evidences[branch]), \
+             patch.object(recovery.adapter, 'inspect', side_effect=lambda _base, branch, _number, _root=None, lean=False: self.evidences[branch]), \
              self.assertRaisesRegex(ValueError, 'original promotion binding mismatch'):
             recovery.collect('http://jenkins.invalid', self.coordinator_build, self.owner_build,
                              self.source_build, '0' * 40, self.root, self.policy, self.key, self.now)
         self.root.rename(self.base / 'failed-source')
         changed = dict(self.policy, max_evidence_age_seconds=7200)
         with patch.object(recovery.adapter, 'jenkins_get', side_effect=lambda _base, path: self.archive[path]), \
-             patch.object(recovery.adapter, 'inspect', side_effect=lambda _base, branch, _number, _root: self.evidences[branch]), \
+             patch.object(recovery.adapter, 'inspect', side_effect=lambda _base, branch, _number, _root=None, lean=False: self.evidences[branch]), \
              self.assertRaisesRegex(ValueError, 'recovery policy changed'):
             recovery.collect('http://jenkins.invalid', self.coordinator_build, self.owner_build,
                              self.source_build, self.source_commit, self.root, changed, self.key, self.now)
@@ -319,9 +374,11 @@ class RecoveryBundle(unittest.TestCase):
     def test_collect_rejects_native_timestamp_or_stage_mismatch(self):
         for field in ('completed_at', 'stages'):
             with self.subTest(field=field):
-                def inspect(_base, branch, _number, _root):
+                def inspect(_base, branch, _number, _root=None, lean=False):
                     native = copy.deepcopy(self.evidences[branch])
                     native['reports'] = []
+                    if lean:
+                        native.pop('version')
                     if branch == 'prod':
                         if field == 'completed_at':
                             native[field] = (self.now - dt.timedelta(minutes=9)).isoformat()
