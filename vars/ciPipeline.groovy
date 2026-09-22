@@ -176,59 +176,7 @@ def call(Map config = [:]) {
                     stage('Load Scripts') {
                         steps {
                             script {
-                                // Shared Library scripts 在 Controller，Agent 無法直接存取
-                                // 用 libraryResource() 讀取後寫入 Agent workspace 的 .pipeline/
-                                //
-                                // 慣例載入（OCP）：新增語言＝LANGUAGES 加一個字串＋依慣例放好檔案
-                                //   scripts/{lang}/{lang}-{build,test,archive,smoke-test}.sh
-                                //   dockerfiles/Dockerfile-{lang}
-                                // 慣例之外的語言特例檔以 LANG_EXTRAS 收斂
-                                // 缺檔＝結構錯誤：libraryResource() 直接 fail，不靜默跳過
-                                def LANGUAGES   = (composeVerification || leanDevelop) ? ['go'] : ['go', 'java', 'node', 'python']
-                                def LANG_STEPS  = ['build', 'test', 'archive', 'smoke-test']
-                                def LANG_EXTRAS = [go: ['go-env.sh'], java: ['java-env.sh']]
-
-                                def resources = [
-                                    'scripts/detect.sh',
-                                    'scripts/ci.sh',
-                                    'scripts/cd.sh',
-                                    'scripts/smoke-test.sh',
-                                    'scripts/common/error-handler.sh',
-                                    'scripts/common/docker.sh',
-                                    'scripts/common/additional-images.sh',
-                                    'scripts/common/git-tag.sh',
-                                    'scripts/common/version.sh',
-                                    'scripts/common/branch-policy.sh',
-                                    'scripts/common/nexus-upload.sh',
-                                    'scripts/common/secret-scan.sh',
-                                    'scripts/common/dependency-check.sh',
-                                    'scripts/common/k3d-verify.sh',
-                                    'scripts/common/k3d-capacity.py',
-                                    'scripts/common/ci-capacity.py',
-                                    'scripts/common/ci-builder-ensure.sh',
-                                    'scripts/common/ci-builder.toml',
-                                    'scripts/common/harbor-vulnerability-report.py',
-                                    'scripts/common/release-finalize.sh',
-                                    'scripts/common/release-candidate.py',
-                                    'scripts/common/release-evidence.py',
-                                    'scripts/common/release-gate.py',
-                                    'scripts/common/runtime-image-verify.py',
-                                ]
-                                for (lang in LANGUAGES) {
-                                    for (step in LANG_STEPS) {
-                                        resources << "scripts/${lang}/${lang}-${step}.sh".toString()
-                                    }
-                                    for (extra in (LANG_EXTRAS[lang] ?: [])) {
-                                        resources << "scripts/${lang}/${extra}".toString()
-                                    }
-                                    resources << "dockerfiles/Dockerfile-${lang}".toString()
-                                }
-
-                                for (path in resources) {
-                                    writeFile file: ".pipeline/${path}", text: libraryResource(path)
-                                }
-
-                                sh 'find .pipeline/scripts -name "*.sh" -exec chmod +x {} +'
+                                loadDeliveryScripts(composeVerification || leanDevelop)
                             }
                         }
                     }
@@ -236,141 +184,15 @@ def call(Map config = [:]) {
                     stage('Detect') {
                         steps {
                             script {
-                                env.PROJECT_MAIN_ENABLED = (config.containsKey('projectMainEnabled') ? config.projectMainEnabled : true).toString()
-                                // detect.sh：語言偵測；branch-policy.sh：branch 政策旗標（單一真相表）
-                                // 兩者皆以 KEY=VALUE 輸出，統一解析後注入 env，供 when 條件與下游腳本讀取
-                                def output = sh(
-                                    script: 'bash .pipeline/scripts/detect.sh && bash .pipeline/scripts/common/branch-policy.sh',
-                                    returnStdout: true
-                                ).trim()
-                                output.split('\n').each { line ->
-                                    def parts = line.split('=', 2)
-                                    if (parts.size() == 2) {
-                                        env[parts[0].trim()] = parts[1].trim()
-                                    }
-                                }
-                                // 專案參數只能收緊中央 policy，不能把 feature/hotfix/PR 的 false
-                                // 放寬為 true；避免 branch-controlled Jenkinsfile 取得發布憑證。
-                                if (config.containsKey('artifactPublishEnabled') && config.artifactPublishEnabled == false) {
-                                    env.DO_ARTIFACT_PUBLISH = 'false'
-                                }
-                                if (config.containsKey('gitTagEnabled') && config.gitTagEnabled == false) {
-                                    env.DO_GIT_TAG = 'false'
-                                }
-                                if (config.developGitTagEnabled == false && env.POLICY_NAME == 'develop') {
-                                    env.DO_GIT_TAG = 'false'
-                                }
-                                if (leanDevelop) {
-                                    // Develop proves source integration only. All publishing, scanners that
-                                    // require release policy, Docker/Harbor/K3D and finalization run once on PROD.
-                                    env.DO_DEP_SCAN = 'false'
-                                    env.DO_ARTIFACT_PUBLISH = 'false'
-                                    env.DO_GIT_TAG = 'false'
-                                    env.DO_IMAGE_BUILD = 'false'
-                                    env.DO_IMAGE_SCAN = 'false'
-                                    env.DO_IMAGE_PUSH = 'false'
-                                    env.DO_K3S_VERIFY = 'false'
-                                    env.DO_RUNTIME_DEPLOY = 'false'
-                                    env.DO_PROD_DEPLOY = 'false'
-                                    env.DO_DOCKER_BUILD = 'false'
-                                    env.DO_SCAN = 'false'
-                                    env.DO_PUSH = 'false'
-                                    env.DO_DEPLOY = 'false'
-                                    env.DEPLOY_NAMESPACE = ''
-                                }
-
-                                // shiba 的 PROD release 必須等 strict scan、image 與 k3s verification
-                                // 全數通過後才發布 artifact/tag。其他專案預設維持既有時序。
-                                if (composeVerification) {
-                                    env.DO_K3S_VERIFY = 'false'
-                                    env.DO_DEPLOY = 'false'
-                                }
-                                if (coordinatorScans) { env.DO_DEP_SCAN = 'false' }
-                                env.RELEASE_CANDIDATE_MODE = coordinatorScans ? 'controlled-compose-v2' : 'controlled-candidate-v1'
-                                env.DEFER_RELEASE_FINALIZATION = (config.releaseFinalizeAfterVerification == true).toString()
-                                def deferThisRelease = env.DEFER_RELEASE_FINALIZATION == 'true' && env.DO_PROD_DEPLOY == 'true'
-                                env.DO_ARCHIVE_ARTIFACT_PUBLISH = (env.DO_ARTIFACT_PUBLISH == 'true' && !deferThisRelease).toString()
-                                env.DO_ARCHIVE_GIT_TAG = (env.DO_GIT_TAG == 'true' && !deferThisRelease).toString()
-                                if (candidateMode) {
-                                    if (env.LANGUAGE != 'go' || !config.fastContractCommand || !primaryImageEnabled || additionalImages) {
-                                        error('Controlled candidate requires the complete single Go App contract')
-                                    }
-                                    env.DO_ARCHIVE_ARTIFACT_PUBLISH = 'false'
-                                    env.DO_ARCHIVE_GIT_TAG = 'false'
-                                }
-
-                                if (env.CHANGE_ID) {
-                                    def forbidden = [
-                                        DO_ARTIFACT_PUBLISH: env.DO_ARTIFACT_PUBLISH,
-                                        DO_GIT_TAG: env.DO_GIT_TAG,
-                                        DO_IMAGE_BUILD: env.DO_IMAGE_BUILD,
-                                        DO_IMAGE_PUSH: env.DO_IMAGE_PUSH,
-                                        DO_K3S_VERIFY: env.DO_K3S_VERIFY,
-                                        DO_RUNTIME_DEPLOY: env.DO_RUNTIME_DEPLOY,
-                                        DO_PROD_DEPLOY: env.DO_PROD_DEPLOY,
-                                    ].findAll { key, value -> value == 'true' }
-                                    if (forbidden) {
-                                        error("PR policy invariant violated: ${forbidden.keySet().join(', ')}")
-                                    }
-                                }
-
-                                // k3d 是跨專案共用的驗證池：每個 build 自動建立隔離 namespace，
-                                // Service 在套用前統一轉為 ClusterIP，再由 kubectl port-forward 驗證。
-                                // 因此不再要求各專案保留固定 NodePort，也不會發生跨專案撞 port。
-                                if (env.DO_DEPLOY == 'true') {
-                                    // Detect 階段尚未載入 Archive 的 build.env，APP_NAME 不一定存在；
-                                    // JOB_NAME 含 multibranch project/branch，可提供跨專案唯一性。
-                                    def appSlug = (env.JOB_NAME ?: env.JOB_BASE_NAME ?: 'app').toLowerCase()
-                                        .replaceAll('[^a-z0-9-]+', '-')
-                                        .replaceAll('^-+|-+$', '')
-                                    def buildSlug = (env.BUILD_NUMBER ?: '0').replaceAll('[^0-9]+', '') ?: '0'
-                                    def shaSlug = (env.GIT_COMMIT ?: 'unknown').take(7).toLowerCase()
-                                        .replaceAll('[^a-z0-9]+', '')
-                                    def suffix = "-${buildSlug}-${shaSlug}"
-                                    def prefix = "ci-${env.DEPLOY_NAMESPACE}-"
-                                    def appLimit = Math.max(1, 63 - prefix.length() - suffix.length())
-                                    env.CI_VERIFY_NAMESPACE = "${prefix}${appSlug.take(appLimit)}${suffix}"
-                                    env.DEPLOY_ENV = env.DEPLOY_NAMESPACE
-                                    env.NODE_PORT = ''
-                                    if (config.containsKey('devNodePort') || config.containsKey('prodNodePort') || config.containsKey('deployTeardown')) {
-                                        echo '[detect] devNodePort/prodNodePort/deployTeardown 已棄用；共用 K3D 驗證池改用 ClusterIP 與 finally 回收。'
-                                    }
-                                }
-
-                                env.ADDITIONAL_IMAGES = additionalImagesSpec
-                                if (env.ADDITIONAL_IMAGES) {
-                                    echo "[detect] Additional images: ${env.ADDITIONAL_IMAGES}"
-                                }
-
-                                // Pipeline verification 一律使用 ci-* 臨時 namespace，finally 會整個回收；
-                                // 既有 dev/prod 常駐 namespace 不在回收範圍，故不再需要專案 opt-in。
-                                env.DEPLOY_TEARDOWN = 'true'
-                                if (appCapacityBuilder && !leanDevelop) {
-                                    env.CI_BUILDX_BUILDER = 'shiba-app-ci'
-                                    env.CI_BUILDX_PLATFORM = 'linux/arm64'
-                                    // The existing Docker agent cache volume survives agent
-                                    // replacement; builder metadata must use the same path.
-                                    env.BUILDX_CONFIG = '/home/jenkins/.cache/shiba-app-buildx'
-                                }
-
-                                // 人工確認閘的專案級覆蓋（deployInputGate: false 可關掉 prod 那道 input）。
-                                // 適用情境：pod 部署本身不碰生產（只是驗證閘），真正動生產是管線之外
-                                // 的另一道人工步驟——此時管線內的 input 守的是一個不碰生產的步驟，
-                                // 只剩「發版時要坐等點按鈕」的摩擦。未宣告即沿用政策表預設（prod=true）。
-                                if (config.containsKey('deployInputGate')) {
-                                    env.DEPLOY_INPUT_GATE = config.deployInputGate.toString()
-                                }
-
-                                // build tags 依部署環境注入（如 develop→devseed：dev 專屬 admin token）。
-                                // 專案未宣告 devBuildTags 即不帶 tag；prod／main 分支一律不帶（編譯期隔離）。
-                                if (env.DO_DEPLOY == 'true' && env.DEPLOY_NAMESPACE == 'dev' && config.devBuildTags) {
-                                    env.GO_BUILD_TAGS = config.devBuildTags.toString()
-                                }
-
-                                echo "[detect] Language: ${env.LANGUAGE}, BuildTool: ${env.BUILD_TOOL}"
-                                echo "[detect] Policy: event=${env.PIPELINE_EVENT}, trust=${env.PIPELINE_TRUST}, package=${env.DO_PACKAGE}, publish=${env.DO_ARTIFACT_PUBLISH}, tag=${env.DO_GIT_TAG}, " +
-                                     "image=${env.DO_IMAGE_BUILD}/${env.DO_IMAGE_PUSH}, k3s=${env.DO_K3S_VERIFY}, runtime=${env.DO_RUNTIME_DEPLOY}, prod=${env.DO_PROD_DEPLOY}, " +
-                                     "env=${env.DEPLOY_NAMESPACE}, verify_ns=${env.CI_VERIFY_NAMESPACE ?: '(none)'}, TEST_LEVEL=${env.TEST_LEVEL}, GO_BUILD_TAGS=${env.GO_BUILD_TAGS ?: '(none)'}"
+                                configureDeliveryEnvironment(config, [
+                                    leanDevelop: leanDevelop,
+                                    composeVerification: composeVerification,
+                                    coordinatorScans: coordinatorScans,
+                                    candidateMode: candidateMode,
+                                    primaryImageEnabled: primaryImageEnabled,
+                                    additionalImages: additionalImages,
+                                    additionalImagesSpec: additionalImagesSpec,
+                                    appCapacityBuilder: appCapacityBuilder])
                             }
                         }
                     }
@@ -922,4 +744,208 @@ ${env.BUILT_IMAGE_DIGEST ? "  digest: ${env.BUILT_IMAGE_DIGEST}" : ''}
             }
         }
     }
+}
+
+
+def loadDeliveryScripts(boolean compact) {
+    // Shared Library scripts 在 Controller，Agent 無法直接存取
+    // 用 libraryResource() 讀取後寫入 Agent workspace 的 .pipeline/
+    //
+    // 慣例載入（OCP）：新增語言＝LANGUAGES 加一個字串＋依慣例放好檔案
+    //   scripts/{lang}/{lang}-{build,test,archive,smoke-test}.sh
+    //   dockerfiles/Dockerfile-{lang}
+    // 慣例之外的語言特例檔以 LANG_EXTRAS 收斂
+    // 缺檔＝結構錯誤：libraryResource() 直接 fail，不靜默跳過
+    def LANGUAGES   = compact ? ['go'] : ['go', 'java', 'node', 'python']
+    def LANG_STEPS  = ['build', 'test', 'archive', 'smoke-test']
+    def LANG_EXTRAS = [go: ['go-env.sh'], java: ['java-env.sh']]
+
+    def resources = [
+        'scripts/detect.sh',
+        'scripts/ci.sh',
+        'scripts/cd.sh',
+        'scripts/smoke-test.sh',
+        'scripts/common/error-handler.sh',
+        'scripts/common/docker.sh',
+        'scripts/common/additional-images.sh',
+        'scripts/common/git-tag.sh',
+        'scripts/common/version.sh',
+        'scripts/common/branch-policy.sh',
+        'scripts/common/nexus-upload.sh',
+        'scripts/common/secret-scan.sh',
+        'scripts/common/dependency-check.sh',
+        'scripts/common/k3d-verify.sh',
+        'scripts/common/k3d-capacity.py',
+        'scripts/common/ci-capacity.py',
+        'scripts/common/ci-builder-ensure.sh',
+        'scripts/common/ci-builder.toml',
+        'scripts/common/harbor-vulnerability-report.py',
+        'scripts/common/release-finalize.sh',
+        'scripts/common/release-candidate.py',
+        'scripts/common/release-evidence.py',
+        'scripts/common/release-gate.py',
+        'scripts/common/runtime-image-verify.py',
+    ]
+    for (lang in LANGUAGES) {
+        for (step in LANG_STEPS) {
+            resources << "scripts/${lang}/${lang}-${step}.sh".toString()
+        }
+        for (extra in (LANG_EXTRAS[lang] ?: [])) {
+            resources << "scripts/${lang}/${extra}".toString()
+        }
+        resources << "dockerfiles/Dockerfile-${lang}".toString()
+    }
+
+    for (path in resources) {
+        writeFile file: ".pipeline/${path}", text: libraryResource(path)
+    }
+
+    sh 'find .pipeline/scripts -name "*.sh" -exec chmod +x {} +'
+}
+
+
+def configureDeliveryEnvironment(Map config, Map mode) {
+    def leanDevelop = mode.leanDevelop
+    def composeVerification = mode.composeVerification
+    def coordinatorScans = mode.coordinatorScans
+    def candidateMode = mode.candidateMode
+    def primaryImageEnabled = mode.primaryImageEnabled
+    def additionalImages = mode.additionalImages
+    def additionalImagesSpec = mode.additionalImagesSpec
+    def appCapacityBuilder = mode.appCapacityBuilder
+    env.PROJECT_MAIN_ENABLED = (config.containsKey('projectMainEnabled') ? config.projectMainEnabled : true).toString()
+    // detect.sh：語言偵測；branch-policy.sh：branch 政策旗標（單一真相表）
+    // 兩者皆以 KEY=VALUE 輸出，統一解析後注入 env，供 when 條件與下游腳本讀取
+    def output = sh(
+        script: 'bash .pipeline/scripts/detect.sh && bash .pipeline/scripts/common/branch-policy.sh',
+        returnStdout: true
+    ).trim()
+    output.split('\n').each { line ->
+        def parts = line.split('=', 2)
+        if (parts.size() == 2) {
+            env[parts[0].trim()] = parts[1].trim()
+        }
+    }
+    // 專案參數只能收緊中央 policy，不能把 feature/hotfix/PR 的 false
+    // 放寬為 true；避免 branch-controlled Jenkinsfile 取得發布憑證。
+    if (config.containsKey('artifactPublishEnabled') && config.artifactPublishEnabled == false) {
+        env.DO_ARTIFACT_PUBLISH = 'false'
+    }
+    if (config.containsKey('gitTagEnabled') && config.gitTagEnabled == false) {
+        env.DO_GIT_TAG = 'false'
+    }
+    if (config.developGitTagEnabled == false && env.POLICY_NAME == 'develop') {
+        env.DO_GIT_TAG = 'false'
+    }
+    if (leanDevelop) {
+        // Develop proves source integration only. All publishing, scanners that
+        // require release policy, Docker/Harbor/K3D and finalization run once on PROD.
+        env.DO_DEP_SCAN = 'false'
+        env.DO_ARTIFACT_PUBLISH = 'false'
+        env.DO_GIT_TAG = 'false'
+        env.DO_IMAGE_BUILD = 'false'
+        env.DO_IMAGE_SCAN = 'false'
+        env.DO_IMAGE_PUSH = 'false'
+        env.DO_K3S_VERIFY = 'false'
+        env.DO_RUNTIME_DEPLOY = 'false'
+        env.DO_PROD_DEPLOY = 'false'
+        env.DO_DOCKER_BUILD = 'false'
+        env.DO_SCAN = 'false'
+        env.DO_PUSH = 'false'
+        env.DO_DEPLOY = 'false'
+        env.DEPLOY_NAMESPACE = ''
+    }
+
+    // shiba 的 PROD release 必須等 strict scan、image 與 k3s verification
+    // 全數通過後才發布 artifact/tag。其他專案預設維持既有時序。
+    if (composeVerification) {
+        env.DO_K3S_VERIFY = 'false'
+        env.DO_DEPLOY = 'false'
+    }
+    if (coordinatorScans) { env.DO_DEP_SCAN = 'false' }
+    env.RELEASE_CANDIDATE_MODE = coordinatorScans ? 'controlled-compose-v2' : 'controlled-candidate-v1'
+    env.DEFER_RELEASE_FINALIZATION = (config.releaseFinalizeAfterVerification == true).toString()
+    def deferThisRelease = env.DEFER_RELEASE_FINALIZATION == 'true' && env.DO_PROD_DEPLOY == 'true'
+    env.DO_ARCHIVE_ARTIFACT_PUBLISH = (env.DO_ARTIFACT_PUBLISH == 'true' && !deferThisRelease).toString()
+    env.DO_ARCHIVE_GIT_TAG = (env.DO_GIT_TAG == 'true' && !deferThisRelease).toString()
+    if (candidateMode) {
+        if (env.LANGUAGE != 'go' || !config.fastContractCommand || !primaryImageEnabled || additionalImages) {
+            error('Controlled candidate requires the complete single Go App contract')
+        }
+        env.DO_ARCHIVE_ARTIFACT_PUBLISH = 'false'
+        env.DO_ARCHIVE_GIT_TAG = 'false'
+    }
+
+    if (env.CHANGE_ID) {
+        def forbidden = [
+            DO_ARTIFACT_PUBLISH: env.DO_ARTIFACT_PUBLISH,
+            DO_GIT_TAG: env.DO_GIT_TAG,
+            DO_IMAGE_BUILD: env.DO_IMAGE_BUILD,
+            DO_IMAGE_PUSH: env.DO_IMAGE_PUSH,
+            DO_K3S_VERIFY: env.DO_K3S_VERIFY,
+            DO_RUNTIME_DEPLOY: env.DO_RUNTIME_DEPLOY,
+            DO_PROD_DEPLOY: env.DO_PROD_DEPLOY,
+        ].findAll { key, value -> value == 'true' }
+        if (forbidden) {
+            error("PR policy invariant violated: ${forbidden.keySet().join(', ')}")
+        }
+    }
+
+    // k3d 是跨專案共用的驗證池：每個 build 自動建立隔離 namespace，
+    // Service 在套用前統一轉為 ClusterIP，再由 kubectl port-forward 驗證。
+    // 因此不再要求各專案保留固定 NodePort，也不會發生跨專案撞 port。
+    if (env.DO_DEPLOY == 'true') {
+        // Detect 階段尚未載入 Archive 的 build.env，APP_NAME 不一定存在；
+        // JOB_NAME 含 multibranch project/branch，可提供跨專案唯一性。
+        def appSlug = (env.JOB_NAME ?: env.JOB_BASE_NAME ?: 'app').toLowerCase()
+            .replaceAll('[^a-z0-9-]+', '-')
+            .replaceAll('^-+|-+$', '')
+        def buildSlug = (env.BUILD_NUMBER ?: '0').replaceAll('[^0-9]+', '') ?: '0'
+        def shaSlug = (env.GIT_COMMIT ?: 'unknown').take(7).toLowerCase()
+            .replaceAll('[^a-z0-9]+', '')
+        def suffix = "-${buildSlug}-${shaSlug}"
+        def prefix = "ci-${env.DEPLOY_NAMESPACE}-"
+        def appLimit = Math.max(1, 63 - prefix.length() - suffix.length())
+        env.CI_VERIFY_NAMESPACE = "${prefix}${appSlug.take(appLimit)}${suffix}"
+        env.DEPLOY_ENV = env.DEPLOY_NAMESPACE
+        env.NODE_PORT = ''
+        if (config.containsKey('devNodePort') || config.containsKey('prodNodePort') || config.containsKey('deployTeardown')) {
+            echo '[detect] devNodePort/prodNodePort/deployTeardown 已棄用；共用 K3D 驗證池改用 ClusterIP 與 finally 回收。'
+        }
+    }
+
+    env.ADDITIONAL_IMAGES = additionalImagesSpec
+    if (env.ADDITIONAL_IMAGES) {
+        echo "[detect] Additional images: ${env.ADDITIONAL_IMAGES}"
+    }
+
+    // Pipeline verification 一律使用 ci-* 臨時 namespace，finally 會整個回收；
+    // 既有 dev/prod 常駐 namespace 不在回收範圍，故不再需要專案 opt-in。
+    env.DEPLOY_TEARDOWN = 'true'
+    if (appCapacityBuilder && !leanDevelop) {
+        env.CI_BUILDX_BUILDER = 'shiba-app-ci'
+        env.CI_BUILDX_PLATFORM = 'linux/arm64'
+        // The existing Docker agent cache volume survives agent
+        // replacement; builder metadata must use the same path.
+        env.BUILDX_CONFIG = '/home/jenkins/.cache/shiba-app-buildx'
+    }
+
+    // 人工確認閘的專案級覆蓋（deployInputGate: false 可關掉 prod 那道 input）。
+    // 適用情境：pod 部署本身不碰生產（只是驗證閘），真正動生產是管線之外
+    // 的另一道人工步驟——此時管線內的 input 守的是一個不碰生產的步驟，
+    // 只剩「發版時要坐等點按鈕」的摩擦。未宣告即沿用政策表預設（prod=true）。
+    if (config.containsKey('deployInputGate')) {
+        env.DEPLOY_INPUT_GATE = config.deployInputGate.toString()
+    }
+
+    // build tags 依部署環境注入（如 develop→devseed：dev 專屬 admin token）。
+    // 專案未宣告 devBuildTags 即不帶 tag；prod／main 分支一律不帶（編譯期隔離）。
+    if (env.DO_DEPLOY == 'true' && env.DEPLOY_NAMESPACE == 'dev' && config.devBuildTags) {
+        env.GO_BUILD_TAGS = config.devBuildTags.toString()
+    }
+
+    echo "[detect] Language: ${env.LANGUAGE}, BuildTool: ${env.BUILD_TOOL}"
+    echo "[detect] Policy: event=${env.PIPELINE_EVENT}, trust=${env.PIPELINE_TRUST}, package=${env.DO_PACKAGE}, publish=${env.DO_ARTIFACT_PUBLISH}, tag=${env.DO_GIT_TAG}, " +
+         "image=${env.DO_IMAGE_BUILD}/${env.DO_IMAGE_PUSH}, k3s=${env.DO_K3S_VERIFY}, runtime=${env.DO_RUNTIME_DEPLOY}, prod=${env.DO_PROD_DEPLOY}, " +
+         "env=${env.DEPLOY_NAMESPACE}, verify_ns=${env.CI_VERIFY_NAMESPACE ?: '(none)'}, TEST_LEVEL=${env.TEST_LEVEL}, GO_BUILD_TAGS=${env.GO_BUILD_TAGS ?: '(none)'}"
 }

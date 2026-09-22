@@ -1,9 +1,9 @@
 def source = new File(args[0], 'vars/releaseDevRehearsalPipeline.groovy').text
 def runCase = { config, job ->
     def calls = []
-    def binding = new Binding([env: [JOB_NAME: job, BUILD_NUMBER: '1'], currentBuild: [:]])
+    def binding = new Binding([ciPipeline: new Object(), env: [JOB_NAME: job, BUILD_NUMBER: '1'], currentBuild: [:]])
     binding.setVariable('error', { message -> throw new IllegalStateException(message) })
-    ['properties','disableConcurrentBuilds','buildDiscarder','logRotator','writeFile','archiveArtifacts'].each { name ->
+    ['echo','properties','disableConcurrentBuilds','buildDiscarder','logRotator','writeFile','archiveArtifacts'].each { name ->
         binding.setVariable(name, { Object... values -> calls << [name, values.toList()]; [:] })
     }
     ['timeout','node','dir','stage'].each { name ->
@@ -23,7 +23,7 @@ def valid = [enabled: true, libraryRevision: 'a' * 40]
 }
 def calls = runCase(valid,job)
 assert calls.findAll { it[0] == 'node' } == [['node','ci-untrusted']]
-assert calls.findAll { it[0] == 'stage' }.size() == 3
+assert calls.findAll { it[0] == 'stage' }.size() == 4
 assert calls.findAll { it[0] == 'sh' }.size() == 2
 assert !source.contains('withCredentials')
 assert !source.contains('checkout(')

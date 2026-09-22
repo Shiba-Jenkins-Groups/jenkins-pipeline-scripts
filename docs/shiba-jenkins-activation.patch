@@ -1,0 +1,51 @@
+--- config/system/jenkins.yaml
++++ config/system/jenkins.yaml
+@@ -238,6 +238,7 @@
+           [name: 'claude-project',             owner: 'ShibaDev2026', repo: 'claude-project',             includes: 'develop main prod',                    discoverPR: false, scriptPath: 'Jenkinsfile'],
+           [name: 'woof-woof-project',          owner: 'ShibaDev2026', repo: 'woof-woof-project',          includes: 'develop main prod',                    discoverPR: false, scriptPath: 'Jenkinsfile'],
+           [name: 'shiba-go-ditch-api-project', owner: 'ShibaDev2026', repo: 'shiba-go-ditch-api-project', includes: enableUntrustedDiscovery ? 'develop prod feature/* hotfix/* PR-*' : 'develop prod', discoverPR: enableUntrustedDiscovery, scriptPath: 'Jenkinsfile', scmCredentials: 'github-shiba-app-scm-status'],
++          [name: 'shiba-go-ditch-recognition-project', owner: 'ShibaDev2026', repo: 'shiba-go-ditch-recognition-project', includes: 'prod', discoverPR: false, scriptPath: 'Jenkinsfile', sourceId: 'shiba-receipt-recognition-github'],
+       ].each { app ->
+           multibranchPipelineJob(app.name) {
+               // 不用 Groovy GString：JCasC 會先處理 dollar-brace 語法。
+@@ -246,7 +247,7 @@
+                   branchSource {
+                       source {
+                           github {
+-                              id(app.name + '-github')
++                              id(app.sourceId ?: app.name + '-github')
+                               credentialsId(app.scmCredentials ?: 'github-scm-readonly')
+                               configuredByUrl(true)
+                               repositoryUrl('https://github.com/' + app.owner + '/' + app.repo + '.git')
+@@ -314,6 +315,9 @@
+                       numToKeep(-1)
+                   }
+               }
++              if (app.name == 'shiba-go-ditch-recognition-project') {
++                  configure { project -> project.orphanedItemStrategy.pruneDeadBranches[0].value = 'false' }
++              }
+               // 第一階段：週期性 branch indexing 每 4h（webhook 為第二階段，D7）
+               triggers {
+                   periodicFolderTrigger {
+@@ -353,10 +357,10 @@
+           }
+           definition {
+               cps {
+-                  script("""@Library('jenkins-pipeline@9635613c65c5ce4a7f45f6607624a1e4a23c7444') _
++                  script("""@Library('jenkins-pipeline@79d2fc14c64731f1a6b64be9426cd92c35326c35') _
+       autoReleasePipeline(
+           enabled: true,
+-          libraryRevision: '9635613c65c5ce4a7f45f6607624a1e4a23c7444',
++          libraryRevision: '79d2fc14c64731f1a6b64be9426cd92c35326c35',
+           jenkinsApiUrl: 'http://shiba-docker-jenkins-controller-dev:8080',
+           jenkinsReadCredentials: 'shiba-auto-release-jenkins-read',
+           harborApiUrl: 'http://host.docker.internal:9290',
+@@ -393,7 +397,7 @@
+           }
+           definition {
+               cps {
+-                  script("""@Library('jenkins-pipeline@9635613c65c5ce4a7f45f6607624a1e4a23c7444') _
++                  script("""@Library('jenkins-pipeline@79d2fc14c64731f1a6b64be9426cd92c35326c35') _
+       prodDeploymentPipeline(
+           enabled: true,
+           nodeLabel: 'shiba-prod-owner-macos',

@@ -22,6 +22,9 @@ python3 --version
 git --version
 '''
                     }
+                    stage('Compile Delivery Pipeline with Jenkins CPS') {
+                        echo ciPipeline.getClass().name
+                    }
                     stage('Load Pinned Offline Contract Suite') {
                         ['release-gate.py', 'release-evidence.py', 'release-promotion.py',
                          'release-finalization.py', 'release-deploy.py', 'release-candidate.py',
