@@ -36,3 +36,12 @@ Mock tests alone are not reported as live deployment success.
 
 References: [Jenkins Pipeline best practices](https://www.jenkins.io/doc/book/pipeline/pipeline-best-practices/)
 and [Trivy database configuration](https://trivy.dev/docs/dev/configuration/db/).
+
+Activation: executable library revision `0e693bafaf5de4f47b1c2c16e23ecd68ef9e568d`.
+Jenkins contract rehearsal #2 / queue 3882 passed, including real Jenkins CPS
+compilation of ciPipeline and 99 offline contract cases on ci-untrusted.
+The first Recognition attempt (#14) revealed the Jenkins JVM method-size limit;
+initialization was extracted into separate methods before #15 passed in 70 seconds.
+No pipeline gate was disabled to fix compilation. The scoped persistent Job DSL
+changes are in `shiba-jenkins-activation.patch`; applying them does not require
+reconfiguring unrelated products. Recognition DEV is excluded and its history retained.

@@ -32,11 +32,11 @@
            definition {
                cps {
 -                  script("""@Library('jenkins-pipeline@9635613c65c5ce4a7f45f6607624a1e4a23c7444') _
-+                  script("""@Library('jenkins-pipeline@79d2fc14c64731f1a6b64be9426cd92c35326c35') _
++                  script("""@Library('jenkins-pipeline@0e693bafaf5de4f47b1c2c16e23ecd68ef9e568d') _
        autoReleasePipeline(
            enabled: true,
 -          libraryRevision: '9635613c65c5ce4a7f45f6607624a1e4a23c7444',
-+          libraryRevision: '79d2fc14c64731f1a6b64be9426cd92c35326c35',
++          libraryRevision: '0e693bafaf5de4f47b1c2c16e23ecd68ef9e568d',
            jenkinsApiUrl: 'http://shiba-docker-jenkins-controller-dev:8080',
            jenkinsReadCredentials: 'shiba-auto-release-jenkins-read',
            harborApiUrl: 'http://host.docker.internal:9290',
@@ -45,7 +45,7 @@
            definition {
                cps {
 -                  script("""@Library('jenkins-pipeline@9635613c65c5ce4a7f45f6607624a1e4a23c7444') _
-+                  script("""@Library('jenkins-pipeline@79d2fc14c64731f1a6b64be9426cd92c35326c35') _
++                  script("""@Library('jenkins-pipeline@0e693bafaf5de4f47b1c2c16e23ecd68ef9e568d') _
        prodDeploymentPipeline(
            enabled: true,
            nodeLabel: 'shiba-prod-owner-macos',
