@@ -98,6 +98,12 @@ class State:
     def exists(self, source):
         return self.path(source).exists()
 
+    def read(self, source):
+        path = self.path(source)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as stream:
+            return json.load(stream)
+
     def write(self, source, value):
         fd, temp = tempfile.mkstemp(prefix="release-", suffix=".tmp", dir=self.root)
         try:
@@ -131,8 +137,56 @@ def heads(source):
     return values["refs/heads/develop"], values["refs/heads/prod"]
 
 
+def existing_promotion(source, state, evidence, policy, root, receipt_key, now, approval=None, approval_key=None,
+                       expected_remote=REMOTE):
+    """Reuse only a completed, signed promotion after revalidating all live identities."""
+    gate.evaluate(evidence, policy, root, now, approval, approval_key)
+    require(evidence["gate"] == "promotion", "not promotion evidence")
+    require(git(source, "remote", "get-url", "origin") == expected_remote, "wrong Git remote")
+    require(not git(source, "status", "--porcelain"), "promotion workspace is dirty")
+    commit = evidence["commit"]
+    require(git(source, "rev-parse", "HEAD") == commit, "promotion checkout mismatch")
+    with state.lock():
+        require(state.exists(commit), "no existing release claim to resume")
+        signed = state.read(commit)
+        receipt = verify(signed, receipt_key)
+        require(receipt.get("schema_version") == 1 and receipt.get("kind") == "promotion"
+                and receipt.get("product") == gate.PRODUCT and receipt.get("status") == "MERGED",
+                "existing promotion is not safely resumable")
+        require(receipt.get("source_commit") == commit
+                and receipt.get("develop_job") == evidence["job"]
+                and receipt.get("version") == evidence["version"],
+                "existing promotion does not match recovered candidate")
+        require(isinstance(receipt.get("develop_build"), int)
+                and receipt["develop_build"] <= evidence["build"],
+                "recovery evidence predates existing promotion")
+        if evidence.get('mode') == 'lean-develop-success-v1':
+            require(receipt.get('develop_image_digest') is None,
+                    'lean promotion unexpectedly claims a develop image digest')
+        else:
+            require(isinstance(receipt.get("develop_image_digest"), str)
+                    and gate.DIGEST.fullmatch(receipt["develop_image_digest"]),
+                    "invalid original promotion image digest")
+        merge = receipt.get("merge_commit", "")
+        previous = receipt.get("previous_prod_commit", "")
+        require(gate.SHA.fullmatch(merge) and gate.SHA.fullmatch(previous), "invalid existing promotion identity")
+        develop, prod = heads(source)
+        require(develop == commit, "develop candidate superseded")
+        require(prod == merge, "PROD moved after existing promotion")
+        git(source, "fetch", "--no-tags", "origin", "refs/heads/prod")
+        require(git(source, "rev-parse", "FETCH_HEAD") == merge, "PROD changed during recovery")
+        require(git(source, "rev-list", "--parents", "-n", "1", merge).split() == [merge, previous, commit],
+                "existing promotion merge parents do not match receipt")
+        require(git(source, "show", merge + ":VERSION") == evidence["version"],
+                "existing promotion version mismatch")
+        require(not git(source, "ls-remote", "--tags", "origin", "refs/tags/v" + evidence["version"],
+                        "refs/tags/v" + evidence["version"] + "^{}"),
+                "release already finalized; deployment recovery requires receipt review")
+        return signed
+
+
 def promote(source, state, evidence, policy, root, receipt_key, now, approval=None, approval_key=None,
-            expected_remote=REMOTE):
+            expected_remote=REMOTE, recover=False):
     # expected_remote is injectable only for offline tests; CLI always fixes it.
     decision = gate.evaluate(evidence, policy, root, now, approval, approval_key)
     require(evidence["gate"] == "promotion", "not promotion evidence")
@@ -140,6 +194,9 @@ def promote(source, state, evidence, policy, root, receipt_key, now, approval=No
     require(not git(source, "status", "--porcelain"), "promotion workspace is dirty")
     commit = evidence["commit"]
     require(git(source, "rev-parse", "HEAD") == commit, "promotion checkout mismatch")
+    if recover and state.exists(commit):
+        return existing_promotion(source, state, evidence, policy, root, receipt_key, now,
+                                  approval, approval_key, expected_remote)
     with state.lock():
         require(not state.exists(commit), "release already claimed; reconcile existing receipt")
         develop, prod = heads(source)
@@ -151,7 +208,7 @@ def promote(source, state, evidence, policy, root, receipt_key, now, approval=No
         record = {"schema_version": 1, "kind": "promotion", "product": gate.PRODUCT,
                   "source_commit": commit, "previous_prod_commit": prod,
                   "develop_job": evidence["job"], "develop_build": evidence["build"],
-                  "develop_image_digest": evidence["image_digest"], "decision": decision,
+                  "develop_image_digest": evidence.get("image_digest"), "decision": decision,
                   "library_revision": policy.get("library_revision"),
                   "policy_sha256": hashlib.sha256(gate.canonical(policy)).hexdigest(),
                   "evidence_sha256": hashlib.sha256(gate.canonical(evidence)).hexdigest(),
@@ -188,7 +245,7 @@ def deploy_handoff(promotion, key, evidence, policy, root, now, approval=None, a
     require(evidence["immutable_image"] == f"localhost:9290/{gate.PRODUCT}/prod/{evidence['version']}@{evidence['image_digest']}",
             "unexpected deployment image repository")
     decision = gate.evaluate(evidence, policy, root, now, approval, approval_key)
-    require(evidence.get('mode') == 'controlled-candidate-v1' and finalization is not None, 'missing controlled finalization receipt')
+    require(evidence.get('mode') in gate.CANDIDATE_MODES and finalization is not None, 'missing controlled finalization receipt')
     finalized = verify(finalization, key)
     require(finalized.get('kind') == 'finalization' and finalized.get('status') == 'SUCCESS'
             and finalized.get('product') == gate.PRODUCT and finalized.get('commit') == evidence['commit']
@@ -209,7 +266,7 @@ def deploy_handoff(promotion, key, evidence, policy, root, now, approval=None, a
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["review", "approve", "promote", "handoff"])
+    parser.add_argument("command", choices=["review", "approve", "promote", "recover", "handoff"])
     parser.add_argument("--evidence", type=Path, required=True)
     parser.add_argument("--policy", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -232,9 +289,9 @@ def main():
             result = review(evidence, policy, root, now)
         elif args.command == "approve":
             result = approve(evidence, policy, root, json.loads(args.identity.read_bytes()), approval_key, now)
-        elif args.command == "promote":
+        elif args.command in ("promote", "recover"):
             result = promote(args.source, State(args.state_directory), evidence, policy, root, receipt_key, now,
-                             approval, approval_key)
+                             approval, approval_key, recover=args.command == "recover")
         else:
             result = deploy_handoff(json.loads(args.promotion.read_bytes()), receipt_key, evidence, policy, root,
                                     now, approval, approval_key,

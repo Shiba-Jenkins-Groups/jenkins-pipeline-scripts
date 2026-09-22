@@ -49,11 +49,40 @@ class Controls(unittest.TestCase):
                  f"IMAGE_REF=localhost:9290/{adapter.gate.PRODUCT}/{branch}/1.0.32:188\nIMAGE_DIGEST={self.fixture.digest}\n")
         return built, workflow, image
 
+    def lean_inputs(self):
+        built, _, _ = self.build_inputs('develop')
+        stages = ([{"name": name, "status": "SUCCESS"} for name in adapter.LEAN_STAGES]
+                  + [{"name": name, "status": "NOT_EXECUTED"} for name in adapter.LEAN_SKIPPED]
+                  + [{"name": "Prepare（準備）", "status": "SUCCESS"},
+                     {"name": "Continuous Integration（持續整合）", "status": "SUCCESS"},
+                     {"name": "Continuous Delivery（持續交付）", "status": "NOT_EXECUTED"}])
+        return built, {"id": "188", "status": "SUCCESS", "stages": stages}
+
     def test_real_shape_selects_product_commit_not_library(self):
         evidence = adapter.completed_build(*self.build_inputs(), "develop", 188)
         self.assertEqual(evidence["commit"], "b" * 40)
         self.assertTrue(evidence["post_complete"])
         self.assertTrue(evidence["immutable_image"].endswith("@" + self.fixture.digest))
+
+    def test_lean_develop_requires_success_and_proves_skipped_release_work(self):
+        built, workflow = self.lean_inputs()
+        evidence = adapter.completed_build(built, workflow, None, 'develop', 188, lean=True)
+        self.assertEqual(evidence['mode'], 'lean-develop-success-v1')
+        self.assertNotIn('image_digest', evidence)
+        workflow['stages'][len(adapter.LEAN_STAGES)]['status'] = 'SUCCESS'
+        with self.assertRaisesRegex(ValueError, 'unexpectedly executed'):
+            adapter.completed_build(built, workflow, None, 'develop', 188, lean=True)
+
+    def test_lean_source_binding_uses_exact_clean_checkout_version(self):
+        built, workflow = self.lean_inputs()
+        identity = adapter.completed_build(built, workflow, None, 'develop', 188, lean=True)
+        source, output = self.root / 'lean-source', self.root / 'lean-evidence'
+        source.mkdir()
+        (source / 'VERSION').write_text('1.0.60\n')
+        with patch.object(adapter, 'run', side_effect=[identity['commit'], '']):
+            evidence = adapter.bind_source(identity, source, output)
+        self.assertEqual(evidence['version'], '1.0.60')
+        self.assertEqual(json.loads((output / 'evidence.json').read_bytes()), evidence)
 
     def test_post_failure_or_absence_blocks(self):
         for missing in [False, True]:
@@ -180,6 +209,10 @@ class Controls(unittest.TestCase):
         return promotion.promote(source, state, self.evidence, self.policy, self.root, self.key, self.now,
                                  expected_remote=str(remote))
 
+    def recover(self, source, remote, state):
+        return promotion.promote(source, state, self.evidence, self.policy, self.root, self.key, self.now,
+                                 expected_remote=str(remote), recover=True)
+
     def test_exact_merge_persists_receipt_and_duplicate_is_rejected(self):
         cmd, source, remote, old, state = self.setup_git()
         receipt = self.promote(source, remote, state)
@@ -191,6 +224,78 @@ class Controls(unittest.TestCase):
         cmd('checkout', '--detach', self.evidence['commit'], cwd=source)
         with self.assertRaisesRegex(ValueError, 'already claimed'):
             self.promote(source, remote, state)
+
+    def test_lean_success_promotes_without_a_develop_image_claim(self):
+        cmd, source, remote, old, state = self.setup_git()
+        self.policy.update(develop_mode='lean-success-v1')
+        self.policy['required_stages']['promotion'] = adapter.LEAN_STAGES
+        self.evidence.update(mode='lean-develop-success-v1', reports=[],
+                             stages=[{'name': name, 'result': 'SUCCESS'} for name in adapter.LEAN_STAGES])
+        self.evidence.pop('image_digest')
+        receipt = self.promote(source, remote, state)
+        self.assertIsNone(promotion.verify(receipt, self.key)['develop_image_digest'])
+
+    def test_recovery_reuses_signed_merged_receipt_without_another_push(self):
+        cmd, source, remote, old, state = self.setup_git()
+        receipt = self.promote(source, remote, state)
+        cmd('checkout', '--detach', self.evidence['commit'], cwd=source)
+        with patch.object(promotion, 'git', wraps=promotion.git) as git_call:
+            recovered = self.recover(source, remote, state)
+        self.assertEqual(recovered, receipt)
+        self.assertFalse(any(call.args[1] == 'push' for call in git_call.call_args_list))
+        self.assertEqual(promotion.heads(source)[1], promotion.verify(receipt, self.key)['merge_commit'])
+
+        # A newer eligible build is required once the original build evidence
+        # expires. It may have a different non-reproducible develop image, but
+        # must revalidate the exact same source commit and version.
+        self.evidence['build'] += 1
+        new_digest = 'sha256:' + 'e' * 64
+        self.evidence['image_digest'] = new_digest
+        self.fixture.digest = new_digest
+        self.fixture.native['trivy']['Metadata']['RepoDigests'] = ['registry/app@' + new_digest]
+        self.fixture.native['harbor']['artifact']['digest'] = new_digest
+        self.fixture.write_reports()
+        self.assertEqual(self.recover(source, remote, state), receipt)
+
+    def test_recovery_rejects_tampered_or_incomplete_claim(self):
+        cmd, source, remote, old, state = self.setup_git()
+        receipt = self.promote(source, remote, state)
+        cmd('checkout', '--detach', self.evidence['commit'], cwd=source)
+        saved = json.loads(state.path(self.evidence['commit']).read_bytes())
+        saved['signature'] = '0' * 64
+        state.path(self.evidence['commit']).write_text(json.dumps(saved))
+        with self.assertRaisesRegex(ValueError, 'signature'):
+            self.recover(source, remote, state)
+        receipt['payload']['status'] = 'PUSHING'
+        state.write(self.evidence['commit'], promotion.sign(receipt['payload'], self.key))
+        with self.assertRaisesRegex(ValueError, 'not safely resumable'):
+            self.recover(source, remote, state)
+
+        receipt['payload']['status'] = 'MERGED'
+        receipt['payload']['develop_build'] = self.evidence['build'] + 1
+        state.write(self.evidence['commit'], promotion.sign(receipt['payload'], self.key))
+        with self.assertRaisesRegex(ValueError, 'predates existing promotion'):
+            self.recover(source, remote, state)
+
+    def test_recovery_rejects_moved_prod_or_existing_tag(self):
+        cmd, source, remote, old, state = self.setup_git()
+        receipt = self.promote(source, remote, state)
+        merge = promotion.verify(receipt, self.key)['merge_commit']
+        cmd('checkout', '--detach', self.evidence['commit'], cwd=source)
+        cmd('tag', 'v1.0.32', merge, cwd=source)
+        cmd('push', '-q', 'origin', 'refs/tags/v1.0.32', cwd=source)
+        with self.assertRaisesRegex(ValueError, 'already finalized'):
+            self.recover(source, remote, state)
+
+        cmd('push', '-q', 'origin', ':refs/tags/v1.0.32', cwd=source)
+        cmd('checkout', '--detach', merge, cwd=source)
+        (source / 'after.txt').write_text('moved\n')
+        cmd('add', '.', cwd=source)
+        cmd('commit', '-qm', 'move prod', cwd=source)
+        cmd('push', '-q', 'origin', 'HEAD:prod', cwd=source)
+        cmd('checkout', '--detach', self.evidence['commit'], cwd=source)
+        with self.assertRaisesRegex(ValueError, 'PROD moved'):
+            self.recover(source, remote, state)
 
     def test_failed_gate_never_pushes_or_claims(self):
         cmd, source, remote, old, state = self.setup_git()

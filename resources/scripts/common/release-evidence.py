@@ -27,11 +27,16 @@ def module(name, filename):
 gate = module("release_gate", "release-gate.py")
 require = gate.require
 RELEASE_FOLDER = "shiba-release-automation"
-STAGES = ["Checkout", "Load Scripts", "Detect", "Secret Scan", "Build", "Test",
+STAGES = ["Checkout", "Load Scripts", "Detect", "Early Capacity Admission", "Secret Scan", "Build", "Test",
           "Fast Contract Test", "Dependency Scan", "Package / Publish / Tag", "Docker Build",
           "Image Scan", "Harbor Push", "Harbor Vulnerability Report", "Smoke Test",
           "Deployment Verification — k3s", "Declarative: Post Actions"]
 FINALIZE = "Release Finalization — Artifact / Git Tag"
+LEAN_STAGES = ["Checkout", "Load Scripts", "Detect", "Secret Scan", "Build", "Test",
+               "Package / Publish / Tag", "Declarative: Post Actions"]
+LEAN_SKIPPED = ["Runtime Image Verification", "Early Capacity Admission", "Fast Contract Test", "Dependency Scan",
+                "Docker Build", "Image Scan", "Harbor Push", "Harbor Vulnerability Report",
+                "Smoke Test", "Deployment Verification — k3s", FINALIZE]
 PACKAGE_GRAPHS = [
     {"name": "linux-arm64-nodynamic-tests", "tags": "nodynamic", "test": True, "target": "./..."},
     {"name": "linux-arm64-devseed-nodynamic-tests", "tags": "devseed,nodynamic", "test": True, "target": "./..."},
@@ -62,8 +67,9 @@ def key_values(raw):
     return values
 
 
-def completed_build(build, workflow, image_text, branch, number, release_text=None, candidate=None):
+def completed_build(build, workflow, image_text, branch, number, release_text=None, candidate=None, lean=False):
     require(branch in {"develop", "prod"}, "unsupported branch")
+    require(not lean or branch == "develop" and candidate is None, "lean evidence is develop-only")
     require(type(number) is int and number > 0 and build.get("number") == number, "wrong build")
     results = {'SUCCESS', 'UNSTABLE'} if candidate is not None else {'SUCCESS'}
     require(build.get("building") is False and build.get("result") in results, "build not complete or eligible")
@@ -77,8 +83,29 @@ def completed_build(build, workflow, image_text, branch, number, release_text=No
     require(gate.SHA.fullmatch(commit), "invalid product checkout SHA")
     require(not any(action.get("parameters") and any(p.get("name") == "CHANGE_ID" and p.get("value")
                 for p in action["parameters"]) for action in build.get("actions", [])), "PR build rejected")
+    compose = candidate is not None and candidate.get('mode') == 'controlled-compose-v2'
+    require(not compose or branch == 'prod', 'Compose candidate is PROD-only')
+    compose_skipped = {'Dependency Scan', 'Image Scan', 'Harbor Vulnerability Report',
+                       'Smoke Test', 'Deployment Verification — k3s'}
     stages = []
     for stage in workflow.get("stages", []):
+        if not lean and (compose and stage['name'] in compose_skipped or not compose and stage['name'] == 'Runtime Image Verification'):
+            require(stage['status'] == 'NOT_EXECUTED', 'unexpected verification/scan lane execution')
+            continue
+        if lean:
+            if stage['name'] in LEAN_SKIPPED:
+                require(stage['status'] == 'NOT_EXECUTED', 'lean stage unexpectedly executed: ' + stage['name'])
+                continue
+            if stage['name'] in {'Prepare（準備）', 'Continuous Integration（持續整合）'}:
+                require(stage['status'] == 'SUCCESS', 'failed lean parent stage')
+                continue
+            if stage['name'] == 'Continuous Delivery（持續交付）':
+                require(stage['status'] in {'SUCCESS', 'NOT_EXECUTED'}, 'failed lean delivery parent stage')
+                continue
+            require(stage['name'] in LEAN_STAGES and stage['status'] == 'SUCCESS',
+                    'unexpected or non-success lean stage: ' + stage['name'])
+            stages.append({"name": stage["name"], "result": stage["status"]})
+            continue
         if candidate is not None and stage['name'] == 'Develop Image Verification':
             require(stage['status'] == 'NOT_EXECUTED', 'lean image lane is incompatible with controlled candidates')
             continue  # Full Image Scan and Smoke Test remain mandatory below.
@@ -90,7 +117,7 @@ def completed_build(build, workflow, image_text, branch, number, release_text=No
         require(stage['status'] == 'SUCCESS' or candidate is not None and stage['name'] in gate.WAIVABLE_STAGES and stage['status'] == 'UNSTABLE',
                 'non-success stage: ' + stage['name'])
         stages.append({"name": stage["name"], "result": stage["status"]})
-    expected = STAGES + ([FINALIZE] if branch == "prod" and candidate is None else [])
+    expected = LEAN_STAGES if lean else (gate.COMPOSE_STAGES if compose else STAGES) + ([FINALIZE] if branch == "prod" and candidate is None else [])
     require(candidate is None or FINALIZE not in {s['name'] for s in stages}, 'candidate finalized before release approval')
     require(set(expected).issubset({s["name"] for s in stages}), "required CI stage missing")
     require(len(stages) == len({s["name"] for s in stages}), "duplicate CI stage")
@@ -100,6 +127,13 @@ def completed_build(build, workflow, image_text, branch, number, release_text=No
         for parent in workflow['stages']:
             if parent['name'] in groups and parent['status'] == 'UNSTABLE':
                 require(any(s['name'] in groups[parent['name']] and s['result'] == 'UNSTABLE' for s in stages), 'unexplained parent stage result')
+    finished = dt.datetime.fromtimestamp((build["timestamp"] + build["duration"]) / 1000, dt.timezone.utc)
+    if lean:
+        return {"schema_version": 1, "product": gate.PRODUCT, "mode": "lean-develop-success-v1",
+                "gate": "promotion", "branch": branch, "event": "branch", "trusted": True,
+                "job": gate.PRODUCT + "/develop", "build": number, "commit": commit,
+                "building": False, "post_complete": True, "result": "SUCCESS",
+                "completed_at": finished.isoformat(), "stages": stages, "reports": []}
     image = key_values(image_text)
     require(image.get("APP_NAME") == gate.PRODUCT and image.get("BRANCH") == branch,
             "artifact product or branch mismatch")
@@ -115,7 +149,6 @@ def completed_build(build, workflow, image_text, branch, number, release_text=No
                 and release.get("IMAGE_REF") == ref and release.get("IMAGE_DIGEST") == image["IMAGE_DIGEST"],
                 "release finalization receipt mismatch")
         require(release.get("NEXUS_ARTIFACT_URL", "").startswith("http"), "missing release artifact")
-    finished = dt.datetime.fromtimestamp((build["timestamp"] + build["duration"]) / 1000, dt.timezone.utc)
     result = {"schema_version": 1, "product": gate.PRODUCT,
             "gate": "promotion" if branch == "develop" else "deployment", "branch": branch,
             "event": "branch", "trusted": True, "job": gate.PRODUCT + "/" + branch,
@@ -124,7 +157,7 @@ def completed_build(build, workflow, image_text, branch, number, release_text=No
             "building": False, "post_complete": True, "result": build['result'],
             "completed_at": finished.isoformat(), "stages": stages, "reports": []}
     if candidate is not None:
-        require(candidate.get('schema_version') == 1 and candidate.get('mode') == 'controlled-candidate-v1', 'missing candidate contract')
+        require(candidate.get('schema_version') == 1 and candidate.get('mode') in gate.CANDIDATE_MODES, 'missing candidate contract')
         for key in ['product', 'commit', 'job', 'build', 'branch', 'version']:
             require(candidate[key] == result[key], 'candidate identity mismatch')
         result.update(mode=candidate['mode'], stage_checks=candidate['stage_checks'], artifact=candidate['artifact'], artifact_name=candidate['artifact_name'])
@@ -146,15 +179,16 @@ def jenkins_get(base, suffix):
         return response.read()
 
 
-def inspect(base, branch, number, candidate_root=None):
+def inspect(base, branch, number, candidate_root=None, lean=False):
     require(branch in {"develop", "prod"} and number > 0, "invalid build coordinate")
+    require(not lean or branch == 'develop' and candidate_root is None, 'lean inspection is develop-only')
     prefix = f"/job/{gate.PRODUCT}/job/{branch}/{number}/"
     build = json.loads(jenkins_get(base, prefix + "api/json"))
     workflow = json.loads(jenkins_get(base, prefix + "wfapi/describe"))
-    image = jenkins_get(base, prefix + "artifact/image-ref.txt").decode()
+    image = None if lean else jenkins_get(base, prefix + "artifact/image-ref.txt").decode()
     release = jenkins_get(base, prefix + "artifact/.pipeline/release-manifest.env").decode() if branch == "prod" and candidate_root is None else None
     candidate = json.loads(jenkins_get(base, prefix + 'artifact/.pipeline/candidate.json')) if candidate_root is not None else None
-    result = completed_build(build, workflow, image, branch, number, release, candidate)
+    result = completed_build(build, workflow, image, branch, number, release, candidate, lean)
     if candidate is not None:
         def fetch(record):
             path = Path(record['path'])
@@ -171,6 +205,22 @@ def inspect(base, branch, number, candidate_root=None):
             value = json.loads(fetch(record))
             for report in value['reports']: fetch(report)
     return result
+
+
+def bind_source(identity, source, root):
+    require(identity.get('mode') == 'lean-develop-success-v1' and identity.get('gate') == 'promotion',
+            'source binding requires lean develop evidence')
+    env = {k: v for k, v in os.environ.items() if k not in {'GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE'}}
+    require(run(['git', 'rev-parse', 'HEAD'], source, env).strip() == identity['commit'],
+            'develop source checkout mismatch')
+    require(not run(['git', 'status', '--porcelain', '--untracked-files=all'], source, env).strip(),
+            'develop source checkout must be clean')
+    version = (source / 'VERSION').read_text().strip()
+    require(re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version), 'invalid release version')
+    evidence = dict(identity, version=version)
+    root.mkdir(parents=True, exist_ok=True)
+    save(root, 'evidence.json', evidence)
+    return evidence
 
 
 def prod_routing(xml):
@@ -237,10 +287,11 @@ def scan(evidence, source, root, harbor_url):
     require(actual == evidence["commit"], "scanner checkout mismatch")
     require(not run(["git", "status", "--porcelain", "--untracked-files=all"], source, env).strip(),
             "scanner checkout must be clean")
-    if evidence.get('mode') == 'controlled-candidate-v1':
+    if evidence.get('mode') in gate.CANDIDATE_MODES:
         candidate_image(evidence, json.loads(run(['docker', 'image', 'inspect', evidence['immutable_image']], source, env)))
     root.mkdir(parents=True, exist_ok=True)
-    cache = root / "trivy-cache"
+    # Reuse the trusted agent cache; Trivy still checks freshness on every scan.
+    cache = Path.home() / ".cache/shiba-release-trivy"
     raw_trivy = run(["trivy", "--cache-dir", str(cache), "--config", "/dev/null", "image",
                      "--image-src", "docker", "--scanners", "vuln", "--format", "json", "--exit-code", "0",
                      "--severity", ",".join(sorted(gate.SEVERITIES)), "--ignorefile", "/dev/null",
@@ -316,6 +367,11 @@ def main():
     read.add_argument("--build", type=int, required=True)
     read.add_argument("--output", type=Path, required=True)
     read.add_argument('--candidate-root', type=Path)
+    read.add_argument('--lean-develop', action='store_true')
+    bind = commands.add_parser('bind-source')
+    bind.add_argument('--identity', type=Path, required=True)
+    bind.add_argument('--source', type=Path, required=True)
+    bind.add_argument('--output', type=Path, required=True)
     routing = commands.add_parser("check-routing")
     routing.add_argument("--jenkins-url", required=True)
     routing.add_argument("--deployment-label", required=True)
@@ -331,7 +387,10 @@ def main():
             runtime_ready(json.loads(jenkins_get(args.jenkins_url, f"/job/{RELEASE_FOLDER}/job/{gate.PRODUCT}-prod-deploy/api/json")),
                           json.loads(jenkins_get(args.jenkins_url, "/computer/api/json?depth=1")), args.deployment_label)
         elif args.command == "inspect":
-            args.output.write_bytes(gate.canonical(inspect(args.jenkins_url, args.branch, args.build, args.candidate_root)))
+            args.output.write_bytes(gate.canonical(inspect(args.jenkins_url, args.branch, args.build,
+                                                           args.candidate_root, args.lean_develop)))
+        elif args.command == 'bind-source':
+            bind_source(json.loads(args.identity.read_bytes()), args.source.resolve(), args.output.resolve())
         else:
             scan(json.loads(args.identity.read_bytes()), args.source.resolve(), args.output.resolve(), args.harbor_url)
     except Exception as exc:

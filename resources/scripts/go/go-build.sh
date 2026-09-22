@@ -28,7 +28,7 @@ if [ -n "${GO_BUILD_TAGS:-}" ]; then
 fi
 
 # 先全量編譯驗證（含未進 artifact 的套件，等同 L0 的 go build ./...）
-go build ${TAGS_ARG[@]+"${TAGS_ARG[@]}"} ./...
+go build ${TAGS_ARG[@]+"${TAGS_ARG[@]}"} ${GO_BUILD_PKGS:-./...}
 
 # 產出物：CGO_ENABLED=0 靜態 binary（alpine runtime image 可直接執行）
 # 輸出至 .gobuild/（不污染專案 bin/ 慣例，隨 cleanWs 清理）

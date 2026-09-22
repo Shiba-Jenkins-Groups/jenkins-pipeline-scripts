@@ -3,7 +3,7 @@ def libraryRoot = new File(args ? args[0] : '.').canonicalFile
 def simulate = { boolean enabled, Map options = [:] ->
     def calls = [], stack = []
     def branch = (options.branch ?: 'prod').toString()
-    def environment = [JOB_NAME: "shiba-go-ditch-api-project/${branch}".toString(), BRANCH_NAME: branch, BUILD_NUMBER: '1',
+    def environment = [JOB_NAME: options.job ?: "shiba-go-ditch-api-project/${branch}".toString(), BRANCH_NAME: branch, BUILD_NUMBER: '1',
                        BUILD_URL: 'http://offline/build/1/', GIT_COMMIT: 'b' * 40, CHANGE_ID: null]
     def current = [currentResult: 'SUCCESS', durationString: 'offline']
     def binding = new Binding([env: environment, currentBuild: current, scm: [:]])
@@ -59,7 +59,8 @@ def simulate = { boolean enabled, Map options = [:] ->
             releaseFinalizeAfterVerification: true, fastContractCommand: "echo 'offline contract'", deployInputGate: false,
             dockerPruneEnabled: false, ciCapacityBuilder: options.ciBuilder ?: false,
             developLeanFlow: options.lean ?: false,
-            profile: options.profile ?: 'full'
+            profile: options.profile ?: 'full',
+            runtimeVerification: options.compose ? 'container' : null, scanAuthority: options.compose && enabled ? 'coordinator' : null
         ])
     } catch (IllegalStateException expected) {
         failed = true
@@ -108,3 +109,18 @@ for (options in [[testResult: 2], [buildFailure: true], [profile: 'ci-only']]) {
     assert !result.calls.any { it == 'bash .pipeline/scripts/common/release-finalize.sh' }
 }
 println 'PASS: 8 offline candidate/lean-develop/legacy CI flow cases (not Jenkins CPS integration)'
+
+def compose = simulate(true, [compose: true])
+assert !compose.failed
+assert compose.calls.contains('python3 .pipeline/scripts/common/runtime-image-verify.py')
+assert !compose.calls.any { it.contains('cd.sh deploy') || it.contains('smoke-test.sh') || it.contains("--stage 'Dependency Scan'") || it.contains("--stage 'Image Scan'") || it.contains("--stage 'Harbor Vulnerability Report'") }
+assert compose.environment.RELEASE_CANDIDATE_MODE == 'controlled-compose-v2'
+assert compose.environment.DO_K3S_VERIFY == 'false'
+def recognition = simulate(false, [compose: true, job: 'shiba-go-ditch-recognition-project/prod'])
+assert !recognition.failed
+assert recognition.calls.contains('python3 .pipeline/scripts/common/runtime-image-verify.py')
+assert recognition.calls.contains('bash .pipeline/scripts/common/release-finalize.sh')
+assert recognition.calls.any { it.contains('cd.sh image-scan') }
+assert !recognition.calls.any { it.contains('cd.sh deploy') || it.contains('input') }
+assert simulate(true, [compose: true, job: 'unrelated/prod']).failed
+println 'PASS: Compose App/Recognition flows and cross-product denial'

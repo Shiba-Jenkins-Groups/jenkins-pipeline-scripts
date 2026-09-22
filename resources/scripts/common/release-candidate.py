@@ -95,8 +95,12 @@ def manifest(root):
     target = root / '.pipeline/candidate-artifact'
     with target.open('xb') as out:
         out.write(artifact.read_bytes())
-    checks = [record_file(root, root / f'.pipeline/candidate-stages/{slug}.json') for slug in STAGES.values()]
-    result = {'schema_version': 1, 'mode': 'controlled-candidate-v1', 'product': gate.PRODUCT,
+    mode = os.environ.get('RELEASE_CANDIDATE_MODE', 'controlled-candidate-v1')
+    require(mode in gate.CANDIDATE_MODES, 'unsupported candidate mode')
+    require(mode != 'controlled-compose-v2' or metadata['BRANCH'] == 'prod', 'Compose candidate is PROD-only')
+    names = gate.COMPOSE_CHECKS if mode == 'controlled-compose-v2' else STAGES
+    checks = [record_file(root, root / f'.pipeline/candidate-stages/{STAGES[name]}.json') for name in sorted(names)]
+    result = {'schema_version': 1, 'mode': mode, 'product': gate.PRODUCT,
               'commit': os.environ['GIT_COMMIT'], 'job': os.environ['JOB_NAME'],
               'build': int(metadata['BUILD_NUMBER']), 'branch': metadata['BRANCH'], 'version': metadata['APP_VERSION'],
               'stage_checks': checks, 'artifact': record_file(root, target), 'artifact_name': metadata['ARTIFACT_NAME']}

@@ -36,7 +36,7 @@ def published_hash(url):
 
 def finalize(evidence, policy, root, source, state, key, now, approval=None, approval_key=None, output=None):
     decision = gate.evaluate(evidence, policy, root, now, approval, approval_key)
-    require(evidence.get('mode') == 'controlled-candidate-v1' and evidence['gate'] == 'deployment', 'not a revalidated PROD candidate')
+    require(evidence.get('mode') in gate.CANDIDATE_MODES and evidence['gate'] == 'deployment', 'not a revalidated PROD candidate')
     artifact = gate.verified_bytes(root, evidence['artifact'])
     require(evidence['artifact_name'] == f"{gate.PRODUCT}-prod-{evidence['version']}", 'unexpected release artifact name')
     require(control.git(source, 'remote', 'get-url', 'origin') == control.REMOTE, 'finalization remote mismatch')

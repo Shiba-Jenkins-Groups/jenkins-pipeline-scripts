@@ -2,8 +2,10 @@
 """Offline deployment contracts; Docker, network and source execution are fakes."""
 import copy
 import datetime as dt
+import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import tempfile
 import types
@@ -160,7 +162,7 @@ class Deployment(unittest.TestCase):
         patches = [patch.object(runner.sys, 'platform', 'darwin'), patch.object(runner.control, 'git', side_effect=git),
             patch.object(runner.control, 'heads', return_value=('a' * 40, head or self.commit)),
             patch.object(runner, 'run', return_value='fake-engine'), patch.object(runner, 'containers', return_value=[self.container]),
-            patch.object(runner, 'no_host_writer'), patch.object(runner, 'image_identity', return_value=self.container['Image']),
+            patch.object(runner, 'no_host_writer'), patch.object(runner, 'image_identity', return_value=self.image['Id']),
             patch.object(runner, 'final_identity', return_value={'commit': self.commit, 'digest': self.digest}),
             patch.object(runner.subprocess, 'run', return_value=types.SimpleNamespace(returncode=rc))]
         mocks = [p.start() for p in patches]
@@ -201,6 +203,240 @@ class Deployment(unittest.TestCase):
             self.execute()
         process.assert_not_called()
         self.assertFalse(list((self.root / 'state').glob('*.json')))
+
+    def recovery_fixture(self):
+        self.original_request = self.signed()
+        self.container['Id'] = '1' * 64
+        self.container['Image'] = 'sha256:' + '2' * 64
+        self.image['Id'] = 'sha256:' + '3' * 64
+        failed = {'schema_version': 1, 'kind': 'runtime-deployment', 'product': self.product,
+            'status': 'FAILED', 'request_sha256': hashlib.sha256(runner.gate.canonical(self.original_request)).hexdigest(),
+            'commit': self.commit, 'version': self.request['version'], 'digest': self.digest,
+            'previous_container_id': self.container['Id'], 'previous_image_id': self.container['Image'],
+            'automatic_rollback': False, 'mutation_may_have_started': True,
+            'new_backup_and_migration_files': []}
+        signed = runner.control.sign(failed, self.key)
+        self.request['recovery'] = {'kind': 'failed-deployment-retry', 'attempt_id': '12345678-1234-4abc-8abc-123456789abc', 'coordinator_build': 54,
+            'owner_build': 18, 'authorized_by': 'offline-explicit-owner-authorization', 'failed_receipt': signed}
+        runner.control.State(self.root / 'state').write(self.commit, signed)
+        return signed
+
+    def archive_path(self, signed):
+        digest = hashlib.sha256(runner.gate.canonical(signed)).hexdigest()
+        return self.root / 'state/attempts' / f'{self.commit}-{digest}.json'
+
+    def test_recovery_preserves_original_before_claim_and_runs_exactly_once_under_both_locks(self):
+        failed = self.recovery_fixture()
+        process = self.execution_patches()
+        archive = self.archive_path(failed)
+        state = runner.control.State(self.root / 'state')
+        def deploy(*args, **kwargs):
+            self.assertEqual(archive.read_bytes(), runner.gate.canonical(failed))
+            self.assertEqual(archive.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(archive.parent.stat().st_mode & 0o777, 0o700)
+            claim = runner.control.verify(state.read(self.commit), self.key)
+            self.assertEqual(claim['status'], 'CLAIMED')
+            self.assertEqual(claim['recovery'], self.request['recovery'])
+            self.assertEqual(claim['failed_receipt_sha256'], hashlib.sha256(archive.read_bytes()).hexdigest())
+            self.assertEqual(claim['request_sha256'], hashlib.sha256(runner.gate.canonical(self.signed())).hexdigest())
+            self.assertNotEqual(claim['request_sha256'], failed['payload']['request_sha256'])
+            for path in (self.root / 'data/locks/prod.lock', self.root / 'state/promotion.lock'):
+                fd = os.open(path, os.O_RDWR)
+                try:
+                    with self.assertRaises(BlockingIOError):
+                        runner.fcntl.flock(fd, runner.fcntl.LOCK_EX | runner.fcntl.LOCK_NB)
+                finally:
+                    os.close(fd)
+            return types.SimpleNamespace(returncode=0)
+        process.side_effect = deploy
+        receipt = self.execute()
+        result = runner.control.verify(receipt, self.key)
+        self.assertEqual(result['status'], 'SUCCESS')
+        self.assertEqual(result['recovery']['failed_receipt'], failed)
+        self.assertEqual(state.read(self.commit), receipt)
+        self.assertEqual(archive.read_bytes(), runner.gate.canonical(failed))
+        with self.assertRaisesRegex(ValueError, 'state changed'):
+            self.execute('replay.json')
+        self.assertEqual(process.call_count, 1)
+        self.request.pop('recovery')
+        with self.assertRaisesRegex(ValueError, 'already claimed'):
+            self.execute('original-replay.json')
+        self.assertEqual(process.call_count, 1)
+
+    def test_recovery_new_failure_preserves_original_and_blocks_all_automatic_replay(self):
+        failed = self.recovery_fixture()
+        process = self.execution_patches(rc=1)
+        with self.assertRaisesRegex(ValueError, 'no automatic rollback'):
+            self.execute()
+        new = runner.control.State(self.root / 'state').read(self.commit)
+        payload = runner.control.verify(new, self.key)
+        self.assertEqual(payload['status'], 'FAILED')
+        self.assertEqual(payload['recovery']['failed_receipt'], failed)
+        self.assertEqual(self.archive_path(failed).read_bytes(), runner.gate.canonical(failed))
+        with self.assertRaisesRegex(ValueError, 'state changed'):
+            self.execute('repeat.json')
+        self.request['recovery']['failed_receipt'] = new
+        with self.assertRaisesRegex(ValueError, 'recursive'):
+            self.execute('recursive.json')
+        self.assertEqual(process.call_count, 1)
+
+    def test_recovery_contract_rejects_invalid_authorization_coordinates_and_envelope(self):
+        self.recovery_fixture()
+        good = copy.deepcopy(self.request['recovery'])
+        cases = [('kind', 'retry'), ('attempt_id', ''), ('attempt_id', '12345678-1234-4ABC-8ABC-123456789ABC'),
+                 ('attempt_id', '12345678-1234-1abc-8abc-123456789abc'), ('attempt_id', None),
+                 ('coordinator_build', 0), ('coordinator_build', True),
+                 ('owner_build', -1), ('owner_build', '18'), ('authorized_by', ''),
+                 ('authorized_by', ' '), ('authorized_by', 'owner\n'), ('authorized_by', '\x00owner'),
+                 ('failed_receipt', {}), ('failed_receipt', None)]
+        for field, value in cases:
+            with self.subTest(field=field, value=value):
+                self.request['recovery'] = dict(good, **{field: value})
+                with self.assertRaises(ValueError):
+                    runner.request_identity(self.signed(), self.key, self.now)
+        for value in (None, {}, dict(good, extra='not-authorized')):
+            self.request['recovery'] = value
+            with self.assertRaises(ValueError):
+                runner.request_identity(self.signed(), self.key, self.now)
+
+    def test_recovery_failed_receipt_tamper_or_unsafe_identity_never_changes_state(self):
+        original = self.recovery_fixture()
+        process = self.execution_patches()
+        original_bytes = runner.gate.canonical(original)
+        cases = [('schema_version', True), ('status', 'SUCCESS'), ('status', 'CLAIMED'), ('kind', 'promotion'),
+                 ('product', 'other'), ('commit', 'f' * 40), ('version', '1.0.99'),
+                 ('digest', 'sha256:' + 'f' * 64), ('request_sha256', 'short'),
+                 ('previous_container_id', 'short'), ('previous_image_id', 'app:latest'),
+                 ('new_backup_and_migration_files', ['/backup/evidence']),
+                 ('new_backup_and_migration_files', None), ('automatic_rollback', True),
+                 ('recovery', None), ('failed_receipt_sha256', 'a' * 64)]
+        for field, value in cases:
+            with self.subTest(field=field, value=value):
+                bad = runner.control.sign(dict(original['payload'], **{field: value}), self.key)
+                self.request['recovery']['failed_receipt'] = bad
+                with self.assertRaises(ValueError):
+                    self.execute()
+                self.assertEqual((self.root / 'state' / (self.commit + '.json')).read_bytes(), original_bytes)
+                self.assertFalse((self.root / 'state/attempts').exists())
+        tampered = copy.deepcopy(original)
+        tampered['payload']['previous_container_id'] = 'f' * 64
+        self.request['recovery']['failed_receipt'] = tampered
+        with self.assertRaisesRegex(ValueError, 'signature'):
+            self.execute()
+        process.assert_not_called()
+
+    def test_recovery_missing_changed_or_ambiguous_claim_never_mutates(self):
+        failed = self.recovery_fixture()
+        process = self.execution_patches()
+        state = runner.control.State(self.root / 'state')
+        state.path(self.commit).unlink()
+        with self.assertRaisesRegex(ValueError, 'state missing'):
+            self.execute()
+        for status in ('CLAIMED', 'SUCCESS', 'FAILED'):
+            with self.subTest(status=status):
+                different = runner.control.sign(dict(failed['payload'], status=status, request_sha256='f' * 64), self.key)
+                state.write(self.commit, different)
+                before = state.path(self.commit).read_bytes()
+                with self.assertRaisesRegex(ValueError, 'state changed'):
+                    self.execute()
+                self.assertEqual(state.path(self.commit).read_bytes(), before)
+        self.assertFalse((self.root / 'state/attempts').exists())
+        process.assert_not_called()
+
+    def test_recovery_changed_unhealthy_or_already_active_runtime_never_mutates(self):
+        failed = self.recovery_fixture()
+        original = copy.deepcopy(self.container)
+        process = self.execution_patches()
+        for field, value in [('Id', '4' * 64), ('Image', 'sha256:' + '4' * 64),
+                             ('State', {'Running': True, 'Health': {'Status': 'starting'}}),
+                             ('State', {'Running': False, 'Health': {'Status': 'healthy'}})]:
+            with self.subTest(field=field, value=value):
+                self.container.clear()
+                self.container.update(copy.deepcopy(original))
+                self.container[field] = value
+                with self.assertRaises(ValueError):
+                    self.execute()
+        self.container.clear()
+        self.container.update(original)
+        with patch.object(runner, 'image_identity', return_value=self.container['Image']):
+            with self.assertRaisesRegex(ValueError, 'already active'):
+                self.execute()
+        self.assertEqual(runner.control.State(self.root / 'state').read(self.commit), failed)
+        self.assertFalse((self.root / 'state/attempts').exists())
+        process.assert_not_called()
+
+    def test_recovery_advanced_develop_or_prod_never_mutates(self):
+        failed = self.recovery_fixture()
+        process = self.execution_patches()
+        for heads in (('f' * 40, self.commit), ('a' * 40, 'f' * 40)):
+            with patch.object(runner.control, 'heads', return_value=heads), self.assertRaisesRegex(ValueError, 'advanced'):
+                self.execute()
+        self.assertEqual(runner.control.State(self.root / 'state').read(self.commit), failed)
+        self.assertFalse((self.root / 'state/attempts').exists())
+        process.assert_not_called()
+
+    def test_recovery_archive_conflict_even_identical_or_symlink_never_overwrites(self):
+        failed = self.recovery_fixture()
+        process = self.execution_patches()
+        archive = self.archive_path(failed)
+        archive.parent.mkdir(mode=0o700)
+        for data in (b'conflicting previous artifact', runner.gate.canonical(failed)):
+            archive.write_bytes(data)
+            with self.assertRaisesRegex(ValueError, 'archive already exists'):
+                self.execute()
+            self.assertEqual(archive.read_bytes(), data)
+            self.assertEqual(runner.control.State(self.root / 'state').read(self.commit), failed)
+        archive.unlink()
+        target = self.root / 'immutable-target'
+        target.write_bytes(b'untouched')
+        archive.symlink_to(target)
+        with self.assertRaisesRegex(ValueError, 'archive already exists'):
+            self.execute()
+        self.assertEqual(target.read_bytes(), b'untouched')
+        process.assert_not_called()
+
+    def test_recovery_archive_fsync_failure_never_replaces_failed_claim(self):
+        failed = self.recovery_fixture()
+        process = self.execution_patches()
+        with patch.object(runner.os, 'fsync', side_effect=OSError('synthetic sync failure')):
+            with self.assertRaises(OSError):
+                self.execute()
+        self.assertEqual(runner.control.State(self.root / 'state').read(self.commit), failed)
+        self.assertEqual(self.archive_path(failed).read_bytes(), runner.gate.canonical(failed))
+        process.assert_not_called()
+
+    def test_recovery_expired_while_waiting_for_owner_checks_never_claims(self):
+        failed = self.recovery_fixture()
+        process = self.execution_patches()
+        late = self.now + dt.timedelta(minutes=15)
+        class LateClock(dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return late
+        with patch.object(runner.dt, 'datetime', LateClock), self.assertRaisesRegex(ValueError, 'expired'):
+            self.execute()
+        self.assertEqual(runner.control.State(self.root / 'state').read(self.commit), failed)
+        self.assertFalse((self.root / 'state/attempts').exists())
+        process.assert_not_called()
+
+    def test_recovery_untrusted_archive_directory_never_follows_or_claims(self):
+        failed = self.recovery_fixture()
+        process = self.execution_patches()
+        directory = self.root / 'state/attempts'
+        external = self.root / 'outside'
+        external.mkdir(mode=0o700)
+        directory.symlink_to(external, target_is_directory=True)
+        with self.assertRaises(OSError):
+            self.execute()
+        self.assertEqual(list(external.iterdir()), [])
+        directory.unlink()
+        directory.mkdir(mode=0o755)
+        directory.chmod(0o755)
+        with self.assertRaisesRegex(ValueError, 'not private'):
+            self.execute()
+        self.assertEqual(runner.control.State(self.root / 'state').read(self.commit), failed)
+        self.assertEqual(list(directory.iterdir()), [])
+        process.assert_not_called()
 
 
 if __name__ == '__main__':

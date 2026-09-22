@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -25,10 +26,54 @@ spec.loader.exec_module(control)
 gate, require = control.gate, control.require
 PROJECT = "shiba-goditch-prod"
 DB_DESTINATION = "/app/data/db/app"
+SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+def failed_recovery_identity(request, key):
+    """A separately signed retry names one original, non-recursive failure."""
+    recovery = request["recovery"]
+    require(isinstance(recovery, dict) and set(recovery) == {
+        "kind", "attempt_id", "coordinator_build", "owner_build", "authorized_by", "failed_receipt"},
+        "invalid deployment recovery contract")
+    require(recovery["kind"] == "failed-deployment-retry", "invalid deployment recovery kind")
+    require(isinstance(recovery["attempt_id"], str) and re.fullmatch(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", recovery["attempt_id"]),
+        "invalid canonical recovery attempt UUID")
+    require(all(type(recovery[field]) is int and recovery[field] > 0
+                for field in ("coordinator_build", "owner_build")), "invalid failed build coordinates")
+    author = recovery["authorized_by"]
+    require(isinstance(author, str) and author == author.strip() and 0 < len(author) <= 256
+            and all(ord(char) >= 32 and ord(char) != 127 for char in author),
+            "missing valid deployment recovery authorization")
+    signed = recovery["failed_receipt"]
+    require(isinstance(signed, dict) and set(signed) == {"payload", "signature"}
+            and isinstance(signed["payload"], dict) and isinstance(signed["signature"], str)
+            and SHA256.fullmatch(signed["signature"]), "invalid signed failed deployment receipt")
+    failed = control.verify(signed, key)
+    require(type(failed.get("schema_version")) is int and failed["schema_version"] == 1
+            and failed.get("kind") == "runtime-deployment"
+            and failed.get("status") == "FAILED" and failed.get("product") == gate.PRODUCT,
+            "recovery requires an original signed FAILED deployment")
+    require(all(failed.get(field) == request[field] for field in ("commit", "version", "digest")),
+            "failed deployment identity mismatch")
+    require("recovery" not in failed and "failed_receipt_sha256" not in failed,
+            "recursive deployment recovery is forbidden")
+    require(isinstance(failed.get("request_sha256"), str) and SHA256.fullmatch(failed["request_sha256"])
+            and isinstance(failed.get("previous_container_id"), str) and SHA256.fullmatch(failed["previous_container_id"])
+            and isinstance(failed.get("previous_image_id"), str) and gate.DIGEST.fullmatch(failed["previous_image_id"]),
+            "failed deployment lacks exact original identities")
+    require(failed.get("new_backup_and_migration_files") == [] and failed.get("automatic_rollback") is False,
+            "failed deployment has mutation evidence requiring manual reconciliation")
+    return failed
 
 
 def request_identity(signed, key, now):
     request = control.verify(signed, key)
+    if request.get("schema_version") == 3:
+        spec = importlib.util.spec_from_file_location("published_rebuild", Path(__file__).with_name("release-rebuild.py"))
+        rebuild = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(rebuild)
+        return rebuild.validate_identity(request, key, now)
     require(request.get("schema_version") == 2 and request.get("kind") == "deployment"
             and request.get("product") == gate.PRODUCT, "wrong deployment request")
     require(gate.SHA.fullmatch(request.get("commit", "")) and gate.DIGEST.fullmatch(request.get("digest", "")),
@@ -52,7 +97,46 @@ def request_identity(signed, key, now):
             and final.get('commit') == request['commit'] and final.get('digest') == request['digest']
             and final.get('version') == request['version'] and final.get('evidence_sha256') == request['evidence_sha256'],
             'deployment requires matching verified finalization')
+    if "recovery" in request:
+        failed_recovery_identity(request, key)
     return request
+
+
+def preserve_failed_attempt(state, commit, signed):
+    """Called only under both owner locks, before replacing the current claim.
+
+    No overwrite or reconciliation of an existing archive is automatic. Even a
+    matching archive may be evidence of an interrupted previous recovery.
+    """
+    data = gate.canonical(signed)
+    digest = hashlib.sha256(data).hexdigest()
+    root_fd = os.open(state.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        try:
+            os.mkdir("attempts", mode=0o700, dir_fd=root_fd)
+        except FileExistsError:
+            pass
+        directory = os.open("attempts", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
+        try:
+            info = os.fstat(directory)
+            require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and info.st_mode & 0o077 == 0,
+                    "failed attempt archive directory is not private and owned")
+            try:
+                fd = os.open(f"{commit}-{digest}.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                             0o600, dir_fd=directory)
+            except FileExistsError:
+                raise gate.InvalidEvidence("failed attempt archive already exists; reconcile interrupted recovery")
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.fsync(directory)
+            os.fsync(root_fd)
+        finally:
+            os.close(directory)
+    finally:
+        os.close(root_fd)
+    return digest
 
 
 def run(command, **kwargs):
@@ -94,6 +178,27 @@ def target_container(containers, runtime):
                 source = Path(mount["Source"]).resolve()
                 require(not (db.is_relative_to(source) or source.is_relative_to(db)), "another container shares PROD database tree")
     return target
+
+
+
+def missing_runtime(containers, runtime):
+    """只允許已授權的災難恢復；保留原 DB，拒絕任何殘留 owner 或其他 writer。"""
+    require(not any(c["Config"].get("Labels", {}).get("com.docker.compose.project") == PROJECT
+                    and c["Config"]["Labels"].get("com.docker.compose.service") == "app" for c in containers),
+            "disaster rebuild requires missing PROD runtime; existing owner must be reconciled")
+    db = (runtime / "data/db/app").resolve()
+    main = db / "shiba-go-ditch-api.db"
+    require(main.is_file() and not main.is_symlink() and main.stat().st_size > 0,
+            "original PROD DB missing; refusing empty bootstrap")
+    for container in containers:
+        if not container["State"].get("Running"):
+            continue
+        for mount in container.get("Mounts", []):
+            if mount.get("Type") == "bind":
+                path = Path(mount["Source"]).resolve()
+                require(not (db.is_relative_to(path) or path.is_relative_to(db)),
+                        "another container owns the PROD database tree")
+    return {"Id": None, "Image": None}
 
 
 def containers():
@@ -175,12 +280,45 @@ def execute(signed, key, source, runtime, state, engine_id, now, output):
         except BlockingIOError:
             raise gate.InvalidEvidence("PROD lifecycle lock is busy")
         with state.lock():
-            require(not state.exists(request["commit"]), "deployment already claimed; inspect receipt before any retry")
-            require(control.heads(source)[1] == request["commit"], "prod branch advanced after promotion")
+            recovering = "recovery" in request
+            rebuilding = request.get("mode") == "published-prod-disaster-rebuild"
+            state_key = request["commit"]
+            if rebuilding:
+                require(request["target_engine_id"] == engine_id, "restored engine differs from signed authorization")
+                require(state.exists(request["commit"]), "original successful PROD deployment state missing")
+                original = control.verify(state.read(request["commit"]), key)
+                published = control.verify(request["published"]["finalization"], key)
+                require(original.get("kind") == "runtime-deployment" and original.get("status") == "SUCCESS"
+                        and original.get("product") == gate.PRODUCT and original.get("commit") == request["commit"]
+                        and original.get("version") == request["version"] and original.get("digest") == published["digest"],
+                        "original successful deployment does not match published provenance")
+                # 同一 engine／commit 只允許一次災難恢復；不覆寫先前正式部署或失敗紀錄。
+                state_key = hashlib.sha256((request["commit"] + ":disaster:" + engine_id).encode()).hexdigest()[:40]
+                require(not state.exists(state_key), "disaster restore already claimed; inspect receipt before retry")
+            elif recovering:
+                require(state.exists(request["commit"]), "failed deployment state missing; recovery is not a fresh claim")
+                existing = state.read(request["commit"])
+                control.verify(existing, key)
+                require(gate.canonical(existing) == gate.canonical(request["recovery"]["failed_receipt"]),
+                        "failed deployment state changed; recovery already claimed or ambiguous")
+                failed = failed_recovery_identity(request, key)
+            else:
+                require(not state.exists(request["commit"]), "deployment already claimed; inspect receipt before any retry")
+            develop, prod = control.heads(source)
+            require(prod == request["commit"], "prod branch advanced after promotion")
+            if recovering:
+                require(develop == request["promotion"]["payload"]["source_commit"],
+                        "develop candidate advanced after failed deployment")
             # Same runtime lock covers classification, deploy and final verification.
-            previous = target_container(containers(), runtime)
+            previous = missing_runtime(containers(), runtime) if rebuilding else target_container(containers(), runtime)
             no_host_writer(runtime)
             image_id = image_identity(request)
+            if recovering:
+                require(previous["Id"] == failed["previous_container_id"]
+                        and previous["Image"] == failed["previous_image_id"]
+                        and previous["State"].get("Health", {}).get("Status") == "healthy",
+                        "failed deployment previous runtime changed or unhealthy")
+                require(previous["Image"] != image_id, "recovery candidate is already active")
             request_identity(signed, key, dt.datetime.now(dt.timezone.utc))
             record = {"schema_version": 1, "kind": "runtime-deployment", "product": gate.PRODUCT,
                       "status": "CLAIMED", "request_sha256": hashlib.sha256(gate.canonical(signed)).hexdigest(),
@@ -191,7 +329,14 @@ def execute(signed, key, source, runtime, state, engine_id, now, output):
             before = {p.name for p in backup_root.iterdir()} if backup_root.is_dir() else set()
             record.update(library_revision=request.get("library_revision"), deployment_script_revision=request["commit"],
                           deploy_journal=str(runtime / "data/logs/prod-deploy-journal.log"), backup_directory=str(backup_root))
-            state.write(request["commit"], control.sign(record, key))
+            if recovering:
+                failed_hash = preserve_failed_attempt(state, request["commit"], existing)
+                record.update(recovery=request["recovery"], failed_receipt_sha256=failed_hash)
+            if rebuilding:
+                record.update(mode=request["mode"], target_engine_id=engine_id,
+                              original_deployment_sha256=hashlib.sha256(gate.canonical(state.read(request["commit"]))).hexdigest(),
+                              prod_build=request["prod_build"], state_key=state_key)
+            state.write(state_key, control.sign(record, key))
             try:
                 env = {k: v for k, v in os.environ.items() if not k.startswith(("RELEASE_", "RECEIPT_", "APPROVAL_", "JENKINS_API_"))}
                 env.update(SHIBA_CONTROLLED_DEPLOY="true", SHIBA_RUNTIME_ROOT=str(runtime),
@@ -221,7 +366,7 @@ def execute(signed, key, source, runtime, state, engine_id, now, output):
                 record["new_backup_and_migration_files"] = sorted(str(p) for p in backup_root.iterdir()
                     if p.name not in before) if backup_root.is_dir() else []
                 receipt = control.sign(record, key)
-                state.write(request["commit"], receipt)
+                state.write(state_key, receipt)
                 with output.open("xb") as stream:
                     stream.write(gate.canonical(receipt))
             return receipt

@@ -26,7 +26,8 @@ git --version
                         ['release-gate.py', 'release-evidence.py', 'release-promotion.py',
                          'release-finalization.py', 'release-deploy.py', 'release-candidate.py',
                          'release-gate.test.py', 'release-control.test.py',
-                         'release-candidate.test.py', 'release-deploy.test.py'].each { name ->
+                         'release-candidate.test.py', 'release-deploy.test.py',
+                         'runtime-image-verify.py', 'runtime-image-verify.test.py'].each { name ->
                             writeFile file: "suite/${name}", text: libraryResource("scripts/common/${name}")
                         }
                         writeFile file: 'reviewed-library.txt', text: config.libraryRevision + '\n'
@@ -39,7 +40,7 @@ export GIT_CONFIG_GLOBAL=/dev/null
 export GIT_CONFIG_NOSYSTEM=1
 export GIT_TERMINAL_PROMPT=0
 mkdir -p reports
-for suite in release-gate release-control release-candidate release-deploy; do
+for suite in release-gate release-control release-candidate release-deploy runtime-image-verify; do
   python3 "suite/${suite}.test.py" 2>&1 | tee "reports/${suite}.log"
 done
 python3 - <<'PY'

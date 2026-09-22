@@ -24,3 +24,10 @@ WORKSPACE="${TMP}" bash "${SCRIPT_DIR}/go-build.sh"
 [[ -x "${TMP}/.gobuild/app" ]]
 [[ -x "${TMP}/.gobuild/worker" ]]
 echo '✅ go-build app＋additional binary 契約通過'
+
+# Factory source is intentionally invalid; scoped runtime build must not compile it.
+mkdir -p "${TMP}/cmd/factory"
+printf 'package main\nnot valid go\n' > "${TMP}/cmd/factory/main.go"
+printf '\nGO_BUILD_PKGS="./cmd/app ./cmd/worker"\n' >> "${TMP}/go-pipeline.env"
+WORKSPACE="${TMP}" bash "${SCRIPT_DIR}/go-build.sh"
+echo 'PASS scoped runtime build excludes Factory commands'

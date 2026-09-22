@@ -76,6 +76,63 @@ class CandidateTests(unittest.TestCase):
         return control.approve(self.evidence, self.policy, self.root,
             {'id': 'offline-stage-waiver', 'approver': 'test-approver', 'reason': 'Accept exactly these test assertions'}, self.key, self.now)
 
+    def compose(self):
+        self.prod()
+        self.evidence['mode'] = 'controlled-compose-v2'
+        self.policy['compose_candidate_v2'] = True
+        self.evidence['stages'] = [{'name': n, 'result': 'SUCCESS'} for n in gate.COMPOSE_STAGES]
+        self.records = {k: v for k, v in self.records.items() if k in gate.COMPOSE_CHECKS}
+        self.write_checks()
+
+    def test_compose_scans_once_in_coordinator_with_all_scanners_mandatory(self):
+        self.compose()
+        self.assertEqual(self.evaluate()['decision'], 'PASS')
+        for scanner in ['trivy', 'govulncheck', 'harbor']:
+            original = self.evidence['reports']
+            self.evidence['reports'] = [r for r in original if r['scanner'] != scanner]
+            with self.subTest(scanner=scanner), self.assertRaises(ValueError): self.evaluate()
+            self.evidence['reports'] = original
+
+    def test_compose_cannot_omit_image_verification_or_trusted_opt_in(self):
+        self.compose()
+        self.policy.pop('compose_candidate_v2')
+        with self.assertRaisesRegex(ValueError, 'explicit trusted'): self.evaluate()
+        self.policy['compose_candidate_v2'] = True
+        for name in gate.COMPOSE_STAGES:
+            original = self.evidence['stages']
+            self.evidence['stages'] = [r for r in original if r['name'] != name]
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, 'missing required'): self.evaluate()
+            self.evidence['stages'] = original
+
+    def test_compose_failed_tests_and_runtime_remain_blocking(self):
+        self.compose()
+        self.failed_test()
+        with self.assertRaises(ValueError): self.evaluate()
+        approval = self.approve()
+        self.assertEqual(self.evaluate(approval=approval, approval_key=self.key)['decision'], 'APPROVED_EXCEPTION')
+        next(s for s in self.evidence['stages'] if s['name'] == 'Runtime Image Verification')['result'] = 'UNSTABLE'
+        with self.assertRaises(ValueError): self.evaluate(approval=approval, approval_key=self.key)
+
+    def test_compose_native_stage_contract_rejects_wrong_lane_and_missing_health(self):
+        self.compose()
+        built = {'number': 1, 'building': False, 'result': 'SUCCESS', 'timestamp': 1788868800000, 'duration': 0,
+                 'actions': [{'lastBuiltRevision': {'SHA1': self.evidence['commit'], 'branch': [{'name': 'prod'}]}}]}
+        skipped = ['Dependency Scan', 'Image Scan', 'Harbor Vulnerability Report', 'Smoke Test',
+                   'Deployment Verification — k3s', adapter.FINALIZE]
+        workflow = {'id': '1', 'status': 'SUCCESS', 'stages': [{'name': n, 'status': 'SUCCESS'} for n in gate.COMPOSE_STAGES] +
+                    [{'name': n, 'status': 'NOT_EXECUTED'} for n in skipped]}
+        image = f"APP_NAME={gate.PRODUCT}\nBRANCH=prod\nBUILD_NUMBER=1\nAPP_VERSION=1.0.32\nIMAGE_REF={self.evidence['image_ref']}\nIMAGE_DIGEST={self.fixture.digest}\n"
+        manifest = dict(self.evidence, schema_version=1, product=gate.PRODUCT)
+        self.assertEqual(adapter.completed_build(built, workflow, image, 'prod', 1, candidate=manifest)['mode'], 'controlled-compose-v2')
+        for name in skipped[:-1]:
+            wrong = copy.deepcopy(workflow)
+            next(s for s in wrong['stages'] if s['name'] == name)['status'] = 'SUCCESS'
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                adapter.completed_build(built, wrong, image, 'prod', 1, candidate=manifest)
+        workflow['stages'] = [s for s in workflow['stages'] if s['name'] != 'Runtime Image Verification']
+        with self.assertRaisesRegex(ValueError, 'required CI stage missing'):
+            adapter.completed_build(built, workflow, image, 'prod', 1, candidate=manifest)
+
     def test_clean_candidate_passes_without_finalization(self):
         self.assertEqual(self.evaluate()['decision'], 'PASS')
 

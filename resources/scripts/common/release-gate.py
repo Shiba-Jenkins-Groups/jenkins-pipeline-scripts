@@ -23,6 +23,12 @@ SHA = re.compile(r"[0-9a-f]{40}")
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 WAIVABLE_STAGES = {'Test', 'Fast Contract Test', 'Dependency Scan', 'Image Scan'}
 CANDIDATE_STAGES = WAIVABLE_STAGES | {'Harbor Vulnerability Report'}
+CANDIDATE_MODES = {'controlled-candidate-v1', 'controlled-compose-v2'}
+COMPOSE_STAGES = ['Checkout', 'Load Scripts', 'Detect', 'Early Capacity Admission',
+                  'Secret Scan', 'Build', 'Test', 'Fast Contract Test',
+                  'Package / Publish / Tag', 'Docker Build', 'Harbor Push',
+                  'Runtime Image Verification', 'Declarative: Post Actions']
+COMPOSE_CHECKS = {'Test', 'Fast Contract Test'}
 NOT_APPLICABLE_RULE = {
     "id": "GO-2026-5932",
     "affected_package_prefix": "golang.org/x/crypto/openpgp",
@@ -131,12 +137,13 @@ def verified_report(root, record):
 
 
 def stage_findings(evidence, policy, root):
-    if evidence.get('mode') != 'controlled-candidate-v1':
+    if evidence.get('mode') not in CANDIDATE_MODES:
         return []
     require(policy.get('candidate_mode') is True and set(policy.get('waivable_stages', [])) == WAIVABLE_STAGES,
             'candidate stage policy is missing or weakened')
     records = [verified_report(root, record) for record in evidence['stage_checks']]
-    require(len(records) == len(CANDIDATE_STAGES) and {r['stage'] for r in records} == CANDIDATE_STAGES,
+    expected_checks = COMPOSE_CHECKS if evidence.get('mode') == 'controlled-compose-v2' else CANDIDATE_STAGES
+    require(len(records) == len(expected_checks) and {r['stage'] for r in records} == expected_checks,
             'missing or duplicate candidate stage evidence')
     observed = {s['name']: s['result'] for s in evidence['stages']}
     findings = []
@@ -251,19 +258,30 @@ def evaluate(evidence, policy, root, now, approval=None, approval_key=None):
     require(evidence.get("event") == "branch" and evidence.get("trusted") is True,
             "untrusted event")
     require(SHA.fullmatch(evidence.get("commit", "")) is not None, "invalid commit")
-    require(DIGEST.fullmatch(evidence.get("image_digest", "")) is not None, "invalid digest")
+    lean = evidence.get('mode') == 'lean-develop-success-v1'
+    if lean:
+        require(gate == 'promotion' and policy.get('develop_mode') == 'lean-success-v1',
+                'lean develop policy is missing or mismatched')
+        require('image_digest' not in evidence and 'image_ref' not in evidence
+                and 'immutable_image' not in evidence, 'lean develop must not claim image evidence')
+    else:
+        require(DIGEST.fullmatch(evidence.get("image_digest", "")) is not None, "invalid digest")
     require(type(evidence.get("build")) is int and evidence["build"] > 0, "invalid build")
     require(evidence.get("job") == policy["jobs"][gate], "wrong job")
     require(evidence.get("building") is False and evidence.get("post_complete") is True,
             "build or post processing not complete")
     # A failed run may have skipped necessary work. Approval never fabricates
     # missing artifacts: resume in a separately authorized verification run.
-    candidate = evidence.get('mode') == 'controlled-candidate-v1'
-    require(not policy.get('candidate_mode') or candidate, 'controlled candidate evidence required')
+    candidate = evidence.get('mode') in CANDIDATE_MODES
+    require(lean or not policy.get('candidate_mode') or candidate, 'controlled candidate evidence required')
     if candidate:
         require(verified_bytes(root, evidence['artifact']), 'candidate artifact missing')
     require(evidence.get("result") in ({'SUCCESS', 'UNSTABLE'} if candidate else {'SUCCESS'}), "upstream run requires revalidation")
     required = policy["required_stages"][gate]
+    if evidence.get('mode') == 'controlled-compose-v2':
+        require(gate == 'deployment' and policy.get('compose_candidate_v2') is True,
+                'Compose candidate requires explicit trusted deployment policy')
+        required = COMPOSE_STAGES
     require(isinstance(required, list) and required and len(set(required)) == len(required),
             "invalid required stage policy")
     stages = evidence["stages"]
@@ -276,6 +294,9 @@ def evaluate(evidence, policy, root, now, approval=None, approval_key=None):
     age = (now - timestamp(evidence["completed_at"])).total_seconds()
     require(0 <= age <= policy["max_evidence_age_seconds"], "stale or future evidence")
     reports = evidence["reports"]
+    if lean:
+        require(reports == [] and approval is None, 'lean develop cannot carry scanner evidence or approval')
+        return {"decision": "PASS", "finding_count": 0, "not_applicable": []}
     require(isinstance(reports, list) and reports, "missing reports")
     scanners = [report["scanner"] for report in reports]
     require(len(scanners) == len(set(scanners)), "duplicate scanner report")

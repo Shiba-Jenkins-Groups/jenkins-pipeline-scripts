@@ -15,6 +15,17 @@ def call(Map config = [:]) {
     if (candidateMode && (config.profile && config.profile != 'full' || config.ciStages || config.cdStages)) {
         error('Controlled candidates require the complete pipeline')
     }
+    def composeVerification = config.runtimeVerification == 'container'
+    def coordinatorScans = config.scanAuthority == 'coordinator'
+    if (coordinatorScans && (!composeVerification || !config.controlledReleaseCandidate ||
+            !(env.JOB_NAME in ['shiba-go-ditch-api-project/develop', 'shiba-go-ditch-api-project/prod']) || env.CHANGE_ID)) {
+        error('Coordinator scans require the App controlled Compose flow')
+    }
+    if (composeVerification && ((env.CHANGE_ID?.trim() || !(sourceBranch in ['develop', 'prod'])) ||
+            !(env.JOB_NAME in ['shiba-go-ditch-api-project/develop', 'shiba-go-ditch-api-project/prod',
+                             'shiba-go-ditch-recognition-project/prod']))) {
+        error('Container verification is restricted to Shiba trusted branches')
+    }
     def candidateStage = { String name, String command ->
         if (!candidateMode) { sh command; return }
         def rc = sh(script: "python3 .pipeline/scripts/common/release-candidate.py --stage '${name}' run -- bash -c " +
@@ -92,6 +103,15 @@ def call(Map config = [:]) {
     if (config.ciStages instanceof Map) ciStages.putAll(config.ciStages)
     if (config.cdStages instanceof Map) cdStages.putAll(config.cdStages)
 
+    if (composeVerification) {
+        cdStages.smokeTest = true
+        cdStages.deploy = false
+    }
+    if (coordinatorScans) {
+        cdStages.imageScan = false
+        cdStages.harborReport = false
+    }
+
     // ── 4. 強制依賴推導（自動，不需手動設定）──────────────────────────────
     // 上游 stage 關閉時，自動關閉所有依賴的下游 stage
     if (!ciStages.build)         ciStages.test           = false
@@ -164,7 +184,7 @@ def call(Map config = [:]) {
                                 //   dockerfiles/Dockerfile-{lang}
                                 // 慣例之外的語言特例檔以 LANG_EXTRAS 收斂
                                 // 缺檔＝結構錯誤：libraryResource() 直接 fail，不靜默跳過
-                                def LANGUAGES   = ['go', 'java', 'node', 'python']
+                                def LANGUAGES   = (composeVerification || leanDevelop) ? ['go'] : ['go', 'java', 'node', 'python']
                                 def LANG_STEPS  = ['build', 'test', 'archive', 'smoke-test']
                                 def LANG_EXTRAS = [go: ['go-env.sh'], java: ['java-env.sh']]
 
@@ -192,6 +212,7 @@ def call(Map config = [:]) {
                                     'scripts/common/release-candidate.py',
                                     'scripts/common/release-evidence.py',
                                     'scripts/common/release-gate.py',
+                                    'scripts/common/runtime-image-verify.py',
                                 ]
                                 for (lang in LANGUAGES) {
                                     for (step in LANG_STEPS) {
@@ -260,6 +281,12 @@ def call(Map config = [:]) {
 
                                 // shiba 的 PROD release 必須等 strict scan、image 與 k3s verification
                                 // 全數通過後才發布 artifact/tag。其他專案預設維持既有時序。
+                                if (composeVerification) {
+                                    env.DO_K3S_VERIFY = 'false'
+                                    env.DO_DEPLOY = 'false'
+                                }
+                                if (coordinatorScans) { env.DO_DEP_SCAN = 'false' }
+                                env.RELEASE_CANDIDATE_MODE = coordinatorScans ? 'controlled-compose-v2' : 'controlled-candidate-v1'
                                 env.DEFER_RELEASE_FINALIZATION = (config.releaseFinalizeAfterVerification == true).toString()
                                 def deferThisRelease = env.DEFER_RELEASE_FINALIZATION == 'true' && env.DO_PROD_DEPLOY == 'true'
                                 env.DO_ARCHIVE_ARTIFACT_PUBLISH = (env.DO_ARTIFACT_PUBLISH == 'true' && !deferThisRelease).toString()
@@ -414,7 +441,7 @@ def call(Map config = [:]) {
                         // 語言分派：Go → govulncheck；Java/Maven → OWASP Dependency-Check。
                         // Go 保留既有「每個 branch 都掃」行為；其他語言由 DO_DEP_SCAN 政策控制。
                         // 置 Archive 前：prod 依賴含高危 CVE 時擋在打 tag／發佈 artifact 之前
-                        when { expression { !leanDevelop && (env.LANGUAGE == 'go' || env.DO_DEP_SCAN == 'true') } }
+                        when { expression { !leanDevelop && !coordinatorScans && (env.LANGUAGE == 'go' || env.DO_DEP_SCAN == 'true') } }
                         steps {
                             script {
                                 // NVD key 只供 OWASP Dependency-Check 使用；Go govulncheck 不應取得此 credential。
@@ -653,7 +680,7 @@ def call(Map config = [:]) {
                                 // Smoke Test 驗證的是已 push 的 image，故跟隨 DO_PUSH 政策
                                 expression { env.DO_PUSH == 'true' }
                                 // harborPush: false 時依賴推導自動關閉
-                                expression { cdStages.smokeTest }
+                                expression { cdStages.smokeTest && !composeVerification }
                             }
                         }
                         steps {
@@ -661,6 +688,19 @@ def call(Map config = [:]) {
                             // Java：起臨時容器輪詢 Actuator health，UP 才算通過
                             // Node / Python：空殼，尚未實作
                             sh 'bash .pipeline/scripts/smoke-test.sh'
+                        }
+                    }
+
+                    stage('Runtime Image Verification') {
+                        when {
+                            allOf {
+                                expression { composeVerification && !leanDevelop }
+                                expression { env.DO_PUSH == 'true' && cdStages.harborPush }
+                            }
+                        }
+                        steps {
+                            sh 'python3 .pipeline/scripts/common/runtime-image-verify.py'
+                            archiveArtifacts artifacts: 'reports/runtime-image.json', allowEmptyArchive: false
                         }
                     }
 
@@ -706,11 +746,12 @@ def call(Map config = [:]) {
                         when {
                             allOf {
                                 expression { !candidateMode }
+                                expression { !composeVerification || currentBuild.currentResult == 'SUCCESS' }
                                 expression { env.DEFER_RELEASE_FINALIZATION == 'true' }
                                 expression { env.DO_PROD_DEPLOY == 'true' }
                                 expression { env.DO_GIT_TAG == 'true' }
-                                expression { env.DO_K3S_VERIFY == 'true' }
-                                expression { cdStages.deploy }
+                                expression { composeVerification || env.DO_K3S_VERIFY == 'true' }
+                                expression { composeVerification || cdStages.deploy }
                             }
                         }
                         steps {
