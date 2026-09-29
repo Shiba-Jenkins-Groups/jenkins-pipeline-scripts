@@ -29,6 +29,19 @@ Trivy uses the persistent trusted agent cache and still performs normal DB updat
 checks. Heavyweight Manifest handoff is reserved for an actual Manifest change.
 No Jenkins, Harbor, Nexus or k3d shared service is removed by this change.
 
+Compose PROD capacity admission reads the Docker Engine filesystem through a
+read-only helper based on the running Jenkins agent's immutable image. It does
+not require K3D or a kubeconfig. A bounded reclaim remains restricted to the
+owned BuildKit builder. Before promotion, the trusted coordinator refreshes and
+records both its Trivy DB and the single expected Harbor Trivy adapter DB.
+
+Automatic repeats of an already claimed source stop with a signed-state
+classification instead of creating another failed or PROD build. The explicit
+SOURCE_BUILD/EXPECTED_COMMIT recovery path remains the only way to resume a
+pending promotion. Exception input may wait up to 90 minutes; after input the
+same source and immutable image are rescanned, and a signature is issued only
+when the exact finding-key set is unchanged.
+
 Validation: Python evidence/gate/recovery tests; Groovy flow mocks; real Jenkins
 contract rehearsal; isolated checks against both existing published images;
 then new PROD releases with exact queue/build/digest and runtime verification.

@@ -323,6 +323,16 @@ class Controls(unittest.TestCase):
         self.fixture.write_reports()
         self.assertEqual(self.recover(source, remote, state), receipt)
 
+    def test_automatic_duplicate_is_classified_without_prod_resume(self):
+        cmd, source, remote, _old, state = self.setup_git()
+        receipt = self.promote(source, remote, state)
+        cmd('checkout', '--detach', self.evidence['commit'], cwd=source)
+        status = promotion.promotion_status(source, state, self.evidence, self.policy,
+            self.root, self.key, self.now, expected_remote=str(remote))
+        self.assertEqual('PENDING_RECOVERY', status['decision'])
+        self.assertEqual(promotion.verify(receipt, self.key)['merge_commit'], status['merge_commit'])
+
+
     def test_recovery_rejects_tampered_or_incomplete_claim(self):
         cmd, source, remote, old, state = self.setup_git()
         receipt = self.promote(source, remote, state)

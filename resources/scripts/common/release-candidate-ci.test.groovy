@@ -116,6 +116,10 @@ assert compose.calls.contains('python3 .pipeline/scripts/common/runtime-image-ve
 assert !compose.calls.any { it.contains('cd.sh deploy') || it.contains('smoke-test.sh') || it.contains("--stage 'Dependency Scan'") || it.contains("--stage 'Image Scan'") || it.contains("--stage 'Harbor Vulnerability Report'") }
 assert compose.environment.RELEASE_CANDIDATE_MODE == 'controlled-compose-v2'
 assert compose.environment.DO_K3S_VERIFY == 'false'
+def composeCapacity = simulate(true, [compose: true, ciBuilder: true])
+assert !composeCapacity.failed
+assert composeCapacity.calls.any { it.contains('--capacity-profile compose') && it.contains('docker-capacity.py') }
+assert !composeCapacity.calls.any { it == 'credential-file:k3s-kubeconfig:KUBECONFIG' }
 def recognition = simulate(false, [compose: true, job: 'shiba-go-ditch-recognition-project/prod'])
 assert !recognition.failed
 assert recognition.calls.contains('python3 .pipeline/scripts/common/runtime-image-verify.py')

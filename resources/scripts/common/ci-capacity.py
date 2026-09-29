@@ -32,15 +32,16 @@ def run(argv, *, check=True):
     return result
 
 
-def observe(capacity_script, output):
+def observe(capacity_script, output, profile="k3d"):
     result = run([sys.executable, str(capacity_script), "--mode", "preflight",
                   "--warn-free-gib", str(WARN_FREE_GIB), "--block-free-gib", str(EARLY_GATE_GIB),
                   "--output", str(output)], check=False)
     if result.returncode not in (0, 2) or not output.exists():
-        raise RuntimeError("K3D/Docker capacity observation failed")
+        raise RuntimeError(f"{profile}/Docker capacity observation failed")
     report = json.loads(output.read_text(encoding="utf-8"))
-    if not report.get("nodes") or not report.get("docker"):
-        raise RuntimeError("K3D/Docker capacity observation incomplete")
+    if "docker" not in report or (profile == "k3d" and not report.get("nodes")) \
+            or (profile == "compose" and not report.get("storage")):
+        raise RuntimeError(f"{profile}/Docker capacity observation incomplete")
     return report
 
 
@@ -67,8 +68,12 @@ def verify_ownership(builder, policy):
         raise RuntimeError("dedicated builder image differs from pinned digest; refusing prune")
 
 
-def can_wait_for_async_reclaim(report):
+def can_wait_for_async_reclaim(report, profile="k3d"):
     """Wait only for a healthy node above the K3D hard gate."""
+    if profile == "compose":
+        storage = report.get("storage") or {}
+        return storage.get("available_bytes", 0) >= K3D_GATE_GIB * GIB \
+            and storage.get("used_percent", 100) < 90
     nodes = report.get("nodes") or []
     if not nodes:
         return False
@@ -82,7 +87,7 @@ def can_wait_for_async_reclaim(report):
     return True
 
 
-def wait_for_async_reclaim(capacity_script, prefix, report):
+def wait_for_async_reclaim(capacity_script, prefix, report, profile="k3d"):
     recovery = {
         "attempted": False,
         "mode": "passive-reobserve-only",
@@ -91,7 +96,7 @@ def wait_for_async_reclaim(capacity_script, prefix, report):
         "observations": [],
     }
     current = report
-    if not can_wait_for_async_reclaim(current):
+    if not can_wait_for_async_reclaim(current, profile):
         recovery["skipped"] = "node is outside the safe transient recovery band"
         return current, recovery
 
@@ -99,7 +104,7 @@ def wait_for_async_reclaim(capacity_script, prefix, report):
     for attempt in range(1, RECOVERY_WAIT_SECONDS // RECOVERY_POLL_SECONDS + 1):
         time.sleep(RECOVERY_POLL_SECONDS)
         path = Path(f"{prefix}-recovery-{attempt:02d}.json")
-        current = observe(capacity_script, path)
+        current = observe(capacity_script, path, profile)
         recovery["observations"].append({
             "attempt": attempt,
             "path": str(path),
@@ -110,7 +115,7 @@ def wait_for_async_reclaim(capacity_script, prefix, report):
         if current.get("status") != "BLOCKED":
             recovery["outcome"] = "capacity-converged"
             return current, recovery
-        if not can_wait_for_async_reclaim(current):
+        if not can_wait_for_async_reclaim(current, profile):
             recovery["outcome"] = "left-safe-transient-band"
             return current, recovery
 
@@ -122,6 +127,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--builder", required=True)
     parser.add_argument("--capacity-script", type=Path, required=True)
+    parser.add_argument("--capacity-profile", choices=["k3d", "compose"], default="k3d")
     parser.add_argument("--policy-config", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
@@ -132,7 +138,7 @@ def main():
     args.output.parent.mkdir(parents=True, exist_ok=True)
     prefix = args.output.with_suffix("")
     report = {"schema_version": 1, "observed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-              "builder": args.builder,
+              "builder": args.builder, "capacity_profile": args.capacity_profile,
               "threshold_gib": {"k3d_gate": K3D_GATE_GIB,
                                  "observed_build_peak_rounded_up": OBSERVED_BUILD_PEAK_GIB,
                                  "provisional_margin": PROVISIONAL_MARGIN_GIB,
@@ -142,7 +148,7 @@ def main():
                           "age_filter": "until=24h", "reserved_space_gib": 2}}
     try:
         before_path = Path(f"{prefix}-before.json")
-        before = observe(args.capacity_script, before_path)
+        before = observe(args.capacity_script, before_path, args.capacity_profile)
         report["before"] = before
         if before["status"] == "BLOCKED":
             inspect = run(["docker", "buildx", "inspect", args.builder], check=False)
@@ -164,16 +170,16 @@ def main():
                 report["reclaim"]["inventory_after_count"] = inventory(args.builder, Path(f"{prefix}-cache-after.jsonl"))
             else:
                 report["reclaim"]["skipped"] = "dedicated builder not yet provisioned; no shared cache touched"
-            after = observe(args.capacity_script, Path(f"{prefix}-after.json"))
+            after = observe(args.capacity_script, Path(f"{prefix}-after.json"), args.capacity_profile)
             report["after"] = after
             if after["status"] == "BLOCKED":
-                after, recovery = wait_for_async_reclaim(args.capacity_script, prefix, after)
+                after, recovery = wait_for_async_reclaim(args.capacity_script, prefix, after, args.capacity_profile)
                 report["after"] = after
                 report["recovery_wait"] = recovery
                 if after["status"] == "BLOCKED":
                     raise RuntimeError("insufficient capacity after bounded reclaim and GC convergence wait")
         report["status"] = "PASS"
-        print(f"[ci-capacity] PASS: K3D free >= {EARLY_GATE_GIB} GiB and no disk pressure; builder={args.builder}")
+        print(f"[ci-capacity] PASS: {args.capacity_profile} free >= {EARLY_GATE_GIB} GiB; builder={args.builder}")
         return 0
     except Exception as exc:
         report["status"] = "BLOCKED"

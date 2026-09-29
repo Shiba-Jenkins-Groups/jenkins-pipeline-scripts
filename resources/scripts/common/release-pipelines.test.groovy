@@ -78,6 +78,8 @@ def simulate = { String filename, Map options = [:] ->
         [APPROVER: options.badApprover ? 'intruder' : 'reviewer', REASON: 'offline exact CVE review']
     })
     binding.setVariable('readFile', { String path ->
+        if (path.endsWith('source-status.json')) { return JsonOutput.toJson([
+            decision: options.sourceStatus ?: 'NEW', source_commit: 'b' * 40, merge_commit: 'c' * 40]) }
         if (path.endsWith('review.json')) { return JsonOutput.toJson([decision: options.review ?: 'PASS', findings: [fake: [:]]]) }
         if (path.endsWith('runtime-receipt.json')) { return JsonOutput.toJson([payload: [status: 'SUCCESS']]) }
         if (path.endsWith('promotion.json')) { return JsonOutput.toJson([payload: [merge_commit: 'b' * 40]]) }
@@ -167,6 +169,12 @@ assert result.calls.any { it.toString().contains('--lean-develop') }
 assert result.calls.any { it.toString().contains('bind-source') }
 assert result.calls.indexOf('prod: Release Gate') < result.calls.indexOf('Finalize Revalidated PROD Candidate')
 assert result.calls.indexOf('Finalize Revalidated PROD Candidate') < result.calls.indexOf('Authorize Deployment Handoff')
+tests++
+def duplicate = simulate('autoReleasePipeline.groovy', [sourceStatus: 'FINALIZED_DUPLICATE'])
+assert !duplicate.failed
+assert !duplicate.calls.contains('Prepare Managed Release Prerequisites')
+assert !duplicate.calls.contains('Promote Verified Commit')
+assert !duplicate.calls.any { it.toString().startsWith('build:') }
 tests++
 for (options in [[disabled: true], [wrongCause: true], [upstreamResult: 'FAILURE'],
                  [failStage: 'develop: Release Gate'], [review: 'BLOCKED'],

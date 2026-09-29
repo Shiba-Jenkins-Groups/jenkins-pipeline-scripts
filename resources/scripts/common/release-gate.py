@@ -333,7 +333,8 @@ def evaluate(evidence, policy, root, now, approval=None, approval_key=None):
     require(all(stage['result'] == 'SUCCESS' or candidate and stage['name'] in WAIVABLE_STAGES and stage['result'] == 'UNSTABLE'
                 for stage in stages), 'non-success stage')
     age = (now - timestamp(evidence["completed_at"])).total_seconds()
-    require(0 <= age <= policy["max_evidence_age_seconds"], "stale or future evidence")
+    require(0 <= age <= policy.get("max_build_age_seconds", policy["max_evidence_age_seconds"]),
+            "stale or future evidence")
     reports = evidence["reports"]
     if lean:
         require(reports == [] and approval is None, 'lean develop cannot carry scanner evidence or approval')

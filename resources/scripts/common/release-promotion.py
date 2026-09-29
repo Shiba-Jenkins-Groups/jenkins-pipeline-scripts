@@ -176,6 +176,45 @@ def existing_promotion(source, state, evidence, policy, root, receipt_key, now, 
         return signed
 
 
+def promotion_status(source, state, evidence, policy, root, receipt_key, now,
+                     expected_remote=REMOTE):
+    """Classify an automatic duplicate without resuming or creating a release."""
+    gate.evaluate(evidence, policy, root, now)
+    require(evidence["gate"] == "promotion", "not promotion evidence")
+    require(git(source, "remote", "get-url", "origin") == expected_remote, "wrong Git remote")
+    require(not git(source, "status", "--porcelain"), "promotion workspace is dirty")
+    commit = evidence["commit"]
+    require(git(source, "rev-parse", "HEAD") == commit, "promotion checkout mismatch")
+    with state.lock():
+        if not state.exists(commit):
+            return {"decision": "NEW", "source_commit": commit}
+        receipt = verify(state.read(commit), receipt_key)
+        require(receipt.get("schema_version") == 1 and receipt.get("kind") == "promotion"
+                and receipt.get("product") == gate.PRODUCT and receipt.get("status") == "MERGED",
+                "existing promotion is not a completed claim")
+        require(receipt.get("source_commit") == commit and receipt.get("version") == evidence["version"]
+                and receipt.get("develop_job") == evidence["job"]
+                and receipt.get("develop_build", evidence["build"] + 1) <= evidence["build"],
+                "existing promotion does not match duplicate source evidence")
+        merge = receipt.get("merge_commit", "")
+        previous = receipt.get("previous_prod_commit", "")
+        require(gate.SHA.fullmatch(merge) and gate.SHA.fullmatch(previous),
+                "invalid existing promotion identity")
+        tag = "refs/tags/v" + evidence["version"]
+        rows = git(source, "ls-remote", "--tags", "origin", tag, tag + "^{}")
+        refs = {parts[1]: parts[0] for line in rows.splitlines() if (parts := line.split())}
+        if refs:
+            require(refs.get(tag + "^{}") == merge, "published tag does not match promotion")
+            return {"decision": "FINALIZED_DUPLICATE", "source_commit": commit,
+                    "merge_commit": merge, "version": evidence["version"]}
+        develop, prod = heads(source)
+        require(develop == commit and prod == merge, "release branches moved after existing promotion")
+        require(git(source, "rev-list", "--parents", "-n", "1", merge).split()
+                == [merge, previous, commit], "existing promotion merge parents do not match receipt")
+        return {"decision": "PENDING_RECOVERY", "source_commit": commit,
+                "merge_commit": merge, "version": evidence["version"]}
+
+
 def promote(source, state, evidence, policy, root, receipt_key, now, approval=None, approval_key=None,
             expected_remote=REMOTE, recover=False):
     # expected_remote is injectable only for offline tests; CLI always fixes it.
@@ -257,7 +296,7 @@ def deploy_handoff(promotion, key, evidence, policy, root, now, approval=None, a
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["review", "approve", "promote", "recover", "handoff"])
+    parser.add_argument("command", choices=["review", "approve", "status", "promote", "recover", "handoff"])
     parser.add_argument("--evidence", type=Path, required=True)
     parser.add_argument("--policy", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -280,6 +319,9 @@ def main():
             result = review(evidence, policy, root, now)
         elif args.command == "approve":
             result = approve(evidence, policy, root, json.loads(args.identity.read_bytes()), approval_key, now)
+        elif args.command == "status":
+            result = promotion_status(args.source, State(args.state_directory), evidence, policy, root,
+                                      receipt_key, now)
         elif args.command in ("promote", "recover"):
             result = promote(args.source, State(args.state_directory), evidence, policy, root, receipt_key, now,
                              approval, approval_key, recover=args.command == "recover")

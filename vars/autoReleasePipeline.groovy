@@ -93,7 +93,8 @@ def call(Map config = [:]) {
             stage('Load Trusted Release Controls') {
                 ['release-gate.py', 'release-evidence.py', 'release-promotion.py', 'release-preflight.py',
                  'release-finalization.py', 'release-finalize.sh', 'error-handler.sh', 'nexus-upload.sh', 'git-tag.sh',
-                 'harbor-vulnerability-report.py', 'release-askpass.sh', 'release-recovery.py', 'release-rebuild.py'].each { name ->
+                 'harbor-vulnerability-report.py', 'release-askpass.sh', 'release-recovery.py', 'release-rebuild.py',
+                 'scanner-db-manager.py'].each { name ->
                     writeFile file: "control/${name}", text: libraryResource("scripts/common/${name}")
                 }
                 def commonStages = ['Checkout', 'Load Scripts', 'Detect', 'Early Capacity Admission', 'Secret Scan', 'Build', 'Test',
@@ -108,7 +109,8 @@ def call(Map config = [:]) {
                     candidate_mode: true, compose_candidate_v2: true, develop_mode: 'lean-success-v1',
                     waivable_stages: ['Test', 'Fast Contract Test', 'Dependency Scan', 'Image Scan'],
                     required_stages: [promotion: developStages, deployment: commonStages],
-                    required_scanners: ['trivy', 'govulncheck', 'harbor'], max_evidence_age_seconds: 3600,
+                    required_scanners: ['trivy', 'govulncheck', 'harbor'],
+                    max_evidence_age_seconds: 3600, max_build_age_seconds: 7200,
                     not_applicable_advisories: [[id: 'GO-2026-5932',
                         affected_package_prefix: 'golang.org/x/crypto/openpgp',
                         required_package_graphs: ['linux-arm64-nodynamic-tests',
@@ -243,15 +245,52 @@ python3 control/release-recovery.py handoff --root recovery --source recovery-so
                         if (branch == 'develop') {
                             if (review.decision != 'PASS') { error('Lean develop SUCCESS gate blocked') }
                         } else if (review.decision == 'NEEDS_APPROVAL') {
+                            sh '''rm -rf "$RELEASE_PHASE/approval-request-evidence"
+cp -R "$RELEASE_PHASE/evidence" "$RELEASE_PHASE/approval-request-evidence"
+cp "$RELEASE_PHASE/review.json" "$RELEASE_PHASE/approval-request-review.json"'''
+                            archiveArtifacts artifacts: "${branch}/approval-request-review.json,${branch}/approval-request-evidence/**", allowEmptyArchive: false
                             def response
-                            timeout(time: 15, unit: 'MINUTES') {
+                            timeout(time: 90, unit: 'MINUTES') {
                                 response = input(id: "${branch}-cve-exception", submitter: config.approvers.join(','),
                                     submitterParameter: 'APPROVER', ok: 'Approve these exact findings',
-                                    message: "${branch} build #${number}: ${review.findings.size()} exact test-stage/CVE findings. Review the archived ${branch}/review.json and native reports; approval applies only to this gate and expires in 15 minutes. Original CI results remain unchanged.",
+                                    message: "${branch} build #${number}: ${review.findings.size()} exact findings. Review the archived approval request. After approval the coordinator rescans the same immutable source/image; changed findings require a new request, and any signed exception then expires in 15 minutes.",
                                     parameters: [text(name: 'REASON', defaultValue: '', description: 'Reason for accepting the listed findings')])
                             }
                             if (!response.REASON?.trim() || !config.approvers.contains(response.APPROVER)) {
                                 error('Exception approval identity/reason is invalid')
+                            }
+                            // Approval is never signed against evidence that sat idle while
+                            // waiting. Preserve the request, refresh all native scanner data,
+                            // and require the exact same finding identities.
+                            withCredentials([usernamePassword(credentialsId: config.harborCredentials,
+                                usernameVariable: 'HARBOR_USER', passwordVariable: 'HARBOR_PASS')]) {
+                                sh '''rm -f "$RELEASE_PHASE/evidence/trivy-native.json" \
+    "$RELEASE_PHASE/evidence/govulncheck-stream.jsonl" \
+    "$RELEASE_PHASE/evidence/govulncheck-native.json" \
+    "$RELEASE_PHASE/evidence/package-graphs.json" \
+    "$RELEASE_PHASE/evidence/harbor-native.json" \
+    "$RELEASE_PHASE/evidence/trivy.json" \
+    "$RELEASE_PHASE/evidence/govulncheck.json" \
+    "$RELEASE_PHASE/evidence/harbor.json" \
+    "$RELEASE_PHASE/evidence/evidence.json"
+python3 "$RELEASE_CONTROL/release-evidence.py" scan \
+    --identity "$RELEASE_PHASE/identity.json" --source "$RELEASE_PHASE/source" \
+    --output "$RELEASE_PHASE/evidence" --harbor-url "$RELEASE_HARBOR_URL"
+python3 "$RELEASE_CONTROL/release-promotion.py" review \
+    --evidence "$RELEASE_PHASE/evidence/evidence.json" --policy "$RELEASE_CONTROL/policy.json" \
+    --output "$RELEASE_PHASE/revalidated-review.json"'''
+                            }
+                            def revalidated = parseReleaseJson(readFile("${phase}/revalidated-review.json"))
+                            if (revalidated.decision == 'NEEDS_APPROVAL') {
+                                if (review.findings.keySet().sort() != revalidated.findings.keySet().sort()) {
+                                    error('Exact findings changed during approval wait; a new review is required')
+                                }
+                            } else if (revalidated.decision != 'PASS') {
+                                error('Revalidated release gate blocked')
+                            }
+                            archiveArtifacts artifacts: "${branch}/revalidated-review.json,${branch}/evidence/*.json,${branch}/evidence/*.jsonl", allowEmptyArchive: false
+                            if (revalidated.decision == 'PASS') {
+                                return
                             }
                             writeFile file: "${phase}/approval-identity.json", text: JsonOutput.toJson([
                                 id: "${env.JOB_NAME}#${env.BUILD_NUMBER}:${branch}",
@@ -322,6 +361,32 @@ python3 control/release-rebuild.py handoff --root published --source prod/source
             }
 
             verifyPhase('develop', sourceBuild, requestedCommit ?: null)
+            if (!requestedBuild) {
+                stage('Deduplicate Release Source') {
+                    withCredentials([
+                        usernamePassword(credentialsId: config.mergeCredentials,
+                            usernameVariable: 'RELEASE_GIT_USER', passwordVariable: 'RELEASE_GIT_PASSWORD'),
+                        file(credentialsId: config.receiptKeyCredentials, variable: 'RECEIPT_KEY_FILE')]) {
+                        withEnv(["RELEASE_STATE=${config.stateDirectory}",
+                                 "GIT_ASKPASS=${control}/release-askpass.sh", 'GIT_TERMINAL_PROMPT=0']) {
+                            sh '''chmod 700 "$GIT_ASKPASS"
+python3 control/release-promotion.py status --source develop/source --state-directory "$RELEASE_STATE" \
+    --evidence develop/evidence/evidence.json --policy control/policy.json \
+    --receipt-key-file "$RECEIPT_KEY_FILE" --output source-status.json'''
+                        }
+                    }
+                    archiveArtifacts artifacts: 'source-status.json', allowEmptyArchive: false
+                }
+                def sourceStatus = parseReleaseJson(readFile('source-status.json'))
+                if (sourceStatus.decision != 'NEW') {
+                    currentBuild.description = "${sourceStatus.decision.toString().toLowerCase()} ${sourceStatus.source_commit.take(12)}"
+                    return
+                }
+            }
+            stage('Prepare Managed Release Prerequisites') {
+                sh 'python3 control/scanner-db-manager.py --local-cache "$HOME/.cache/shiba-release-trivy" --output scanner-db-receipt.json'
+                archiveArtifacts artifacts: 'scanner-db-receipt.json', allowEmptyArchive: false
+            }
             stage('Promote Verified Commit') {
                 def promotionCommand = requestedBuild ? 'recover' : 'promote'
                 withCredentials([
@@ -403,7 +468,7 @@ python3 control/release-promotion.py handoff --promotion promotion.json --finali
                 // Preserve only release evidence, never source checkouts, scanner
                 // caches or credential files. If archival fails, retain the
                 // workspace for diagnosis instead of destroying the only copy.
-                archiveArtifacts artifacts: 'control/policy.json,develop/identity.json,prod/identity.json,develop/review.json,prod/review.json,develop/approval.json,prod/approval.json,develop/evidence/*.json,develop/evidence/*.jsonl,prod/evidence/*.json,prod/evidence/*.jsonl,develop/evidence/.pipeline/candidate*,prod/evidence/.pipeline/candidate*,develop/evidence/.pipeline/candidate-stages/*,prod/evidence/.pipeline/candidate-stages/*,develop/evidence/reports/junit/*,prod/evidence/reports/junit/*,promotion.json,finalization.json,deployment-request.json,prod/source/.pipeline/release-manifest.env,recovery/**,published/**', allowEmptyArchive: true
+                archiveArtifacts artifacts: 'control/policy.json,scanner-db-receipt.json,develop/identity.json,prod/identity.json,develop/review.json,prod/review.json,develop/revalidated-review.json,prod/revalidated-review.json,develop/approval-request-review.json,prod/approval-request-review.json,develop/approval-request-evidence/**,prod/approval-request-evidence/**,develop/approval.json,prod/approval.json,develop/evidence/*.json,develop/evidence/*.jsonl,prod/evidence/*.json,prod/evidence/*.jsonl,develop/evidence/.pipeline/candidate*,prod/evidence/.pipeline/candidate*,develop/evidence/.pipeline/candidate-stages/*,prod/evidence/.pipeline/candidate-stages/*,develop/evidence/reports/junit/*,prod/evidence/reports/junit/*,promotion.json,finalization.json,deployment-request.json,prod/source/.pipeline/release-manifest.env,recovery/**,published/**', allowEmptyArchive: true
                 // This dir is scoped to this exact build, not the agent root,
                 // persistent dependency cache, release state or runtime data.
                 deleteDir()

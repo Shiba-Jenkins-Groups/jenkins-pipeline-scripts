@@ -21,7 +21,7 @@ class AdmissionTest(unittest.TestCase):
                     str(Path(directory) / "policy.toml"), "--output", str(output)]
             calls = []
 
-            def observe(_script, _output):
+            def observe(_script, _output, _profile="k3d"):
                 state = states.pop(0)
                 if isinstance(state, dict):
                     return state

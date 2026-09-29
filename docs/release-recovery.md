@@ -3,10 +3,10 @@
 The normal path remains develop branch CI, trusted coordinator verification,
 prod merge and CI, then the signed PROD owner deployment job.
 
-The macOS deployment agent must be managed by launchd, not by a terminal owned
-by a conversation. `resources/scripts/common/install-prod-owner-agent.py` renders
-the configuration by default; `--install` loads it for the existing logged-in
-user. Supply the existing `--java` executable and `--agent-root`. It preserves
+The macOS deployment agent is managed by launchd. The trusted
+`resources/scripts/common/install-prod-owner-agent.py` supports the explicit
+`render`, `install`, `status`, `start`, and `stop` actions; the legacy `--install`
+flag remains accepted. Supply the existing `--java` executable and `--agent-root`. It preserves
 the existing private JNLP, refuses differing installed configuration, and does
 not change Jenkins node identity or credentials. This is a user LaunchAgent:
 logout stops it; a deployment requires that this user be logged in.
