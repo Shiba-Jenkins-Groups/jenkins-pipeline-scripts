@@ -246,6 +246,47 @@ def verified_not_applicable(evidence, policy, root, native_reports, findings):
     return {NOT_APPLICABLE_RULE["id"]}
 
 
+def verified_findings(evidence, policy, root, now):
+    """Use one evidence-checked exception set for review, signing and enforcement.
+
+    Native reports stay intact; only proven not-applicable advisories are excluded.
+    """
+    reports = evidence["reports"]
+    require(isinstance(reports, list) and reports, "missing reports")
+    scanners = [report["scanner"] for report in reports]
+    require(len(scanners) == len(set(scanners)), "duplicate scanner report")
+    require(set(scanners) == set(policy["required_scanners"]), "scanner set mismatch")
+    require(set(policy["required_scanners"]) == {"trivy", "govulncheck", "harbor"},
+            "required scanner policy cannot be weakened")
+    findings = {finding_key(item): item for item in stage_findings(evidence, policy, root)}
+    native_reports = {}
+    for record in reports:
+        report = verified_report(root, record)
+        # The adapter must retain native report bytes alongside this normalized
+        # envelope and bind their hash. Empty findings alone never prove success.
+        require(report.get("schema_version") == 1, "invalid report schema")
+        require(report.get("scanner") == record["scanner"], "scanner identity mismatch")
+        require(report.get("complete") is True and report.get("unfiltered") is True,
+                "incomplete or filtered report")
+        require(report.get("scanner_version") and report.get("database_revision"),
+                "missing scanner provenance")
+        require(report.get("commit") == evidence["commit"], "report commit mismatch")
+        require(report.get("image_digest") == evidence["image_digest"], "report digest mismatch")
+        require(set(report["severities"]) == SEVERITIES, "severity coverage incomplete")
+        scan_age = (now - timestamp(report["completed_at"])).total_seconds()
+        require(0 <= scan_age <= policy["max_evidence_age_seconds"], "stale scan")
+        native = verified_report(root, report["native_report"])
+        native_reports[record["scanner"]] = native
+        require(native, "empty native report")
+        for finding in native_findings(record["scanner"], native, evidence["image_digest"]):
+            require(finding.get("scanner") == record["scanner"], "finding scanner mismatch")
+            require(finding.get("severity") in SEVERITIES, "unknown severity encoding")
+            findings[finding_key(finding)] = finding
+    not_applicable = verified_not_applicable(evidence, policy, root, native_reports, findings.values())
+    findings = {key: item for key, item in findings.items() if item["id"] not in not_applicable}
+    return findings, not_applicable
+
+
 def evaluate(evidence, policy, root, now, approval=None, approval_key=None):
     """Fail closed; callers must also authenticate the evidence and policy source."""
     require(evidence.get("schema_version") == 1 and policy.get("schema_version") == 1,
@@ -297,38 +338,7 @@ def evaluate(evidence, policy, root, now, approval=None, approval_key=None):
     if lean:
         require(reports == [] and approval is None, 'lean develop cannot carry scanner evidence or approval')
         return {"decision": "PASS", "finding_count": 0, "not_applicable": []}
-    require(isinstance(reports, list) and reports, "missing reports")
-    scanners = [report["scanner"] for report in reports]
-    require(len(scanners) == len(set(scanners)), "duplicate scanner report")
-    require(set(scanners) == set(policy["required_scanners"]), "scanner set mismatch")
-    require(set(policy["required_scanners"]) == {"trivy", "govulncheck", "harbor"},
-            "required scanner policy cannot be weakened")
-    findings = {finding_key(item): item for item in stage_findings(evidence, policy, root)}
-    native_reports = {}
-    for record in reports:
-        report = verified_report(root, record)
-        # The adapter must retain native report bytes alongside this normalized
-        # envelope and bind their hash. Empty findings alone never prove success.
-        require(report.get("schema_version") == 1, "invalid report schema")
-        require(report.get("scanner") == record["scanner"], "scanner identity mismatch")
-        require(report.get("complete") is True and report.get("unfiltered") is True,
-                "incomplete or filtered report")
-        require(report.get("scanner_version") and report.get("database_revision"),
-                "missing scanner provenance")
-        require(report.get("commit") == evidence["commit"], "report commit mismatch")
-        require(report.get("image_digest") == evidence["image_digest"], "report digest mismatch")
-        require(set(report["severities"]) == SEVERITIES, "severity coverage incomplete")
-        scan_age = (now - timestamp(report["completed_at"])).total_seconds()
-        require(0 <= scan_age <= policy["max_evidence_age_seconds"], "stale scan")
-        native = verified_report(root, report["native_report"])
-        native_reports[record["scanner"]] = native
-        require(native, "empty native report")
-        for finding in native_findings(record["scanner"], native, evidence["image_digest"]):
-            require(finding.get("scanner") == record["scanner"], "finding scanner mismatch")
-            require(finding.get("severity") in SEVERITIES, "unknown severity encoding")
-            findings[finding_key(finding)] = finding
-    not_applicable = verified_not_applicable(evidence, policy, root, native_reports, findings.values())
-    findings = {key: item for key, item in findings.items() if item["id"] not in not_applicable}
+    findings, not_applicable = verified_findings(evidence, policy, root, now)
     if not findings:
         require(approval is None, "unexpected approval for clean evidence")
         return {"decision": "PASS", "finding_count": 0,

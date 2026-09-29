@@ -37,16 +37,6 @@ def verify(signed, key):
     return signed["payload"]
 
 
-def findings(evidence, root, policy=None):
-    values = {gate.finding_key(item): item for item in gate.stage_findings(evidence, policy or {}, root)}
-    for record in evidence["reports"]:
-        envelope = gate.verified_report(root, record)
-        native = gate.verified_report(root, envelope["native_report"])
-        for finding in gate.native_findings(record["scanner"], native, evidence["image_digest"]):
-            values[gate.finding_key(finding)] = finding
-    return values
-
-
 def review(evidence, policy, root, now):
     try:
         return gate.evaluate(evidence, policy, root, now)
@@ -54,17 +44,18 @@ def review(evidence, policy, root, now):
         if str(exc) != "unapproved vulnerabilities":
             raise
     return {"decision": "NEEDS_APPROVAL", "evidence_sha256": hashlib.sha256(gate.canonical(evidence)).hexdigest(),
-            "findings": findings(evidence, root, policy)}
+            "findings": gate.verified_findings(evidence, policy, root, now)[0]}
 
 
 def approve(evidence, policy, root, identity, key, now):
-    require(review(evidence, policy, root, now)["decision"] == "NEEDS_APPROVAL", "nothing eligible for exception")
+    reviewed = review(evidence, policy, root, now)
+    require(reviewed["decision"] == "NEEDS_APPROVAL", "nothing eligible for exception")
     payload = {"id": identity["id"], "approver": identity["approver"], "reason": identity["reason"],
                "issued_at": now.isoformat(),
                "expires_at": (now + dt.timedelta(seconds=policy["max_exception_seconds"])).isoformat(),
                "evidence_sha256": hashlib.sha256(gate.canonical(evidence)).hexdigest(),
                "policy_sha256": hashlib.sha256(gate.canonical(policy)).hexdigest(),
-               "finding_keys": sorted(findings(evidence, root, policy))}
+               "finding_keys": sorted(reviewed["findings"])}
     signed = sign(payload, key)
     gate.evaluate(evidence, policy, root, now, signed, key)
     return signed

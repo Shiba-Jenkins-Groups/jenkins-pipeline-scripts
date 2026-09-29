@@ -49,6 +49,72 @@ class Controls(unittest.TestCase):
                  f"IMAGE_REF=localhost:9290/{adapter.gate.PRODUCT}/{branch}/1.0.32:188\nIMAGE_DIGEST={self.fixture.digest}\n")
         return built, workflow, image
 
+    def mixed_advisories(self):
+        graph = self.fixture.configure_openpgp_not_applicable()
+        for advisory, package, version in [('GO-2026-5932', 'golang.org/x/crypto', 'v0.56.0'),
+                                           ('DLA-4792-1', 'tzdata', '2026b-0+deb12u1')]:
+            self.fixture.native['trivy']['Results'][0]['Vulnerabilities'].append({
+                'VulnerabilityID': advisory, 'PkgName': package,
+                'InstalledVersion': version, 'Severity': 'UNKNOWN'})
+            self.fixture.native['harbor']['report']['vulnerabilities'].append({
+                'id': advisory, 'package': package, 'version': version, 'severity': 'Unknown'})
+        self.fixture.native['govulncheck']['messages'].append({'finding': {
+            'osv': 'GO-2026-5932', 'trace': [{'module': 'golang.org/x/crypto', 'version': 'v0.56.0'}]}})
+        self.fixture.write_reports()
+        return graph
+
+    def approve_mixed(self):
+        return promotion.approve(self.evidence, self.policy, self.root,
+            {'id': 'mixed-advisory-fixture', 'approver': 'test-approver',
+             'reason': 'Accept only this build and its exact tzdata findings'}, self.key, self.now)
+
+    def test_mixed_not_applicable_and_waivable_findings_share_exact_approval_set(self):
+        self.mixed_advisories()
+        original = {p.name: p.read_bytes() for p in self.root.glob('*.json')}
+        review = promotion.review(self.evidence, self.policy, self.root, self.now)
+        self.assertEqual(review['decision'], 'NEEDS_APPROVAL')
+        self.assertEqual(len(review['findings']), 2)
+        self.assertEqual({item['id'] for item in review['findings'].values()}, {'DLA-4792-1'})
+        self.assertEqual({item['scanner'] for item in review['findings'].values()}, {'trivy', 'harbor'})
+        approval = self.approve_mixed()
+        self.assertEqual(approval['payload']['finding_keys'], sorted(review['findings']))
+        decision = promotion.gate.evaluate(self.evidence, self.policy, self.root, self.now,
+                                           approval, self.key)
+        self.assertEqual((decision['decision'], decision['finding_count']), ('APPROVED_EXCEPTION', 2))
+        self.assertEqual({p.name: p.read_bytes() for p in self.root.glob('*.json')}, original)
+
+    def test_mixed_findings_cannot_approve_unproven_not_applicable_advisory(self):
+        graph = self.mixed_advisories()
+        graph['graphs'][0]['packages'].append('golang.org/x/crypto/openpgp/packet')
+        self.evidence['package_graph'] = self.fixture.write('package-graphs.json', graph)
+        with self.assertRaisesRegex(promotion.gate.InvalidEvidence, 'affected openpgp package'):
+            self.approve_mixed()
+        graph['graphs'][0]['packages'].pop()
+        self.evidence['package_graph'] = self.fixture.write('package-graphs.json', graph)
+        self.fixture.native['govulncheck']['messages'][-1]['finding']['trace'][0]['package'] = 'golang.org/x/crypto/openpgp'
+        self.fixture.write_reports()
+        with self.assertRaisesRegex(promotion.gate.InvalidEvidence, 'govulncheck reports'):
+            self.approve_mixed()
+
+    def test_mixed_findings_legacy_broad_approval_and_tampered_report_still_block(self):
+        self.mixed_advisories()
+        with self.assertRaisesRegex(promotion.gate.InvalidEvidence, 'approval does not match exact findings'):
+            promotion.gate.evaluate(self.evidence, self.policy, self.root, self.now,
+                                    self.fixture.approval(), self.key)
+        (self.root / 'trivy-native.json').write_text('{}')
+        with self.assertRaisesRegex(promotion.gate.InvalidEvidence, 'checksum mismatch'):
+            self.approve_mixed()
+
+    def test_mixed_findings_preserve_other_advisories_for_explicit_review(self):
+        self.mixed_advisories()
+        self.fixture.native['harbor']['report']['vulnerabilities'].append({
+            'id': 'CVE-TEST-UNAPPROVED', 'package': 'other', 'version': '1', 'severity': 'High'})
+        self.fixture.write_reports()
+        review = promotion.review(self.evidence, self.policy, self.root, self.now)
+        self.assertEqual(len(review['findings']), 3)
+        self.assertEqual({item['id'] for item in review['findings'].values()},
+                         {'DLA-4792-1', 'CVE-TEST-UNAPPROVED'})
+
     def lean_inputs(self):
         built, _, _ = self.build_inputs('develop')
         stages = ([{"name": name, "status": "SUCCESS"} for name in adapter.LEAN_STAGES]
