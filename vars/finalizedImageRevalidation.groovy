@@ -55,7 +55,7 @@ def call(Map config, Map lane) {
                 sh '''printf '\n/reports/\n/gitleaks-report.json\n/coverage.out\n' >> "$(git rev-parse --git-path info/exclude)"'''
             }
             ['common/error-handler.sh', 'common/secret-scan.sh', 'common/branch-policy.sh',
-             'common/release-revalidation-checks.sh', 'go/go-env.sh', 'go/go-build.sh', 'go/go-test.sh'].each { name ->
+             'common/release-revalidation-checks.sh', 'go/go-env.sh', 'go/go-build.sh', 'go/go-test.sh', 'go/go-archive.sh'].each { name ->
                 writeFile file: "${source}/.pipeline/scripts/${name}", text: libraryResource("scripts/${name}")
             }
             writeFile file: "${phase}/runtime/image-ref.txt", text: """APP_NAME=shiba-go-ditch-api-project

@@ -10,6 +10,7 @@
 - 新增明確啟用的同映像重新驗證入口：保留原始簽章鏈與失敗紀錄，以本輪 source tests、contracts、package graphs、三項掃描及隔離 runtime 驗證簽發短效 schema 4 授權；不重建映像、不改 tag 或 Nexus 成品。
 - PROD owner 換版時以獨立受控交易交接 active App 容器身分、共同 admission 與安裝收據；原 native binary、其他服務與憑證保留，中斷保留備份及 pending。
 - 既有 DEV contract rehearsal 納入新入口及歷史 recovery／rebuild 的離線契約；新 fresh lane 獨立為小型 CPS 腳本。
+- 補齊原 App 契約需要檢查的 `go-archive.sh` 資源，並以實際載入內容驗證 Go runner 完整性；不執行封裝發布。
 
 ### Changed（全域 K3D 共用驗證池）
 

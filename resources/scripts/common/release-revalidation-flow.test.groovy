@@ -10,6 +10,8 @@ def config = [approvers: ['operator'], jenkinsApiUrl: 'http://jenkins.invalid',
     harborCredentials: 'harbor', nexusCredentials: 'nexus', deploymentJob: owner]
 def simulate = { Map options = [:] ->
     def calls = []
+    def resources = []
+    def written = [:]
     def binding = new Binding()
     binding.setVariable('env', [JOB_NAME: options.foreignJob ? 'untrusted' : coordinator, BUILD_NUMBER: '195'])
     binding.setVariable('params', [SOURCE_BUILD: '357', EXPECTED_COMMIT: 'b' * 40,
@@ -19,8 +21,12 @@ def simulate = { Map options = [:] ->
         userId: options.foreignUser ? 'intruder' : 'operator']] }])
     binding.setVariable('error', { String message -> throw new IllegalStateException(message) })
     binding.setVariable('pwd', { -> '/fake/workspace' })
-    binding.setVariable('libraryResource', { String name -> '# offline resource' })
-    ['writeFile', 'checkout', 'archiveArtifacts'].each { name ->
+    binding.setVariable('libraryResource', { String name ->
+        resources << name
+        new File(root, "resources/${name}").getText('UTF-8')
+    })
+    binding.setVariable('writeFile', { Map value -> written[value.file.toString()] = value.text; calls << 'writeFile' })
+    ['checkout', 'archiveArtifacts'].each { name ->
         binding.setVariable(name, { Map value -> calls << name })
     }
     ['usernamePassword', 'file', 'text'].each { name ->
@@ -53,7 +59,7 @@ def simulate = { Map options = [:] ->
         pipeline.call(config, [root: '/fake/workspace', control: '/fake/workspace/control',
             coordinator: '193', owner: '90', sourceBuild: 357, sourceCommit: 'b' * 40, approver: 'operator'])
     } catch (IllegalStateException expected) { failed = true }
-    [calls: calls, failed: failed]
+    [calls: calls, failed: failed, resources: resources, written: written]
 }
 int count = 0
 def success = simulate()
@@ -61,6 +67,18 @@ assert !success.failed && success.calls.count('owner-deploy') == 1
 assert success.calls.indexOf('Authorize Fresh Same Image Deployment') < success.calls.indexOf('owner-deploy')
 assert success.calls[-1] == 'archiveArtifacts'
 assert !success.calls.any { it.toString().contains('docker build') || it.toString().contains('git tag') }
+count++
+// App's ci-go-budget contract inspects all three shared Go entrypoints. The
+// archive resource is observed only, never invoked/published by this lane.
+for (String name in ['go-env.sh', 'go-build.sh', 'go-test.sh', 'go-archive.sh']) {
+    String resource = "scripts/go/${name}"
+    String destination = "/fake/workspace/revalidation/source/.pipeline/${resource}"
+    assert success.resources.contains(resource) : "Missing contract runner resource: ${resource}"
+    assert success.written[destination] == new File(root, "resources/${resource}").getText('UTF-8')
+    if (name != 'go-env.sh') {
+        assert success.written[destination].contains('source "${SCRIPT_DIR}/go/go-env.sh"')
+    }
+}
 count++
 for (String phase in ['Authenticate Original Finalized Failed Deployment', 'Fresh Source Secret Build Vet and Tests',
         'Fresh Finalized Source Contracts', 'Verify Original Immutable Image in Isolation',
