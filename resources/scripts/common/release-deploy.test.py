@@ -10,7 +10,7 @@ from pathlib import Path
 import tempfile
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 spec = importlib.util.spec_from_file_location("deploy_runner", Path(__file__).with_name("release-deploy.py"))
 runner = importlib.util.module_from_spec(spec)
@@ -19,6 +19,10 @@ spec.loader.exec_module(runner)
 
 class Deployment(unittest.TestCase):
     def setUp(self):
+        # These owner contracts never inspect the actual host installation.
+        self.binding_patch = patch.object(runner, 'begin_app_binding', return_value=None)
+        self.binding_begin = self.binding_patch.start()
+        self.addCleanup(self.binding_patch.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve()
@@ -181,6 +185,45 @@ class Deployment(unittest.TestCase):
         kwargs = process.call_args.kwargs
         self.assertTrue(kwargs['pass_fds'])
         self.assertEqual(kwargs['env']['SHIBA_EXPECTED_COMMIT'], self.commit)
+        with self.assertRaisesRegex(ValueError, 'already claimed'):
+            self.execute('again.json')
+        self.assertEqual(process.call_count, 1)
+
+    def test_busy_native_binding_blocks_before_claim_or_container_mutation(self):
+        process = self.execution_patches()
+        self.binding_begin.side_effect = ValueError('binding resource busy')
+        with self.assertRaisesRegex(ValueError, 'binding resource busy'):
+            self.execute()
+        process.assert_not_called()
+        self.assertFalse(list((self.root / 'state').glob('*.json')))
+
+    def test_native_binding_descriptors_span_deploy_and_finish_before_success(self):
+        process = self.execution_patches()
+        binding = Mock()
+        binding.env_for_deploy.side_effect = lambda env: dict(env, SHIBA_BINDING_TEST_LEASE='bound')
+        binding.pass_fds.return_value = (123, 456)
+        binding.finish.return_value = {'state': 'committed', 'app_only': True}
+        self.binding_begin.return_value = binding
+        receipt = self.execute()
+        self.assertEqual(process.call_args.kwargs['pass_fds'], (123, 456))
+        self.assertEqual(process.call_args.kwargs['env']['SHIBA_BINDING_TEST_LEASE'], 'bound')
+        binding.finish.assert_called_once_with({'commit': self.commit, 'digest': self.digest})
+        binding.close.assert_called_once_with()
+        self.assertEqual(runner.control.verify(receipt, self.key)['app_binding']['state'], 'committed')
+
+    def test_native_handoff_failure_cannot_issue_success_or_redeploy(self):
+        process = self.execution_patches()
+        binding = Mock()
+        binding.env_for_deploy.side_effect = lambda env: env
+        binding.pass_fds.return_value = (123,)
+        binding.finish.side_effect = ValueError('binding commit preserved pending')
+        self.binding_begin.return_value = binding
+        with self.assertRaisesRegex(ValueError, 'binding commit preserved pending'):
+            self.execute()
+        receipt = json.loads((self.root / 'receipt.json').read_bytes())
+        self.assertEqual(runner.control.verify(receipt, self.key)['status'], 'FAILED')
+        self.assertEqual(process.call_count, 1)
+        binding.close.assert_called_once_with()
         with self.assertRaisesRegex(ValueError, 'already claimed'):
             self.execute('again.json')
         self.assertEqual(process.call_count, 1)

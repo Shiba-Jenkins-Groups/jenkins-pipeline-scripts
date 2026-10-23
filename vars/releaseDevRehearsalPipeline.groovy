@@ -24,13 +24,20 @@ git --version
                     }
                     stage('Compile Delivery Pipeline with Jenkins CPS') {
                         echo ciPipeline.getClass().name
+                        echo autoReleasePipeline.getClass().name
+                        echo prodDeploymentPipeline.getClass().name
+                        echo finalizedImageRevalidation.getClass().name
                     }
                     stage('Load Pinned Offline Contract Suite') {
                         ['release-gate.py', 'release-evidence.py', 'release-promotion.py',
                          'release-finalization.py', 'release-deploy.py', 'release-candidate.py',
                          'release-gate.test.py', 'release-control.test.py',
                          'release-candidate.test.py', 'release-deploy.test.py',
-                         'runtime-image-verify.py', 'runtime-image-verify.test.py'].each { name ->
+                         'runtime-image-verify.py', 'runtime-image-verify.test.py',
+                         'release-recovery.py', 'release-recovery.test.py',
+                         'release-rebuild.py', 'release-rebuild.test.py',
+                         'release-revalidate.py', 'release-revalidate.test.py',
+                         'release-app-binding.py', 'release-app-binding.test.py'].each { name ->
                             writeFile file: "suite/${name}", text: libraryResource("scripts/common/${name}")
                         }
                         writeFile file: 'reviewed-library.txt', text: config.libraryRevision + '\n'
@@ -43,7 +50,7 @@ export GIT_CONFIG_GLOBAL=/dev/null
 export GIT_CONFIG_NOSYSTEM=1
 export GIT_TERMINAL_PROMPT=0
 mkdir -p reports
-for suite in release-gate release-control release-candidate release-deploy runtime-image-verify; do
+for suite in release-gate release-control release-candidate release-deploy runtime-image-verify release-recovery release-rebuild release-revalidate release-app-binding; do
   python3 "suite/${suite}.test.py" 2>&1 | tee "reports/${suite}.log"
 done
 python3 - <<'PY'
@@ -51,6 +58,9 @@ import hashlib,json,pathlib
 root=pathlib.Path('.')
 receipt={'scope':'DEV_CONTRACT_ONLY','runtime_deployed':False,'prod_enabled':False,
          'result':'SUCCESS','library_revision':(root/'reviewed-library.txt').read_text().strip(),
+         'executed_suites':['release-gate','release-control','release-candidate','release-deploy',
+                            'runtime-image-verify','release-recovery','release-rebuild',
+                            'release-revalidate','release-app-binding'],
          'source_sha256':{p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted((root/'suite').glob('*.py'))}}
 (root/'reports/contract-receipt.json').write_text(json.dumps(receipt,indent=2)+chr(10))
 PY

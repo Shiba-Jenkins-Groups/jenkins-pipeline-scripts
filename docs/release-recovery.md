@@ -75,6 +75,21 @@ Failure preserves the new attempt too; rollback remains separately authorized.
 If the one-hour original evidence window expires, stop. This lane does not
 refresh timestamps or permit rebuilding an already finalized version.
 
+For an explicitly authorized, unchanged-image retry after that window, the
+separate [same-image revalidation lane](release-revalidation.md) runs new checks
+under the current fixed coordinator. Supply the original four recovery fields
+and `REVALIDATE_FINALIZED_IMAGE=true`. It keeps the signed historical chain,
+original digest/tag/Nexus bytes and original failed state, and never substitutes
+a newer develop build into the old signatures. Its new schema 4 authorization
+expires within fifteen minutes of current verification. The original retry and
+disaster-rebuild lanes retain their own unchanged limits.
+
+An activated native service-control installation also requires the
+[App binding transaction](app-active-binding-handoff.md) during owner deployment.
+It remains status-only for App, preserves other service policies, and refuses
+ambiguous operations or dependencies that are not ready before pausing the
+native manager. Do not hand-edit registry JSON or clear pending state to deploy.
+
 ## Published PROD disaster rebuild (2026-09-16)
 
 An explicitly authorized operator may submit `REBUILD_PROD_COMMIT` and

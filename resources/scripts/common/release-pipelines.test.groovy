@@ -58,6 +58,11 @@ def simulate = { String filename, Map options = [:] ->
         body()
     })
     binding.setVariable('pwd', { -> '/fake/workspace' })
+    binding.setVariable('finalizedImageRevalidation', { Map supplied, Map lane ->
+        assert lane.coordinator == '53' && lane.owner == '19'
+        assert lane.sourceBuild == 188 && lane.sourceCommit == 'b' * 40
+        calls << 'fresh-same-image-lane'
+    })
     binding.setVariable('libraryResource', { String name -> '# fake trusted resource' })
     binding.setVariable('sh', { Object script ->
         calls << script.toString()
@@ -141,6 +146,21 @@ assert !deployedRecovery.calls.contains('Finalize Revalidated PROD Candidate')
 assert deployedRecovery.calls.any { it.toString().contains('release-recovery.py collect') }
 assert deployedRecovery.calls.any { it.toString().contains('release-recovery.py handoff') }
 tests++
+def revalidatedImage = simulate('autoReleasePipeline.groovy', [
+    recoveryParams: deploymentRecovery + [REVALIDATE_FINALIZED_IMAGE: 'true']])
+assert !revalidatedImage.failed && revalidatedImage.calls.count('fresh-same-image-lane') == 1
+assert !revalidatedImage.calls.contains('Promote Verified Commit')
+assert !revalidatedImage.calls.contains('Revalidate Original Finalized Release')
+assert !revalidatedImage.calls.any { it.toString().startsWith('build:') }
+tests++
+for (options in [[recoveryParams: deploymentRecovery + [REVALIDATE_FINALIZED_IMAGE: 'yes']],
+                 [recoveryParams: recovery + [REVALIDATE_FINALIZED_IMAGE: 'true']],
+                 [recoveryParams: deploymentRecovery + [REVALIDATE_FINALIZED_IMAGE: 'true'], badUser: true],
+                 [recoveryParams: deploymentRecovery + [REVALIDATE_FINALIZED_IMAGE: 'true'], replay: true]]) {
+    def rejected = simulate('autoReleasePipeline.groovy', options)
+    assert rejected.failed && !rejected.calls.contains('fresh-same-image-lane')
+    tests++
+}
 for (options in [[recoveryParams: deploymentRecovery, badUser: true], [recoveryParams: deploymentRecovery, replay: true],
                  [recoveryParams: recovery + [RECOVER_COORDINATOR_BUILD: '53']],
                  [recoveryParams: [RECOVER_COORDINATOR_BUILD: '53', RECOVER_OWNER_BUILD: '19']],

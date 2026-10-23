@@ -5,6 +5,12 @@
 
 ## [Unreleased]
 
+### Fixed（已定版原映像的部署恢復與 App 容器交接）
+
+- 新增明確啟用的同映像重新驗證入口：保留原始簽章鏈與失敗紀錄，以本輪 source tests、contracts、package graphs、三項掃描及隔離 runtime 驗證簽發短效 schema 4 授權；不重建映像、不改 tag 或 Nexus 成品。
+- PROD owner 換版時以獨立受控交易交接 active App 容器身分、共同 admission 與安裝收據；原 native binary、其他服務與憑證保留，中斷保留備份及 pending。
+- 既有 DEV contract rehearsal 納入新入口及歷史 recovery／rebuild 的離線契約；新 fresh lane 獨立為小型 CPS 腳本。
+
 ### Changed（全域 K3D 共用驗證池）
 
 - 所有 CD verification 改用每個 build 獨立的 `ci-dev-*`／`ci-prod-*` namespace；跨專案

@@ -4,6 +4,7 @@
 No host mounts, runtime ports, production networks, credentials or Kubernetes.
 Both processes use the image's nonroot user. Only the App needs an empty DB.
 """
+import argparse
 import json
 import os
 from pathlib import Path
@@ -24,7 +25,7 @@ def docker(*args, timeout=120, check=True):
     return result
 
 
-def identity(root):
+def identity(root, revalidation=None):
     values = {}
     for line in (root / 'image-ref.txt').read_text().splitlines():
         key, value = line.split('=', 1)
@@ -34,8 +35,20 @@ def identity(root):
     product, branch, number = values['APP_NAME'], values['BRANCH'], values['BUILD_NUMBER']
     if product not in {APP, RECOGNITION} or branch != 'prod' or not re.fullmatch(r'[1-9][0-9]*', number):
         raise ValueError('verification requires a Shiba PROD build')
-    if os.environ['JOB_NAME'] != product + '/prod' or os.environ['BUILD_NUMBER'] != number:
-        raise ValueError('verification build mismatch')
+    if revalidation is None:
+        if os.environ['JOB_NAME'] != product + '/prod' or os.environ['BUILD_NUMBER'] != number:
+            raise ValueError('verification build mismatch')
+    else:
+        expected_fields = {'coordinator_job', 'coordinator_build', 'original_prod_build', 'commit', 'version', 'image'}
+        if (not isinstance(revalidation, dict) or set(revalidation) != expected_fields
+                or product != APP
+                or revalidation['coordinator_job'] != 'shiba-release-automation/' + APP + '-auto-release'
+                or os.environ['JOB_NAME'] != revalidation['coordinator_job']
+                or type(revalidation['coordinator_build']) is not int or revalidation['coordinator_build'] <= 0
+                or os.environ['BUILD_NUMBER'] != str(revalidation['coordinator_build'])
+                or type(revalidation['original_prod_build']) is not int
+                or str(revalidation['original_prod_build']) != number):
+            raise ValueError('revalidation coordinator identity mismatch')
     version, digest, commit = values['APP_VERSION'], values['IMAGE_DIGEST'], os.environ['GIT_COMMIT']
     if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version) or not re.fullmatch(r'sha256:[0-9a-f]{64}', digest) or not re.fullmatch(r'[0-9a-f]{40}', commit):
         raise ValueError('invalid version, digest or commit')
@@ -43,6 +56,9 @@ def identity(root):
     if values['IMAGE_REF'] != repository + ':' + number:
         raise ValueError('unexpected image repository')
     immutable = repository + '@' + digest
+    if revalidation is not None and (revalidation['commit'] != commit
+            or revalidation['version'] != version or revalidation['image'] != immutable):
+        raise ValueError('revalidation published image mismatch')
     images = json.loads(docker('image', 'inspect', immutable).stdout)
     if len(images) != 1 or immutable not in images[0].get('RepoDigests', []):
         raise ValueError('image digest mismatch')
@@ -61,8 +77,8 @@ def identity(root):
     return product, immutable, commit
 
 
-def verify(root):
-    product, image, commit = identity(root)
+def verify(root, revalidation=None):
+    product, image, commit = identity(root) if revalidation is None else identity(root, revalidation)
     token = 'shiba-ci-' + uuid.uuid4().hex
     name, bootstrap, volume = token, token + '-bootstrap', token + '-data'
     containers, created_volume = [], False
@@ -72,6 +88,8 @@ def verify(root):
     mount = []
     report = {'schema_version': 1, 'product': product, 'commit': commit,
               'image': image, 'profile': 'compose-v2', 'bootstrap_empty': product == APP}
+    if revalidation is not None:
+        report['revalidation_run'] = revalidation
     try:
         if product == APP:
             # Docker populates the new volume from image-owned /app/data (UID 65532).
@@ -141,4 +159,9 @@ def verify(root):
 
 
 if __name__ == '__main__':
-    verify(Path(os.environ.get('WORKSPACE', '.')).resolve())
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--revalidation', type=Path,
+                        help='Trusted coordinator run and original immutable image identity')
+    args = parser.parse_args()
+    verify(Path(os.environ.get('WORKSPACE', '.')).resolve(),
+           json.loads(args.revalidation.read_bytes()) if args.revalidation else None)

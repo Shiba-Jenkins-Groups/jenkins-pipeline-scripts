@@ -69,6 +69,11 @@ def failed_recovery_identity(request, key):
 
 def request_identity(signed, key, now):
     request = control.verify(signed, key)
+    if request.get("schema_version") == 4:
+        spec = importlib.util.spec_from_file_location("finalized_revalidation", Path(__file__).with_name("release-revalidate.py"))
+        revalidation = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(revalidation)
+        return revalidation.validate_identity(request, key, now)
     if request.get("schema_version") == 3:
         spec = importlib.util.spec_from_file_location("published_rebuild", Path(__file__).with_name("release-rebuild.py"))
         rebuild = importlib.util.module_from_spec(spec)
@@ -262,6 +267,14 @@ def final_identity(request, image_id, runtime):
             "database_access": "Docker owner locking domain; host file-owner inventory only", "heartbeat": 200}
 
 
+def begin_app_binding(request, runtime, lifecycle_fd):
+    spec = importlib.util.spec_from_file_location(
+        "app_binding", Path(__file__).with_name("release-app-binding.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.AppBinding.begin(request, runtime, lifecycle_fd)
+
+
 def execute(signed, key, source, runtime, state, engine_id, now, output):
     request = request_identity(signed, key, now)
     require(sys.platform == "darwin", "runtime runner must be on the configured macOS owner host")
@@ -274,6 +287,7 @@ def execute(signed, key, source, runtime, state, engine_id, now, output):
     lock_dir = runtime / "data/locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
     fd = os.open(lock_dir / "prod.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    binding = None
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -320,6 +334,12 @@ def execute(signed, key, source, runtime, state, engine_id, now, output):
                         "failed deployment previous runtime changed or unhealthy")
                 require(previous["Image"] != image_id, "recovery candidate is already active")
             request_identity(signed, key, dt.datetime.now(dt.timezone.utc))
+            # This trusted, CI-delivered transaction owns admission descriptors
+            # across the unchanged source's recursive deploy entry and then
+            # hands only the App Docker identity to the installed native owner.
+            # Legacy installations without global admission return None.
+            binding = begin_app_binding(request, runtime, fd)
+            request_identity(signed, key, dt.datetime.now(dt.timezone.utc))
             record = {"schema_version": 1, "kind": "runtime-deployment", "product": gate.PRODUCT,
                       "status": "CLAIMED", "request_sha256": hashlib.sha256(gate.canonical(signed)).hexdigest(),
                       "commit": request["commit"], "version": request["version"], "digest": request["digest"],
@@ -342,8 +362,12 @@ def execute(signed, key, source, runtime, state, engine_id, now, output):
                 env.update(SHIBA_CONTROLLED_DEPLOY="true", SHIBA_RUNTIME_ROOT=str(runtime),
                            SHIBA_EXPECTED_COMMIT=request["commit"], SHIBA_EXPECTED_VERSION=request["version"],
                            SHIBA_LIFECYCLE_LOCK_FD=str(fd), PYTHONDONTWRITEBYTECODE="1")
+                inherited = (fd,)
+                if binding is not None:
+                    env = binding.env_for_deploy(env)
+                    inherited = binding.pass_fds()
                 result = subprocess.run(["bash", "scripts/deploy.sh", "prod", "deploy", request["image"]],
-                                        cwd=source, env=env, pass_fds=(fd,), timeout=1800)
+                                        cwd=source, env=env, pass_fds=inherited, timeout=1800)
                 require(result.returncode == 0, "controlled deploy failed; no automatic rollback")
                 # Bounded read-only retries allow the image HEALTHCHECK to settle.
                 deadline = time.monotonic() + 90
@@ -355,10 +379,14 @@ def execute(signed, key, source, runtime, state, engine_id, now, output):
                         if time.monotonic() >= deadline:
                             raise
                         time.sleep(3)
+                if binding is not None:
+                    record["app_binding"] = binding.finish(observed)
                 record.update(status="SUCCESS", observed=observed)
-            except BaseException:
+            except BaseException as error:
                 record.update(status="FAILED", mutation_may_have_started=True,
                               follow_up="Preserve runtime, deploy journal and migration evidence; explicit authorization required")
+                if isinstance(getattr(error, 'receipt', None), dict):
+                    record['app_binding'] = error.receipt
                 raise
             finally:
                 record["finished_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
@@ -371,6 +399,8 @@ def execute(signed, key, source, runtime, state, engine_id, now, output):
                     stream.write(gate.canonical(receipt))
             return receipt
     finally:
+        if binding is not None:
+            binding.close()
         os.close(fd)
 
 
@@ -394,6 +424,16 @@ def main():
             execute(signed, key, args.source, args.runtime_root, control.State(args.state_directory),
                     args.docker_engine_id, now, args.output)
     except Exception as exc:
+        public_binding = getattr(exc, 'receipt', None)
+        if isinstance(public_binding, dict):
+            # A pre-claim native handoff failure must not replace the original
+            # signed FAILED deployment. Archive its separate public metadata.
+            failure_path = args.output.with_name('app-binding-failure.json')
+            try:
+                with failure_path.open('xb') as stream:
+                    stream.write(gate.canonical(public_binding))
+            except OSError:
+                pass  # Preserve an existing artifact; never overwrite evidence.
         print("BLOCKED: " + (str(exc) if isinstance(exc, gate.InvalidEvidence) else "runtime verification/deployment failed"), file=sys.stderr)
         return 1
     return 0

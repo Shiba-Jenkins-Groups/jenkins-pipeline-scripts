@@ -1,7 +1,9 @@
 def source = new File(args[0], 'vars/releaseDevRehearsalPipeline.groovy').text
 def runCase = { config, job ->
     def calls = []
-    def binding = new Binding([ciPipeline: new Object(), env: [JOB_NAME: job, BUILD_NUMBER: '1'], currentBuild: [:]])
+    def binding = new Binding([ciPipeline: new Object(), autoReleasePipeline: new Object(),
+                              prodDeploymentPipeline: new Object(), finalizedImageRevalidation: new Object(),
+                              env: [JOB_NAME: job, BUILD_NUMBER: '1'], currentBuild: [:]])
     binding.setVariable('error', { message -> throw new IllegalStateException(message) })
     ['echo','properties','disableConcurrentBuilds','buildDiscarder','logRotator','writeFile','archiveArtifacts'].each { name ->
         binding.setVariable(name, { Object... values -> calls << [name, values.toList()]; [:] })
@@ -25,6 +27,7 @@ def calls = runCase(valid,job)
 assert calls.findAll { it[0] == 'node' } == [['node','ci-untrusted']]
 assert calls.findAll { it[0] == 'stage' }.size() == 4
 assert calls.findAll { it[0] == 'sh' }.size() == 2
+assert calls.findAll { it[0] == 'echo' }.size() == 4
 assert !source.contains('withCredentials')
 assert !source.contains('checkout(')
 assert !source.contains('build(job:')
@@ -35,7 +38,18 @@ println 'PASS 4 DEV rehearsal configuration/control cases (LOCAL DSL mocks only)
 // This catches errors that a DSL mock alone cannot, including receipt newline
 // escaping. Only the offline suite runs; the node preflight is NOT run on host.
 def shell = calls.findAll { it[0] == 'sh' }[1][1].toString()
-def expectedSuites = ['release-gate', 'release-control', 'release-candidate', 'release-deploy', 'runtime-image-verify']
+def expectedSuites = ['release-gate', 'release-control', 'release-candidate', 'release-deploy',
+                      'runtime-image-verify', 'release-recovery', 'release-rebuild',
+                      'release-revalidate', 'release-app-binding']
+def expectedResources = ['release-gate.py', 'release-evidence.py', 'release-promotion.py',
+                         'release-finalization.py', 'release-deploy.py', 'release-candidate.py',
+                         'release-gate.test.py', 'release-control.test.py',
+                         'release-candidate.test.py', 'release-deploy.test.py',
+                         'runtime-image-verify.py', 'runtime-image-verify.test.py',
+                         'release-recovery.py', 'release-recovery.test.py',
+                         'release-rebuild.py', 'release-rebuild.test.py',
+                         'release-revalidate.py', 'release-revalidate.test.py',
+                         'release-app-binding.py', 'release-app-binding.test.py']
 def executeSuite = { String failingSuite = null ->
     def fixture = java.nio.file.Files.createTempDirectory('release-dev-shell-').toFile()
     try {
@@ -46,7 +60,12 @@ def executeSuite = { String failingSuite = null ->
             target.text = file.text.toString()
         }
         if (failingSuite) {
-            new File(fixture, "suite/${failingSuite}.test.py").text = 'raise SystemExit(7)\n'
+            // Fault injection checks shell ordering and fail-closed receipt
+            // behavior. Run real contracts once in the successful case.
+            expectedSuites.each { name ->
+                new File(fixture, "suite/${name}.test.py").text = name == failingSuite ?
+                    'raise SystemExit(7)\n' : 'import unittest\nclass Offline(unittest.TestCase):\n def test_pass(self): self.assertTrue(True)\nunittest.main()\n'
+            }
         }
         def process = new ProcessBuilder('/bin/bash', '-c', shell).directory(fixture).redirectErrorStream(true).start()
         def output = process.inputStream.getText('UTF-8')
@@ -55,6 +74,9 @@ def executeSuite = { String failingSuite = null ->
         if (failingSuite) {
             assert process.exitValue() != 0
             assert !receipt.exists() : 'failed tests must never produce SUCCESS receipt'
+            def expectedLogs = expectedSuites.take(expectedSuites.indexOf(failingSuite) + 1)
+            assert new File(fixture, 'reports').listFiles().collect { it.name }.toSet() ==
+                expectedLogs.collect { "${it}.log".toString() }.toSet() : 'shell continued after failed suite'
         } else {
             assert process.exitValue() == 0 : output
             def parsed = new groovy.json.JsonSlurperClassic().parseText(receipt.text)
@@ -62,7 +84,8 @@ def executeSuite = { String failingSuite = null ->
             assert parsed.result == 'SUCCESS'
             assert parsed.runtime_deployed == false && parsed.prod_enabled == false
             assert parsed.library_revision == valid.libraryRevision
-            assert parsed.source_sha256.size() == 12
+            assert parsed.executed_suites == expectedSuites
+            assert parsed.source_sha256.keySet() == expectedResources.toSet()
             // Validate each named suite's own output, not a stale count or
             // aggregate stdout that could hide a skipped or repeated suite.
             expectedSuites.each { name ->
@@ -81,4 +104,4 @@ def executeSuite = { String failingSuite = null ->
 }
 executeSuite()
 expectedSuites.each { executeSuite(it) }
-println 'PASS 6 actual shell cases: all 5 offline suites + receipt; failure in any suite produces no receipt'
+println 'PASS 10 actual shell cases: all 9 offline suites + receipt; failure in any suite stops subsequent suites and produces no receipt'

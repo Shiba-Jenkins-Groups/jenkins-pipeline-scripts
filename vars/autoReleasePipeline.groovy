@@ -31,7 +31,8 @@ def call(Map config = [:]) {
             string(name: 'SOURCE_BUILD', defaultValue: '', description: 'Explicit recovery: completed develop build number'),
             string(name: 'EXPECTED_COMMIT', defaultValue: '', description: 'Explicit recovery: full 40-character develop commit'),
             string(name: 'RECOVER_COORDINATOR_BUILD', defaultValue: '', description: 'Finalized deployment recovery: exact failed coordinator'),
-            string(name: 'RECOVER_OWNER_BUILD', defaultValue: '', description: 'Finalized deployment recovery: exact failed owner build')
+            string(name: 'RECOVER_OWNER_BUILD', defaultValue: '', description: 'Finalized deployment recovery: exact failed owner build'),
+            string(name: 'REVALIDATE_FINALIZED_IMAGE', defaultValue: '', description: 'Explicit true: run fresh checks of the original finalized image before one failed deployment retry')
         ]),
         pipelineTriggers([upstream(upstreamProjects: "${product}/develop", threshold: 'SUCCESS')])
     ])
@@ -41,6 +42,10 @@ def call(Map config = [:]) {
     def recoverCoordinator = params.RECOVER_COORDINATOR_BUILD?.toString()?.trim() ?: ''
     def recoverOwner = params.RECOVER_OWNER_BUILD?.toString()?.trim() ?: ''
     def deploymentRecovery = recoverCoordinator || recoverOwner
+    def imageRevalidation = params.REVALIDATE_FINALIZED_IMAGE?.toString()?.trim() ?: ''
+    if (imageRevalidation && (imageRevalidation != 'true' || !deploymentRecovery)) {
+        error('Same-image revalidation requires true and the exact failed deployment recovery coordinates')
+    }
     def recoveryApprover = ''
     Integer sourceBuild
     def rebuildCommit = params.REBUILD_PROD_COMMIT?.toString()?.trim() ?: ''
@@ -94,7 +99,7 @@ def call(Map config = [:]) {
                 ['release-gate.py', 'release-evidence.py', 'release-promotion.py', 'release-preflight.py',
                  'release-finalization.py', 'release-finalize.sh', 'error-handler.sh', 'nexus-upload.sh', 'git-tag.sh',
                  'harbor-vulnerability-report.py', 'release-askpass.sh', 'release-recovery.py', 'release-rebuild.py',
-                 'scanner-db-manager.py'].each { name ->
+                 'scanner-db-manager.py', 'release-revalidate.py', 'runtime-image-verify.py'].each { name ->
                     writeFile file: "control/${name}", text: libraryResource("scripts/common/${name}")
                 }
                 def commonStages = ['Checkout', 'Load Scripts', 'Detect', 'Early Capacity Admission', 'Secret Scan', 'Build', 'Test',
@@ -144,6 +149,12 @@ def call(Map config = [:]) {
                 }
             }
 
+            if (imageRevalidation) {
+                finalizedImageRevalidation(config, [root: root, control: control,
+                    coordinator: recoverCoordinator, owner: recoverOwner, sourceBuild: sourceBuild,
+                    sourceCommit: requestedCommit, approver: recoveryApprover])
+                return
+            }
             if (deploymentRecovery) {
                 // A finalized artifact is never rebuilt, re-promoted or re-tagged.
                 // Original gates and their original expiration remain in force.

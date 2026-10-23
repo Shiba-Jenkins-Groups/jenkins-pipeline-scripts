@@ -80,5 +80,54 @@ class RuntimeVerification(unittest.TestCase):
             verify.identity(self.root)
         docker.assert_not_called()
 
+    def revalidation_context(self):
+        run = {'coordinator_job': 'shiba-release-automation/' + verify.APP + '-auto-release',
+               'coordinator_build': 195, 'original_prod_build': 210,
+               'commit': 'b' * 40, 'version': '1.1.16',
+               'image': 'localhost:9290/' + verify.APP + '/prod/1.1.16@sha256:' + 'a' * 64}
+        values = {'APP_NAME': verify.APP, 'BRANCH': 'prod', 'BUILD_NUMBER': '210',
+                  'APP_VERSION': '1.1.16', 'IMAGE_DIGEST': 'sha256:' + 'a' * 64,
+                  'IMAGE_REF': 'localhost:9290/' + verify.APP + '/prod/1.1.16:210'}
+        (self.root / 'image-ref.txt').write_text(''.join(k + '=' + v + '\n' for k, v in values.items()))
+        image = {'RepoDigests': [run['image']], 'Config': {'User': '65532:65532', 'Labels': {
+            'app.name': verify.APP, 'app.version': '1.1.16', 'app.branch': 'prod',
+            'app.build': '210', 'org.opencontainers.image.revision': run['commit']}}}
+        env = {'JOB_NAME': run['coordinator_job'], 'BUILD_NUMBER': '195', 'GIT_COMMIT': run['commit']}
+        return run, image, env
+
+    def test_revalidation_keeps_real_coordinator_separate_from_original_image_build(self):
+        run, image, env = self.revalidation_context()
+        with patch.dict(os.environ, env), patch.object(verify, 'docker', return_value=
+                subprocess.CompletedProcess([], 0, json.dumps([image]), '')):
+            self.assertEqual(verify.identity(self.root, run), (verify.APP, run['image'], run['commit']))
+            with self.assertRaises(ValueError):
+                verify.identity(self.root)  # A coordinator cannot impersonate the prod job.
+
+    def test_revalidation_rejects_foreign_run_and_changed_original_image_before_docker(self):
+        run, image, env = self.revalidation_context()
+        for field, wrong in [('coordinator_job', 'untrusted'), ('coordinator_build', 194),
+                             ('original_prod_build', 211), ('commit', 'c' * 40),
+                             ('image', run['image'][:-1] + 'c'), ('version', '1.1.17')]:
+            with self.subTest(field=field), patch.dict(os.environ, env), patch.object(verify, 'docker') as docker:
+                with self.assertRaises(ValueError):
+                    verify.identity(self.root, dict(run, **{field: wrong}))
+                docker.assert_not_called()
+
+    def test_revalidation_does_not_relax_existing_image_label_checks(self):
+        run, image, env = self.revalidation_context()
+        image['Config']['Labels']['app.build'] = '211'
+        with patch.dict(os.environ, env), patch.object(verify, 'docker', return_value=
+                subprocess.CompletedProcess([], 0, json.dumps([image]), '')), self.assertRaises(ValueError):
+            verify.identity(self.root, run)
+
+    def test_revalidation_receipt_carries_actual_run_and_retains_isolation(self):
+        run, _, _ = self.revalidation_context()
+        with patch.object(verify, 'identity', return_value=(verify.APP, run['image'], run['commit'])), \
+                patch.object(verify, 'docker', side_effect=self.fake), patch('builtins.print'):
+            report = verify.verify(self.root, run)
+        self.assertEqual(report['revalidation_run'], run)
+        self.assertEqual(report['cleanup'], 'PASS')
+        self.assertFalse(any('type=bind' in arg for call in self.calls for arg in call))
+
 
 if __name__=='__main__': unittest.main()

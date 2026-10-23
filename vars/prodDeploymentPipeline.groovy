@@ -32,7 +32,9 @@ def call(Map config = [:]) {
                 def root = pwd()
                 try {
                     stage('Verify Signed Deployment Request') {
-                        ['release-gate.py', 'release-promotion.py', 'release-deploy.py', 'release-askpass.sh', 'release-rebuild.py'].each { name ->
+                        ['release-gate.py', 'release-promotion.py', 'release-deploy.py', 'release-askpass.sh', 'release-rebuild.py',
+                         'release-revalidate.py', 'release-recovery.py', 'release-evidence.py',
+                         'release-finalization.py', 'release-app-binding.py'].each { name ->
                             writeFile file: "control/${name}", text: libraryResource("scripts/common/${name}")
                         }
                         writeFile file: 'request.json', text: params.SIGNED_RELEASE_REQUEST
@@ -66,7 +68,7 @@ python3 control/release-deploy.py deploy --request request.json --key-file "$REC
                     if (receipt.payload.status != 'SUCCESS') { error('Runtime receipt is not SUCCESS') }
                     currentBuild.description = "PROD ${identity.version} ${identity.commit.take(12)} ${identity.digest}"
                 } finally {
-                    archiveArtifacts artifacts: 'request.json,identity.json,runtime-receipt.json', allowEmptyArchive: true
+                    archiveArtifacts artifacts: 'request.json,identity.json,runtime-receipt.json,app-binding-failure.json', allowEmptyArchive: true
                 }
             }
         }
