@@ -26,13 +26,15 @@ def call(Map config = [:]) {
     properties([
         disableConcurrentBuilds(),
         parameters([
+            string(name: 'APP_BINDING_REPAIR_COORDINATOR_BUILD', defaultValue: '', description: 'Authorized binding maintenance: original successful coordinator'),
+            string(name: 'APP_BINDING_REPAIR_OWNER_BUILD', defaultValue: '', description: 'Authorized binding maintenance: original successful owner'),
+            text(name: 'APP_BINDING_REPAIR_PINS', defaultValue: '', description: 'Exact raw SHA256 JSON for owner.json, registry.json, installation.json, consumer-admission.json'),
             string(name: 'REBUILD_PROD_COMMIT', defaultValue: '', description: 'Authorized disaster rebuild: exact already-published prod commit'),
             string(name: 'PUBLISHED_COORDINATOR_BUILD', defaultValue: '', description: 'Exact successful original publication coordinator'),
             string(name: 'SOURCE_BUILD', defaultValue: '', description: 'Explicit recovery: completed develop build number'),
             string(name: 'EXPECTED_COMMIT', defaultValue: '', description: 'Explicit recovery: full 40-character develop commit'),
             string(name: 'RECOVER_COORDINATOR_BUILD', defaultValue: '', description: 'Finalized deployment recovery: exact failed coordinator'),
-            string(name: 'RECOVER_OWNER_BUILD', defaultValue: '', description: 'Finalized deployment recovery: exact failed owner build'),
-            string(name: 'REVALIDATE_FINALIZED_IMAGE', defaultValue: '', description: 'Explicit true: run fresh checks of the original finalized image before one failed deployment retry')
+            string(name: 'RECOVER_OWNER_BUILD', defaultValue: '', description: 'Finalized deployment recovery: exact failed owner build')
         ]),
         pipelineTriggers([upstream(upstreamProjects: "${product}/develop", threshold: 'SUCCESS')])
     ])
@@ -42,9 +44,8 @@ def call(Map config = [:]) {
     def recoverCoordinator = params.RECOVER_COORDINATOR_BUILD?.toString()?.trim() ?: ''
     def recoverOwner = params.RECOVER_OWNER_BUILD?.toString()?.trim() ?: ''
     def deploymentRecovery = recoverCoordinator || recoverOwner
-    def imageRevalidation = params.REVALIDATE_FINALIZED_IMAGE?.toString()?.trim() ?: ''
-    if (imageRevalidation && (imageRevalidation != 'true' || !deploymentRecovery)) {
-        error('Same-image revalidation requires true and the exact failed deployment recovery coordinates')
+    if (params.REVALIDATE_FINALIZED_IMAGE?.toString()?.trim()) {
+        error('Same-image revalidation is outside this reviewed binding maintenance scope')
     }
     def recoveryApprover = ''
     Integer sourceBuild
@@ -52,7 +53,21 @@ def call(Map config = [:]) {
     def publishedBuild = params.PUBLISHED_COORDINATOR_BUILD?.toString()?.trim() ?: ''
     def rebuilding = rebuildCommit || publishedBuild
     def rebuildAuthor = ''
-    if (rebuilding) {
+    def repairCoordinator = params.APP_BINDING_REPAIR_COORDINATOR_BUILD?.toString()?.trim() ?: ''
+    def repairOwner = params.APP_BINDING_REPAIR_OWNER_BUILD?.toString()?.trim() ?: ''
+    def repairPins = params.APP_BINDING_REPAIR_PINS?.toString()?.trim() ?: ''
+    def bindingRepair = repairCoordinator || repairOwner || repairPins
+    def repairAuthor = ''
+    if (bindingRepair) {
+        def allCauses = currentBuild.getBuildCauses()
+        if (!(repairCoordinator ==~ /[1-9][0-9]{0,8}/) || !(repairOwner ==~ /[1-9][0-9]{0,8}/) ||
+            !repairPins || repairPins.size() > 4096 || rebuilding || requestedBuild || requestedCommit ||
+            deploymentRecovery || allCauses.size() != 1 ||
+            allCauses[0]._class != 'hudson.model.Cause$UserIdCause' || !config.approvers.contains(allCauses[0].userId)) {
+            error('App binding repair requires one authorized user, exact successful builds and binding hashes')
+        }
+        repairAuthor = allCauses[0].userId.toString()
+    } else if (rebuilding) {
         def allCauses = currentBuild.getBuildCauses()
         if (!(rebuildCommit ==~ /[0-9a-f]{40}/) || !(publishedBuild ==~ /[1-9][0-9]{0,8}/) ||
             requestedBuild || requestedCommit || deploymentRecovery || allCauses.size() != 1 ||
@@ -99,7 +114,8 @@ def call(Map config = [:]) {
                 ['release-gate.py', 'release-evidence.py', 'release-promotion.py', 'release-preflight.py',
                  'release-finalization.py', 'release-finalize.sh', 'error-handler.sh', 'nexus-upload.sh', 'git-tag.sh',
                  'harbor-vulnerability-report.py', 'release-askpass.sh', 'release-recovery.py', 'release-rebuild.py',
-                 'scanner-db-manager.py', 'release-revalidate.py', 'runtime-image-verify.py'].each { name ->
+                 'scanner-db-manager.py',
+                 'release-deploy.py', 'release-app-binding.py', 'release-binding-repair.py'].each { name ->
                     writeFile file: "control/${name}", text: libraryResource("scripts/common/${name}")
                 }
                 def commonStages = ['Checkout', 'Load Scripts', 'Detect', 'Early Capacity Admission', 'Secret Scan', 'Build', 'Test',
@@ -127,34 +143,64 @@ def call(Map config = [:]) {
                 // Resolve every later credential before scanning or claiming a release.
                 // Existence alone is insufficient for Secret File credentials: a
                 // malformed XML import can bind successfully to an empty key file.
-                withCredentials([
-                    usernamePassword(credentialsId: config.jenkinsReadCredentials,
-                        usernameVariable: 'JENKINS_API_USER', passwordVariable: 'JENKINS_API_TOKEN'),
-                    usernamePassword(credentialsId: config.harborCredentials,
-                        usernameVariable: 'PREFLIGHT_HARBOR_USER', passwordVariable: 'PREFLIGHT_HARBOR_PASSWORD'),
-                    usernamePassword(credentialsId: config.scmCredentials,
-                        usernameVariable: 'PREFLIGHT_SCM_USER', passwordVariable: 'PREFLIGHT_SCM_PASSWORD'),
-                    usernamePassword(credentialsId: config.mergeCredentials,
-                        usernameVariable: 'PREFLIGHT_MERGE_USER', passwordVariable: 'PREFLIGHT_MERGE_PASSWORD'),
-                    usernamePassword(credentialsId: config.finalizationWriterCredentials,
-                        usernameVariable: 'PREFLIGHT_WRITER_USER', passwordVariable: 'PREFLIGHT_WRITER_PASSWORD'),
-                    usernamePassword(credentialsId: config.nexusCredentials,
-                        usernameVariable: 'PREFLIGHT_NEXUS_USER', passwordVariable: 'PREFLIGHT_NEXUS_PASSWORD'),
-                    file(credentialsId: config.approvalKeyCredentials, variable: 'APPROVAL_KEY_FILE'),
-                    file(credentialsId: config.receiptKeyCredentials, variable: 'RECEIPT_KEY_FILE')]) {
-                    withEnv(["RELEASE_JENKINS_URL=${config.jenkinsApiUrl}", "RELEASE_DEPLOY_LABEL=${config.deploymentNodeLabel}"]) {
-                        sh 'python3 control/release-preflight.py'
-                        sh 'python3 control/release-evidence.py check-routing --jenkins-url "$RELEASE_JENKINS_URL" --deployment-label "$RELEASE_DEPLOY_LABEL"'
+                if (bindingRepair) {
+                    withCredentials([usernamePassword(credentialsId: config.jenkinsReadCredentials,
+                            usernameVariable: 'JENKINS_API_USER', passwordVariable: 'JENKINS_API_TOKEN')]) {
+                        withEnv(["RELEASE_JENKINS_URL=${config.jenkinsApiUrl}", "RELEASE_DEPLOY_LABEL=${config.deploymentNodeLabel}", "RELEASE_LIBRARY_REVISION=${config.libraryRevision}"]) {
+                            sh 'python3 control/release-evidence.py check-routing --jenkins-url "$RELEASE_JENKINS_URL" --deployment-label "$RELEASE_DEPLOY_LABEL" --library-revision "$RELEASE_LIBRARY_REVISION"'
+                        }
+                    }
+                } else {
+                    withCredentials([
+                        usernamePassword(credentialsId: config.jenkinsReadCredentials,
+                            usernameVariable: 'JENKINS_API_USER', passwordVariable: 'JENKINS_API_TOKEN'),
+                        usernamePassword(credentialsId: config.harborCredentials,
+                            usernameVariable: 'PREFLIGHT_HARBOR_USER', passwordVariable: 'PREFLIGHT_HARBOR_PASSWORD'),
+                        usernamePassword(credentialsId: config.scmCredentials,
+                            usernameVariable: 'PREFLIGHT_SCM_USER', passwordVariable: 'PREFLIGHT_SCM_PASSWORD'),
+                        usernamePassword(credentialsId: config.mergeCredentials,
+                            usernameVariable: 'PREFLIGHT_MERGE_USER', passwordVariable: 'PREFLIGHT_MERGE_PASSWORD'),
+                        usernamePassword(credentialsId: config.finalizationWriterCredentials,
+                            usernameVariable: 'PREFLIGHT_WRITER_USER', passwordVariable: 'PREFLIGHT_WRITER_PASSWORD'),
+                        usernamePassword(credentialsId: config.nexusCredentials,
+                            usernameVariable: 'PREFLIGHT_NEXUS_USER', passwordVariable: 'PREFLIGHT_NEXUS_PASSWORD'),
+                        file(credentialsId: config.approvalKeyCredentials, variable: 'APPROVAL_KEY_FILE'),
+                        file(credentialsId: config.receiptKeyCredentials, variable: 'RECEIPT_KEY_FILE')]) {
+                        withEnv(["RELEASE_JENKINS_URL=${config.jenkinsApiUrl}", "RELEASE_DEPLOY_LABEL=${config.deploymentNodeLabel}", "RELEASE_LIBRARY_REVISION=${config.libraryRevision}"]) {
+                            sh 'python3 control/release-preflight.py'
+                            sh 'python3 control/release-evidence.py check-routing --jenkins-url "$RELEASE_JENKINS_URL" --deployment-label "$RELEASE_DEPLOY_LABEL" --library-revision "$RELEASE_LIBRARY_REVISION"'
+                        }
                     }
                 }
             }
 
-            if (imageRevalidation) {
-                finalizedImageRevalidation(config, [root: root, control: control,
-                    coordinator: recoverCoordinator, owner: recoverOwner, sourceBuild: sourceBuild,
-                    sourceCommit: requestedCommit, approver: recoveryApprover])
+            if (bindingRepair) {
+                writeFile file: 'binding-repair-pins.json', text: repairPins
+                stage('Authorize Existing App Binding Repair') {
+                    withCredentials([usernamePassword(credentialsId: config.jenkinsReadCredentials,
+                            usernameVariable: 'JENKINS_API_USER', passwordVariable: 'JENKINS_API_TOKEN'),
+                            file(credentialsId: config.receiptKeyCredentials, variable: 'RECEIPT_KEY_FILE')]) {
+                        withEnv(["REPAIR_COORDINATOR=${repairCoordinator}", "REPAIR_OWNER=${repairOwner}",
+                                 "REPAIR_CURRENT_BUILD=${env.BUILD_NUMBER}", "REPAIR_AUTHOR=${repairAuthor}",
+                                 "RELEASE_JENKINS_URL=${config.jenkinsApiUrl}", 'PYTHONDONTWRITEBYTECODE=1']) {
+                            sh '''python3 control/release-binding-repair.py collect --policy control/policy.json \
+    --key-file "$RECEIPT_KEY_FILE" --jenkins-url "$RELEASE_JENKINS_URL" \
+    --coordinator-build "$REPAIR_COORDINATOR" --owner-build "$REPAIR_OWNER" \
+    --current-build "$REPAIR_CURRENT_BUILD" --author "$REPAIR_AUTHOR" \
+    --pins binding-repair-pins.json --output deployment-request.json'''
+                        }
+                    }
+                }
+                archiveArtifacts artifacts: 'binding-repair-pins.json,deployment-request.json', allowEmptyArchive: false
+                stage('Repair Existing Native App Binding') {
+                    def repaired = build(job: config.deploymentJob, wait: true, propagate: false,
+                        parameters: [text(name: 'SIGNED_RELEASE_REQUEST', value: readFile('deployment-request.json'))])
+                    if (repaired.result != 'SUCCESS') { error('App binding repair failed; preserve its receipt and pending state') }
+                    currentBuild.description = "App binding maintenance: owner #${repairOwner}; repair #${repaired.number}"
+                }
                 return
             }
+
             if (deploymentRecovery) {
                 // A finalized artifact is never rebuilt, re-promoted or re-tagged.
                 // Original gates and their original expiration remain in force.
@@ -479,7 +525,7 @@ python3 control/release-promotion.py handoff --promotion promotion.json --finali
                 // Preserve only release evidence, never source checkouts, scanner
                 // caches or credential files. If archival fails, retain the
                 // workspace for diagnosis instead of destroying the only copy.
-                archiveArtifacts artifacts: 'control/policy.json,scanner-db-receipt.json,develop/identity.json,prod/identity.json,develop/review.json,prod/review.json,develop/revalidated-review.json,prod/revalidated-review.json,develop/approval-request-review.json,prod/approval-request-review.json,develop/approval-request-evidence/**,prod/approval-request-evidence/**,develop/approval.json,prod/approval.json,develop/evidence/*.json,develop/evidence/*.jsonl,prod/evidence/*.json,prod/evidence/*.jsonl,develop/evidence/.pipeline/candidate*,prod/evidence/.pipeline/candidate*,develop/evidence/.pipeline/candidate-stages/*,prod/evidence/.pipeline/candidate-stages/*,develop/evidence/reports/junit/*,prod/evidence/reports/junit/*,promotion.json,finalization.json,deployment-request.json,prod/source/.pipeline/release-manifest.env,recovery/**,published/**', allowEmptyArchive: true
+                archiveArtifacts artifacts: 'binding-repair-pins.json,control/policy.json,scanner-db-receipt.json,develop/identity.json,prod/identity.json,develop/review.json,prod/review.json,develop/revalidated-review.json,prod/revalidated-review.json,develop/approval-request-review.json,prod/approval-request-review.json,develop/approval-request-evidence/**,prod/approval-request-evidence/**,develop/approval.json,prod/approval.json,develop/evidence/*.json,develop/evidence/*.jsonl,prod/evidence/*.json,prod/evidence/*.jsonl,develop/evidence/.pipeline/candidate*,prod/evidence/.pipeline/candidate*,develop/evidence/.pipeline/candidate-stages/*,prod/evidence/.pipeline/candidate-stages/*,develop/evidence/reports/junit/*,prod/evidence/reports/junit/*,promotion.json,finalization.json,deployment-request.json,prod/source/.pipeline/release-manifest.env,recovery/**,published/**', allowEmptyArchive: true
                 // This dir is scoped to this exact build, not the agent root,
                 // persistent dependency cache, release state or runtime data.
                 deleteDir()

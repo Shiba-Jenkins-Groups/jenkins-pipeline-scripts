@@ -1,0 +1,72 @@
+# Offline routing fixture. Credential identifiers only; no credential values.
+      pipelineJob('shiba-release-automation/shiba-go-ditch-api-project-auto-release') {
+          description('Promote exact lean develop SUCCESS to one complete PROD CI/CD and signed deployment. Fail closed on stage, evidence, identity or unapproved CVE findings.')
+          disabled(false)
+          parameters {
+              stringParam('REBUILD_PROD_COMMIT', '', 'Authorized disaster rebuild: exact published prod commit')
+              stringParam('PUBLISHED_COORDINATOR_BUILD', '', 'Original successful publication coordinator')
+              stringParam('SOURCE_BUILD', '', 'Authorized recovery: completed develop build')
+              stringParam('EXPECTED_COMMIT', '', 'Authorized recovery: full 40-character commit')
+              stringParam('RECOVER_COORDINATOR_BUILD', '', 'Authorized finalized recovery: exact failed coordinator')
+              stringParam('RECOVER_OWNER_BUILD', '', 'Authorized finalized recovery: exact failed owner build')
+          }
+          triggers {
+              upstream('shiba-go-ditch-api-project/develop', 'SUCCESS')
+          }
+          definition {
+              cps {
+                  script("""@Library('jenkins-pipeline@f5c68a5f0276f542754c69b9854f09be8b484011') _
+      autoReleasePipeline(
+          enabled: true,
+          libraryRevision: 'f5c68a5f0276f542754c69b9854f09be8b484011',
+          jenkinsApiUrl: 'http://shiba-docker-jenkins-controller-dev:8080',
+          jenkinsReadCredentials: 'shiba-auto-release-jenkins-read',
+          harborApiUrl: 'http://host.docker.internal:9290',
+          harborCredentials: 'harbor-robot-shiba-go-ditch-api-project',
+          scmCredentials: 'github-scm-readonly',
+          mergeCredentials: 'github-credentials',
+          approvalKeyCredentials: 'shiba-auto-release-approval-key',
+          receiptKeyCredentials: 'shiba-auto-release-receipt-key',
+          stateDirectory: '/var/jenkins_home/artifacts/release-state/promotion',
+          finalizationStateDirectory: '/var/jenkins_home/artifacts/release-state/finalization',
+          finalizationWriterCredentials: 'github-release-writer',
+          nexusCredentials: 'nexus-ci-deploy',
+          nexusBaseUrl: 'http://shiba-docker-nexus-dev:8081',
+          rebuildDockerEngineId: '9f2f05b6-4637-45c7-ab13-cf5a35e2a539',
+          builderLabel: 'ci-image-builder',
+          deploymentNodeLabel: 'shiba-prod-owner-macos',
+          deploymentJob: 'shiba-release-automation/shiba-go-ditch-api-project-prod-deploy',
+          approvers: ['claude-code-use'],
+          revokedApprovalIds: []
+      )
+      """)
+                  sandbox(true)
+              }
+          }
+      }
+
+  # 唯一 PROD runtime owner job：無 SCM trigger，只接受 coordinator 簽章 handoff。
+  - script: |
+      pipelineJob('shiba-release-automation/shiba-go-ditch-api-project-prod-deploy') {
+          description('Signed, exact-digest Shiba App PROD deployment on the exclusive macOS owner node. No SCM trigger and no automatic rollback.')
+          disabled(false)
+          parameters {
+              textParam('SIGNED_RELEASE_REQUEST', '', 'Coordinator-signed schema v2 deployment request')
+          }
+          definition {
+              cps {
+                  script("""@Library('jenkins-pipeline@f5c68a5f0276f542754c69b9854f09be8b484011') _
+      prodDeploymentPipeline(
+          enabled: true,
+          nodeLabel: 'shiba-prod-owner-macos',
+          runtimeRoot: '/Users/surpend/Developer/01_project/shiba-go-ditch-api-project',
+          stateDirectory: '/Users/surpend/Developer/jenkins/builds/release-state/deployment',
+          dockerEngineId: '9f2f05b6-4637-45c7-ab13-cf5a35e2a539',
+          receiptKeyCredentials: 'shiba-auto-release-receipt-key',
+          scmCredentials: 'github-scm-readonly'
+      )
+      """)
+                  sandbox(true)
+              }
+          }
+      }

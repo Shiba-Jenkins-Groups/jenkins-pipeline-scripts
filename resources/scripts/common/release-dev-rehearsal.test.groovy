@@ -2,7 +2,7 @@ def source = new File(args[0], 'vars/releaseDevRehearsalPipeline.groovy').text
 def runCase = { config, job ->
     def calls = []
     def binding = new Binding([ciPipeline: new Object(), autoReleasePipeline: new Object(),
-                              prodDeploymentPipeline: new Object(), finalizedImageRevalidation: new Object(),
+                              prodDeploymentPipeline: new Object(),
                               env: [JOB_NAME: job, BUILD_NUMBER: '1'], currentBuild: [:]])
     binding.setVariable('error', { message -> throw new IllegalStateException(message) })
     ['echo','properties','disableConcurrentBuilds','buildDiscarder','logRotator','writeFile','archiveArtifacts'].each { name ->
@@ -27,7 +27,7 @@ def calls = runCase(valid,job)
 assert calls.findAll { it[0] == 'node' } == [['node','ci-untrusted']]
 assert calls.findAll { it[0] == 'stage' }.size() == 4
 assert calls.findAll { it[0] == 'sh' }.size() == 2
-assert calls.findAll { it[0] == 'echo' }.size() == 4
+assert calls.findAll { it[0] == 'echo' }.size() == 3
 assert !source.contains('withCredentials')
 assert !source.contains('checkout(')
 assert !source.contains('build(job:')
@@ -40,7 +40,8 @@ println 'PASS 4 DEV rehearsal configuration/control cases (LOCAL DSL mocks only)
 def shell = calls.findAll { it[0] == 'sh' }[1][1].toString()
 def expectedSuites = ['release-gate', 'release-control', 'release-candidate', 'release-deploy',
                       'runtime-image-verify', 'release-recovery', 'release-rebuild',
-                      'release-revalidate', 'release-app-binding']
+                      'release-app-binding', 'release-app-binding-repair', 'release-binding-repair',
+                      'release-owner-library-routing']
 def expectedResources = ['release-gate.py', 'release-evidence.py', 'release-promotion.py',
                          'release-finalization.py', 'release-deploy.py', 'release-candidate.py',
                          'release-gate.test.py', 'release-control.test.py',
@@ -48,8 +49,9 @@ def expectedResources = ['release-gate.py', 'release-evidence.py', 'release-prom
                          'runtime-image-verify.py', 'runtime-image-verify.test.py',
                          'release-recovery.py', 'release-recovery.test.py',
                          'release-rebuild.py', 'release-rebuild.test.py',
-                         'release-revalidate.py', 'release-revalidate.test.py',
-                         'release-app-binding.py', 'release-app-binding.test.py']
+                         'release-app-binding.py', 'release-app-binding.test.py',
+                         'release-app-binding-repair.test.py', 'release-binding-repair.py',
+                         'release-binding-repair.test.py', 'release-owner-library-routing.test.py']
 def executeSuite = { String failingSuite = null ->
     def fixture = java.nio.file.Files.createTempDirectory('release-dev-shell-').toFile()
     try {
@@ -104,4 +106,4 @@ def executeSuite = { String failingSuite = null ->
 }
 executeSuite()
 expectedSuites.each { executeSuite(it) }
-println 'PASS 10 actual shell cases: all 9 offline suites + receipt; failure in any suite stops subsequent suites and produces no receipt'
+println "PASS ${expectedSuites.size() + 1} actual shell cases: all ${expectedSuites.size()} offline suites + receipt; failure in any suite stops subsequent suites and produces no receipt"

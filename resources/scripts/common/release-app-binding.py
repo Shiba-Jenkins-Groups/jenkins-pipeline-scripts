@@ -22,6 +22,7 @@ import subprocess
 import sys
 import time
 import types
+import uuid
 
 SHA = re.compile(r"[0-9a-f]{64}\Z")
 COMMIT = re.compile(r"[0-9a-f]{40}\Z")
@@ -240,6 +241,16 @@ class NativeIO:
         require(isinstance(target, list) and len(target) == 1, "app_container_missing")
         return target[0]
 
+    def inventory_ids(self, transaction):
+        # Absence requires a complete, successful exact-ID inventory. An
+        # inspect error (including an unavailable Docker daemon) is not proof
+        # that a formerly bound container has disappeared.
+        raw = self.command(["docker", "ps", "-a", "--no-trunc", "--format", "{{.ID}}"])
+        values = raw.decode("ascii").splitlines()
+        require(all(SHA.fullmatch(value) for value in values) and len(values) == len(set(values)),
+                "invalid_docker_inventory")
+        return set(values)
+
     def engine(self, transaction):
         return self.command(["docker", "info", "--format", "{{.ID}}"]).decode().strip()
 
@@ -266,6 +277,45 @@ class NativeIO:
 
 
 class AppBinding:
+    @classmethod
+    def repair(cls, verified_request, observed, runtime, lifecycle_fd, expected_binding_hashes, *, io=None):
+        """Repair one ready binding after the trusted runner verifies receipts.
+
+        HMAC, request expiry and the independent one-attempt state belong to
+        that runner. This helper consumes its verified identities, performs no
+        deployment, and never grants an admitted SH child lease.
+        """
+        transaction = cls(verified_request, runtime, lifecycle_fd, io or NativeIO())
+        try:
+            operation = verified_request.get("operation_id", "")
+            try:
+                identity = uuid.UUID(operation)
+            except (ValueError, AttributeError, TypeError):
+                raise BindingError("invalid_repair_operation_id") from None
+            require(str(identity) == operation and identity.version == 4, "invalid_repair_operation_id")
+            require(isinstance(expected_binding_hashes, dict) and set(expected_binding_hashes) ==
+                    {"owner.json", "registry.json", "installation.json", "consumer-admission.json"}
+                    and all(isinstance(value, str) and SHA.fullmatch(value)
+                            for value in expected_binding_hashes.values()), "invalid_repair_binding_hashes")
+            require(SHA.fullmatch(verified_request.get("previous_container_id", ""))
+                    and DIGEST.fullmatch(verified_request.get("previous_image_id", "")),
+                    "invalid_repair_previous_identity")
+            transaction.id = operation
+            transaction.repair_mode = True
+            transaction.binding_hashes = copy.deepcopy(expected_binding_hashes)
+            transaction.repair_observed = copy.deepcopy(observed)
+            transaction.prepare()
+            return transaction.finish(observed)
+        except BaseException as error:
+            if isinstance(error, BindingError) and error.receipt.get("transaction_id") == transaction.id:
+                raise
+            public = transaction.failure(error)
+            if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                raise
+            raise BindingError("app_binding_repair_failed_preserved", public) from None
+        finally:
+            transaction.close()
+
     @classmethod
     def begin(cls, request, runtime, lifecycle_fd, *, io=None):
         io = io or NativeIO()
@@ -310,6 +360,7 @@ class AppBinding:
         self.owner_pause_requested = False
         self.phase = "preflight"
         self.completed = False
+        self.repair_mode = False
 
     def lock(self, path, create_missing=False):
         directory(path.parent)
@@ -362,15 +413,20 @@ class AppBinding:
             require(getattr(self, "job_path", None) == path and read(path) == self.job_raw,
                     "foreign_consumer_job")
 
-    def validate_target(self, raw, expected, new=False):
+    def validate_target(self, raw, expected, new=False, retired=False):
         require(raw["Id"] == expected["id"] and raw["Image"] == expected["image_id"], "app_docker_identity_mismatch")
-        require(raw["State"].get("Running") is True and not raw["State"].get("Restarting")
-                and raw["State"].get("Health", {}).get("Status") == "healthy", "app_not_healthy")
+        if retired:
+            require(raw["State"].get("Running") is False and raw["State"].get("Restarting") is False
+                    and not raw["State"].get("Paused"), "previous_app_not_inactive")
+        else:
+            require(raw["State"].get("Running") is True and not raw["State"].get("Restarting")
+                    and raw["State"].get("Health", {}).get("Status") == "healthy", "app_not_healthy")
         labels = raw["Config"].get("Labels") or {}
         require(all(labels.get(key) == value for key, value in expected["labels"].items()), "app_labels_mismatch")
         require(raw["HostConfig"]["RestartPolicy"]["Name"] == expected["restart_policy"] == "unless-stopped",
                 "app_restart_policy_changed")
-        require(raw["NetworkSettings"]["Ports"].get("8090/tcp") == [{"HostIp": "127.0.0.1", "HostPort": "8090"}],
+        ports = raw["HostConfig"].get("PortBindings", {}) if retired else raw["NetworkSettings"]["Ports"]
+        require(ports.get("8090/tcp") == [{"HostIp": "127.0.0.1", "HostPort": "8090"}],
                 "app_port_changed")
         mounts = [m for m in raw["Mounts"] if m["Destination"] == "/app/data/db/app"]
         require(len(mounts) == 1 and mounts[0]["Type"] == "bind" and mounts[0]["RW"] is True
@@ -406,6 +462,7 @@ class AppBinding:
             os.close(probe)
         self.lock(self.owner_directory / "owner-upgrade.lock", True)
         self.lock(self.root / "consumer-helper-upgrade.lock", True)
+        self.assert_binding_hashes()
         self.original = {name: read(self.owner_directory / name) for name in ("owner.json", "registry.json", "installation.json")}
         self.global_raw = read(self.root / "consumer-admission.json")
         self.config, self.registry, self.installed = [json.loads(self.original[name], object_pairs_hook=pairs)
@@ -465,6 +522,10 @@ class AppBinding:
                 and self.registry["services"]["app"]["revision"] == app["revision"], "app_registry_drift")
         self.old_target = app["docker"]["targets"][0]
         self.old_key = resource_keys(app)[0]
+        if self.repair_mode:
+            require(self.old_target["id"] == self.request["previous_container_id"]
+                    and self.old_target["image_id"] == self.request["previous_image_id"],
+                    "repair_previous_binding_mismatch")
         require(self.old_target["labels"].get("com.docker.compose.project") == "shiba-goditch-prod"
                 and self.old_target["labels"].get("com.docker.compose.service") == "app", "wrong_app_target")
         self.scope = sorted(self.consumers["consumers"][CONSUMER]["resource_keys"])
@@ -481,10 +542,13 @@ class AppBinding:
             self.helper.check_admission(self.consumers, key)
             self.states[str(path)] = sha(read(path))
         journal_idle(read(self.journal))
-        self.validate_target(self.io.app(self, self.old_target["id"]), self.old_target)
+        if not self.repair_mode:
+            self.validate_target(self.io.app(self, self.old_target["id"]), self.old_target)
         require(self.io.engine(self) == app["docker"]["engine_id"], "docker_engine_changed")
         self.expected_image_id = self.io.image(self)
         require(DIGEST.fullmatch(self.expected_image_id), "invalid_target_image_id")
+        if self.repair_mode:
+            self.assert_repair_runtime()
         self.owner_before = self.io.owner(self)
         require(self.owner_before is not None and self.owner_before["binary_sha256"] == manifest["files"]["owner-darwin-arm64"],
                 "installed_owner_not_running")
@@ -500,6 +564,7 @@ class AppBinding:
         # Recheck the live audit after status nonce appends, before writing a
         # transaction/pending or pausing the only recovery owner.
         journal_idle(read(self.journal))
+        self.assert_binding_hashes()
         self.backup = self.owner_directory / ("app-binding-" + self.id)
         self.backup.mkdir(mode=0o700)
         sync(self.owner_directory)
@@ -526,6 +591,9 @@ class AppBinding:
         # Resource EX + pending prevents any new physical mutation. A raced
         # accepted request is detected on both sides of managed owner pause.
         journal_idle(read(self.journal))
+        self.assert_sources()
+        if self.repair_mode:
+            self.assert_repair_runtime()
         self.owner_pause_requested = True
         self.io.pause(self)
         self.owner_paused = True
@@ -536,6 +604,10 @@ class AppBinding:
         create(self.backup / "operations-after-pause.jsonl", self.journal_raw)
         self.assert_pending()
         self.assert_sources()
+        if self.repair_mode:
+            self.assert_repair_runtime()
+            self.event("repair-ready")
+            return
         self.job_path = self.resources / "consumer-jobs" / (self.id + ".json")
         self.job = {"schema_version": 1, "job_id": self.id, "consumer_id": CONSUMER,
                     "resource_keys": self.scope, "started_at": stamp()}
@@ -546,11 +618,51 @@ class AppBinding:
         self.event("deploy-admitted")
 
     def assert_sources(self):
+        self.assert_binding_hashes()
         require(self.source_pins() == self.pins, "protected_source_or_credential_changed")
         for name, data in self.original.items():
             require(read(self.owner_directory / name) == data, "installed_binding_changed")
         require(read(self.root / "consumer-admission.json") == self.global_raw, "global_admission_changed")
         require(all(sha(read(Path(path))) == value for path, value in self.states.items()), "resource_intent_changed")
+
+    def assert_binding_hashes(self):
+        if self.repair_mode:
+            for name, digest in self.binding_hashes.items():
+                path = self.root / name if name == "consumer-admission.json" else self.owner_directory / name
+                require(sha(read(path)) == digest, "repair_binding_hash_mismatch")
+
+    def qualify_observed(self, observed):
+        require(isinstance(observed, dict)
+                and all(observed.get(name) == self.request[name] for name in ("commit", "version", "digest"))
+                and observed.get("image_id") == self.expected_image_id and observed.get("heartbeat") == 200
+                and observed.get("compose_project") == "shiba-goditch-prod"
+                and SHA.fullmatch(observed.get("container_id", "")), "unqualified_deployment_observation")
+        require(observed["container_id"] != self.old_target["id"], "new_app_container_required")
+
+    def target_for(self, container_id):
+        target = copy.deepcopy(self.old_target)
+        target.update(id=container_id, image_id=self.expected_image_id)
+        target["labels"]["org.opencontainers.image.revision"] = self.request["commit"]
+        if "org.opencontainers.image.version" in target["labels"]:
+            target["labels"]["org.opencontainers.image.version"] = self.request["version"]
+        return target
+
+    def assert_repair_runtime(self):
+        self.qualify_observed(self.repair_observed)
+        new_key = "docker:" + self.config["services"]["app"]["docker"]["engine_id"] + ":" + self.repair_observed["container_id"]
+        require(not self.prefix(new_key).with_suffix(".state.json").exists()
+                and not self.prefix(new_key).with_suffix(".pending").exists()
+                and all(new_key not in entry["resource_keys"] for entry in self.consumers["consumers"].values()),
+                "new_resource_already_has_intent")
+        ids = self.io.inventory_ids(self)
+        require(isinstance(ids, set) and all(isinstance(value, str) and SHA.fullmatch(value) for value in ids)
+                and self.repair_observed["container_id"] in ids, "repair_target_inventory_mismatch")
+        if self.old_target["id"] in ids:
+            self.validate_target(self.io.app(self, self.old_target["id"]), self.old_target, retired=True)
+        self.validate_target(self.io.app(self, self.repair_observed["container_id"]),
+                             self.target_for(self.repair_observed["container_id"]), True)
+        require(self.io.engine(self) == self.config["services"]["app"]["docker"]["engine_id"]
+                and self.io.image(self) == self.expected_image_id, "docker_target_changed")
 
     def env_for_deploy(self, base_env):
         require(self.phase == "deploy-admitted", "binding_not_admitted")
@@ -567,27 +679,23 @@ class AppBinding:
 
     def finish(self, observed):
         try:
-            require(self.phase == "deploy-admitted" and not self.completed, "binding_finish_not_repeatable")
+            require(self.phase == ("repair-ready" if self.repair_mode else "deploy-admitted")
+                    and not self.completed, "binding_finish_not_repeatable")
             for fd in self.fds.values():
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             self.assert_pending()
             self.assert_sources()
             require(read(self.journal) == self.journal_raw and self.io.owner(self) is None, "paused_owner_state_changed")
-            require(all(observed.get(name) == self.request[name] for name in ("commit", "version", "digest"))
-                    and observed.get("image_id") == self.expected_image_id and observed.get("heartbeat") == 200
-                    and observed.get("compose_project") == "shiba-goditch-prod"
-                    and SHA.fullmatch(observed.get("container_id", "")), "unqualified_deployment_observation")
+            self.qualify_observed(observed)
+            if self.repair_mode:
+                require(observed == self.repair_observed, "repair_observation_changed")
+                self.assert_repair_runtime()
             new_id = observed["container_id"]
-            require(new_id != self.old_target["id"], "new_app_container_required")
             self.new_key = "docker:" + self.config["services"]["app"]["docker"]["engine_id"] + ":" + new_id
             require(not self.prefix(self.new_key).with_suffix(".state.json").exists()
                     and not self.prefix(self.new_key).with_suffix(".pending").exists(), "new_resource_already_has_intent")
             self.fds[self.new_key] = self.lock(self.prefix(self.new_key).with_suffix(".lock"), True)
-            new_target = copy.deepcopy(self.old_target)
-            new_target.update(id=new_id, image_id=self.expected_image_id)
-            new_target["labels"]["org.opencontainers.image.revision"] = self.request["commit"]
-            if "org.opencontainers.image.version" in new_target["labels"]:
-                new_target["labels"]["org.opencontainers.image.version"] = self.request["version"]
+            new_target = self.target_for(new_id)
             self.validate_target(self.io.app(self, new_id), new_target, True)
             require(self.io.engine(self) == self.config["services"]["app"]["docker"]["engine_id"]
                     and self.io.image(self) == self.expected_image_id, "docker_target_changed")
@@ -618,9 +726,10 @@ class AppBinding:
             state = {"schema_version": 1, "resource_key": self.new_key, "desired_state": "running", "updated_at": stamp()}
             create(self.prefix(self.new_key).with_suffix(".state.json"), encoded(state) + b"\n")
             self.event("new-intent-written")
-            self.job["resource_keys"] = sorted(self.new_key if key == self.old_key else key for key in self.scope)
-            self.job_raw = encoded(self.job) + b"\n"
-            replace(self.job_path, self.job_raw)
+            if not self.repair_mode:
+                self.job["resource_keys"] = sorted(self.new_key if key == self.old_key else key for key in self.scope)
+                self.job_raw = encoded(self.job) + b"\n"
+                replace(self.job_path, self.job_raw)
             for path, data in after.items():
                 replace(path, data)
                 self.event("committed-" + path.name)
@@ -647,9 +756,10 @@ class AppBinding:
             self.event("owner-resumed", owner_after=owner_after)
             require(all(read(path) == data for path, data in after.items()) and self.source_pins() == self.pins,
                     "binding_changed_during_owner_resume")
-            require(read(self.job_path) == self.job_raw, "foreign_job_before_release")
-            self.job_path.unlink()
-            sync(self.job_path.parent)
+            if not self.repair_mode:
+                require(read(self.job_path) == self.job_raw, "foreign_job_before_release")
+                self.job_path.unlink()
+                sync(self.job_path.parent)
             for path in self.owned_pending:
                 require(read(path) == (self.id + "\n").encode(), "foreign_pending_before_release")
                 path.unlink()
@@ -660,6 +770,8 @@ class AppBinding:
                       "new_app_key": self.new_key, "owner_binary_unchanged": True,
                       "other_services_unchanged": True, "credentials_unchanged": True,
                       "historical_journal_preserved": True, "app_control": "status-only"}
+            if self.repair_mode:
+                result["mode"] = "ready-repair"
             create(self.backup / "completed.json", encoded(result) + b"\n")
             return result
         except BaseException as error:
@@ -669,13 +781,19 @@ class AppBinding:
             raise BindingError("app_binding_finish_failed_preserved", public) from None
 
     def failure(self, error):
-        public = {"schema_version": 1, "kind": "active-app-binding", "status": "pending-preserved",
+        public = {"schema_version": 1, "kind": "active-app-binding",
+                  "status": "outcome-unconfirmed" if self.completed else "pending-preserved",
                   "transaction_id": self.id, "phase": self.phase, "owner_paused": self.owner_paused,
                   "owner_pause_requested": self.owner_pause_requested,
                   "owner_state": "paused" if self.owner_paused else "unconfirmed" if self.owner_pause_requested else "unchanged-before-pause",
                   "backup": str(self.backup) if self.backup else None,
                   "code": str(error) if isinstance(error, BindingError) else type(error).__name__,
                   "automatic_retry": False, "automatic_rollback": False}
+        if self.completed:
+            # The last evidence write can fail after a fully verified commit,
+            # managed resume and admission release. Do not claim fences remain
+            # or retry a completed physical transaction to recreate a receipt.
+            public.update(binding_committed=True, admission_released=True, owner_state="resumed")
         if self.backup is not None:
             try:
                 create(self.backup / ("failure-" + os.urandom(4).hex() + ".json"), encoded(public) + b"\n")

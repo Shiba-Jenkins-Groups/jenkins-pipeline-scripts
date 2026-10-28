@@ -69,11 +69,6 @@ def failed_recovery_identity(request, key):
 
 def request_identity(signed, key, now):
     request = control.verify(signed, key)
-    if request.get("schema_version") == 4:
-        spec = importlib.util.spec_from_file_location("finalized_revalidation", Path(__file__).with_name("release-revalidate.py"))
-        revalidation = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(revalidation)
-        return revalidation.validate_identity(request, key, now)
     if request.get("schema_version") == 3:
         spec = importlib.util.spec_from_file_location("published_rebuild", Path(__file__).with_name("release-rebuild.py"))
         rebuild = importlib.util.module_from_spec(spec)

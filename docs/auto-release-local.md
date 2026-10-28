@@ -40,6 +40,7 @@ App `Jenkinsfile` 的 `controlledReleaseCandidate` 本機仍為 `false`。須經
 @Library('jenkins-pipeline@REPLACE_WITH_SAME_REVIEWED_40_CHAR_SHA') _
 prodDeploymentPipeline(
     enabled: false,
+    libraryRevision: 'REPLACE_WITH_SAME_REVIEWED_40_CHAR_SHA',
     nodeLabel: 'REPLACE_WITH_UNIQUE_MAC_OWNER_LABEL',
     runtimeRoot: 'REPLACE_WITH_CANONICAL_EXISTING_APP_RUNTIME_ROOT',
     stateDirectory: 'REPLACE_WITH_PERSISTENT_MAC_DEPLOY_STATE_DIRECTORY',
@@ -50,6 +51,12 @@ prodDeploymentPipeline(
 ```
 
 Job 名稱固定為 `shiba-go-ditch-api-project-prod-deploy`，預先宣告 Text 參數 `SIGNED_RELEASE_REQUEST`，無 SCM trigger；只接受 coordinator upstream cause 及有效簽章。先建 disabled job，不安裝 launchd、keep-awake 或高可用機制。
+
+已成功部署後的原生 App binding 維護使用相同兩個固定 job，獨立於正常發布：coordinator 的
+`APP_BINDING_REPAIR_COORDINATOR_BUILD`／`APP_BINDING_REPAIR_OWNER_BUILD` 必須指向原成功紀錄，
+`APP_BINDING_REPAIR_PINS` 綁定四份現有設定的 raw SHA256。此模式不能混用其他 source／recovery／rebuild
+參數，不更新 App image，也不重跑測試或掃描。完整信任、鎖與一次性契約見
+[App binding 維護](app-active-binding-handoff.md#repair-a-ready-installation-after-an-already-successful-deployment)。
 
 ## 啟用前必須逐項驗證
 

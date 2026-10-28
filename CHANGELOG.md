@@ -5,12 +5,16 @@
 
 ## [Unreleased]
 
-### Fixed（已定版原映像的部署恢復與 App 容器交接）
+### Fixed（已成功部署後的原生 App 綁定維護）
 
-- 新增明確啟用的同映像重新驗證入口：保留原始簽章鏈與失敗紀錄，以本輪 source tests、contracts、package graphs、三項掃描及隔離 runtime 驗證簽發短效 schema 4 授權；不重建映像、不改 tag 或 Nexus 成品。
+- 固定 coordinator／owner 新增明確授權的 ready binding 維護分支：以原成功部署的 HMAC receipt、四份設定 raw SHA 與十五分鐘授權鎖定一次修復；不重建、重掃或重部署 App，不覆寫正式部署紀錄。
+- 共用原 App binding 的排他鎖、intent、備份、journal 與受管理 owner 交接；保留 stopped／unknown／pending，修復結果不明時不自動重試或 rollback。最後收據寫入失敗會如實區分已提交與 admission 已釋放。
+- 驗證中央 owner 實際 Library pin，阻擋只更新 coordinator 的不完整啟用；提供四處同 SHA 的窄路由草案及離線交易、簽章、控制流程與中斷測試。
+
+### Fixed（正常部署的 App 容器交接）
+
 - PROD owner 換版時以獨立受控交易交接 active App 容器身分、共同 admission 與安裝收據；原 native binary、其他服務與憑證保留，中斷保留備份及 pending。
-- 既有 DEV contract rehearsal 納入新入口及歷史 recovery／rebuild 的離線契約；新 fresh lane 獨立為小型 CPS 腳本。
-- 補齊原 App 契約需要檢查的 `go-archive.sh` 資源，並以實際載入內容驗證 Go runner 完整性；不執行封裝發布。
+- 既有 DEV contract rehearsal 納入 binding 與歷史 recovery／rebuild 的離線契約。
 
 ### Changed（全域 K3D 共用驗證池）
 

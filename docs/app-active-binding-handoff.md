@@ -85,3 +85,69 @@ observations and real `flock` descriptors. They exercise non-ASCII canonical
 identity compatibility, lease handoff, pause races, intentional stops, unknown
 state, foreign/busy work, partial commit, credential drift and resume failure.
 They do not access a host service, product database, image, OCR, model or secret.
+
+## Repair a ready installation after an already successful deployment
+
+The fixed coordinator also accepts the mutually exclusive
+`APP_BINDING_REPAIR_COORDINATOR_BUILD`, `APP_BINDING_REPAIR_OWNER_BUILD`, and
+`APP_BINDING_REPAIR_PINS` parameters. This is explicitly authorized native
+binding maintenance, not an App release or deployment retry. It performs no
+source checkout, build, scan, finalization, image publication, App replacement,
+database access, or model operation.
+
+The pins are a JSON object containing exactly the raw SHA256 of the installed
+`prod/owner.json`, `prod/registry.json`, `prod/installation.json`, and root
+`consumer-admission.json`, using their basenames as keys. An authorized unique
+user cause and exact original successful coordinator/owner builds are required.
+The coordinator reads those original artifacts and verifies the original
+deployment request and successful runtime receipt with its HMAC key. Historical
+deployment expiry is checked at the original attempt; it is never renewed.
+A new signed `app-binding-repair` request expires within fifteen minutes and
+binds all four pins, the original receipts, a canonical UUID4, the operator,
+the new coordinator build, and the reviewed Library revision.
+
+The same fixed owner job receives this request in `SIGNED_RELEASE_REQUEST`.
+Only its verified maintenance identity can select the repair branch; the
+coordinator build and Library revision must match its trusted configuration.
+The owner requires its persistent original successful deployment record to
+remain byte-for-byte canonically equal to the signed prior receipt. A separate
+claim derived from the receipt and binding pins prevents a new authorization
+UUID from repeating the same repair; it never overwrites the original App
+deployment record.
+
+`AppBinding.repair` reuses the existing private backup, all-resource EX locks,
+pending barriers, journal verification, managed owner pause, four-file commit,
+same-binary resume and release checks. It does not create a deployment child
+job or downgrade resource descriptors to SH. The old binding must match the
+prior receipt's previous CID/image. Missing old containers require a complete,
+successful full-ID Docker inventory; an inspect/daemon error is not absence.
+An existing retired container must match its original identity and be inactive.
+The current trusted runner additionally requires a unique Compose App target;
+retaining a second stopped App under the same Compose identity blocks that
+runner. This is not permission to delete it to make maintenance pass.
+The current App must match the signed new observation, immutable image, engine,
+labels, loopback port, version and database mount. An existing new-key intent,
+stopped/unknown old intent, active job, foreign pending, changed pin, unfinished
+journal or ambiguous owner blocks repair.
+
+The resulting signed receipt has kind `app-binding-maintenance` and explicitly
+records `app_deployed=false`. It proves only the asserted native binding
+maintenance. Any uncertain result retains its one-attempt claim and forbids
+automatic retry or rollback. If the final completion-artifact write fails after
+all pointers were committed and admission released, the public status is
+`outcome-unconfirmed` with both facts stated; it does not falsely claim that
+barriers are still present.
+
+Both central jobs must use the same reviewed Library SHA. A read-only routing
+check validates the actual owner job's annotation and configured revision;
+partial activation fails before any normal release or maintenance mutation.
+See [the narrow activation proposal](app-binding-owner-routing.md). Activation,
+any live maintenance invocation, and a required managed owner session remain
+separately authorized operations.
+
+Additional LOCAL fixtures:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 resources/scripts/common/release-app-binding-repair.test.py
+PYTHONDONTWRITEBYTECODE=1 python3 resources/scripts/common/release-binding-repair.test.py
+```

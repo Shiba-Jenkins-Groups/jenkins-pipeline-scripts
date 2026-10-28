@@ -1,0 +1,36 @@
+--- config/system/jenkins.yaml
++++ config/system/jenkins.yaml
+@@ -351,16 +351,19 @@
+               stringParam('EXPECTED_COMMIT', '', 'Authorized recovery: full 40-character commit')
+               stringParam('RECOVER_COORDINATOR_BUILD', '', 'Authorized finalized recovery: exact failed coordinator')
+               stringParam('RECOVER_OWNER_BUILD', '', 'Authorized finalized recovery: exact failed owner build')
++              stringParam('APP_BINDING_REPAIR_COORDINATOR_BUILD', '', 'Explicit App binding repair: prior successful coordinator build')
++              stringParam('APP_BINDING_REPAIR_OWNER_BUILD', '', 'Explicit App binding repair: prior successful deployment owner build')
++              textParam('APP_BINDING_REPAIR_PINS', '', 'Exact reviewed stale installation/config/registry/consumer raw SHA256 pins as JSON')
+           }
+           triggers {
+               upstream('shiba-go-ditch-api-project/develop', 'SUCCESS')
+           }
+           definition {
+               cps {
+-                  script("""@Library('jenkins-pipeline@f5c68a5f0276f542754c69b9854f09be8b484011') _
++                  script("""@Library('jenkins-pipeline@REVIEWED_LIBRARY_COMMIT_40_HEX') _
+       autoReleasePipeline(
+           enabled: true,
+-          libraryRevision: 'f5c68a5f0276f542754c69b9854f09be8b484011',
++          libraryRevision: 'REVIEWED_LIBRARY_COMMIT_40_HEX',
+           jenkinsApiUrl: 'http://shiba-docker-jenkins-controller-dev:8080',
+           jenkinsReadCredentials: 'shiba-auto-release-jenkins-read',
+           harborApiUrl: 'http://host.docker.internal:9290',
+@@ -397,9 +400,10 @@
+           }
+           definition {
+               cps {
+-                  script("""@Library('jenkins-pipeline@f5c68a5f0276f542754c69b9854f09be8b484011') _
++                  script("""@Library('jenkins-pipeline@REVIEWED_LIBRARY_COMMIT_40_HEX') _
+       prodDeploymentPipeline(
+           enabled: true,
++          libraryRevision: 'REVIEWED_LIBRARY_COMMIT_40_HEX',
+           nodeLabel: 'shiba-prod-owner-macos',
+           runtimeRoot: '/Users/surpend/Developer/01_project/shiba-go-ditch-api-project',
+           stateDirectory: '/Users/surpend/Developer/jenkins/builds/release-state/deployment',

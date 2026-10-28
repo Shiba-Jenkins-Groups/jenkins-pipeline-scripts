@@ -238,6 +238,116 @@ def prod_routing(xml):
             "prod trigger suppression is incomplete")
 
 
+def owner_library_routing(xml, expected_revision):
+    """Verify the fixed owner's literal Library and config pins, without Groovy execution.
+
+    The centrally managed owner has one supported script shape: a literal
+    @Library annotation followed by one prodDeploymentPipeline named-argument
+    call. Reject dynamic expressions and ambiguous declarations rather than
+    guessing which Groovy value Jenkins would evaluate.
+    """
+    require(isinstance(expected_revision, str) and gate.SHA.fullmatch(expected_revision),
+            "invalid expected deployment library revision")
+    require(isinstance(xml, (str, bytes)) and 0 < len(xml) <= 1024 * 1024,
+            "invalid deployment owner configuration")
+    require((b"<!DOCTYPE" if isinstance(xml, bytes) else "<!DOCTYPE") not in xml.upper(),
+            "deployment owner XML declarations are unsupported")
+    try:
+        root = ET.fromstring(xml)
+    except ET.ParseError:
+        raise gate.InvalidEvidence("invalid deployment owner configuration") from None
+    definitions = root.findall("definition")
+    require(root.tag == "flow-definition" and len(definitions) == 1
+            and definitions[0].get("class") == "org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition",
+            "deployment owner must use one fixed Pipeline script")
+    scripts = root.findall(".//script")
+    require(len(scripts) == 1 and scripts[0] in list(definitions[0]) and not list(scripts[0]),
+            "deployment owner Pipeline script missing or ambiguous")
+    script = scripts[0].text or ""
+    require(len(script) <= 65536, "deployment owner Pipeline script is oversized")
+    tokens, at = [], 0
+    while at < len(script):
+        char = script[at]
+        if char.isspace():
+            at += 1
+        elif script.startswith("//", at):
+            end = script.find("\n", at + 2)
+            at = len(script) if end < 0 else end + 1
+        elif script.startswith("/*", at):
+            end = script.find("*/", at + 2)
+            require(end >= 0, "unterminated deployment owner comment")
+            at = end + 2
+        elif char in "'\"":
+            require(not script.startswith(char * 3, at), "unsupported deployment owner string")
+            quote, value, escaped = char, [], False
+            at += 1
+            while at < len(script) and script[at] != quote:
+                require(script[at] not in "\r\n", "unsupported deployment owner string")
+                if script[at] == "\\":
+                    require(at + 1 < len(script), "unterminated deployment owner string")
+                    escaped = True
+                    at += 1
+                value.append(script[at])
+                at += 1
+            require(at < len(script), "unterminated deployment owner string")
+            value = "".join(value)
+            require(quote != '"' or "$" not in value, "dynamic deployment owner string")
+            tokens.append(("string", value, escaped))
+            at += 1
+        else:
+            name = re.match(r"[A-Za-z_][A-Za-z0-9_]*", script[at:])
+            if name:
+                tokens.append(("name", name[0], False))
+                at += len(name[0])
+            else:
+                require(char in "@():,;", "unsupported deployment owner expression")
+                tokens.append(("symbol", char, False))
+                at += 1
+
+    position = 0
+
+    def take(kind, value=None):
+        nonlocal position
+        require(position < len(tokens), "deployment owner routing is incomplete")
+        token = tokens[position]
+        require(token[0] == kind and (value is None or token[1] == value),
+                "deployment owner routing is not a fixed literal declaration")
+        position += 1
+        return token
+
+    take("symbol", "@")
+    take("name", "Library")
+    take("symbol", "(")
+    library = take("string")
+    require(not library[2] and library[1] == "jenkins-pipeline@" + expected_revision,
+            "deployment owner Library revision mismatch")
+    take("symbol", ")")
+    take("name", "_")
+    take("name", "prodDeploymentPipeline")
+    take("symbol", "(")
+    arguments = {}
+    while position < len(tokens) and tokens[position][:2] != ("symbol", ")"):
+        name = take("name")[1]
+        require(name not in arguments, "duplicate deployment owner argument")
+        take("symbol", ":")
+        require(position < len(tokens) and (tokens[position][0] == "string"
+                or tokens[position][:2] in {("name", "true"), ("name", "false")}),
+                "dynamic deployment owner argument")
+        arguments[name] = tokens[position]
+        position += 1
+        if position < len(tokens) and tokens[position][:2] == ("symbol", ","):
+            position += 1
+        else:
+            break
+    take("symbol", ")")
+    if position < len(tokens) and tokens[position][:2] == ("symbol", ";"):
+        position += 1
+    require(position == len(tokens), "ambiguous deployment owner Pipeline script")
+    configured = arguments.get("libraryRevision")
+    require(configured is not None and configured == ("string", expected_revision, False),
+            "deployment owner configured library revision mismatch")
+
+
 def runtime_ready(job, computers, label):
     require(job.get("fullName") == RELEASE_FOLDER + "/" + gate.PRODUCT + "-prod-deploy" and job.get("buildable") is True,
             "trusted deployment job is unavailable")
@@ -375,6 +485,7 @@ def main():
     routing = commands.add_parser("check-routing")
     routing.add_argument("--jenkins-url", required=True)
     routing.add_argument("--deployment-label", required=True)
+    routing.add_argument("--library-revision")
     collect = commands.add_parser("scan")
     collect.add_argument("--identity", type=Path, required=True)
     collect.add_argument("--source", type=Path, required=True)
@@ -383,7 +494,12 @@ def main():
     args = parser.parse_args()
     try:
         if args.command == "check-routing":
+            if args.library_revision is not None:
+                require(gate.SHA.fullmatch(args.library_revision), "invalid expected deployment library revision")
             prod_routing(jenkins_get(args.jenkins_url, f"/job/{gate.PRODUCT}/job/prod/config.xml"))
+            if args.library_revision is not None:
+                owner_library_routing(jenkins_get(args.jenkins_url,
+                    f"/job/{RELEASE_FOLDER}/job/{gate.PRODUCT}-prod-deploy/config.xml"), args.library_revision)
             runtime_ready(json.loads(jenkins_get(args.jenkins_url, f"/job/{RELEASE_FOLDER}/job/{gate.PRODUCT}-prod-deploy/api/json")),
                           json.loads(jenkins_get(args.jenkins_url, "/computer/api/json?depth=1")), args.deployment_label)
         elif args.command == "inspect":
