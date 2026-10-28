@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "status": "source-definition-only-disabled",
+  "job": "shiba-local-artifacts/recognition-autorecovery",
+  "source_commit": "9d0400d003de68be827524d21543200bf78bfdfd",
+  "version": "0.1.11-local-autorecovery-20261028",
+  "library_base": "2b109f6f568d60b937af9736d1975e276191f4bb",
+  "library_revision_required": "full reviewed committed candidate SHA, never main",
+  "job_renderer": "resources/scripts/common/recognition-local-artifact-job.py",
+  "job_renderer_defaults": {"disabled": true, "pipeline_enabled": false, "triggers": []},
+  "agents": ["ci-untrusted", "ci-image-builder"],
+  "readonly_scm_credential": "github-scm-readonly",
+  "builder_engine_uuid_required": true,
+  "artifact_scope": "LOCAL_RECOGNITION_DOCKER_IMAGE",
+  "registry_push": false,
+  "prod_downstream": false,
+  "runtime_deployment": false,
+  "model_calls": false,
+  "trusted_collector": "resources/scripts/common/recognition-local-artifact.py collect",
+  "existing_read_credential_environment": ["JENKINS_API_USER", "JENKINS_API_TOKEN"],
+  "owner_handoff_executor": "API scripts/service-control-local-recognition.py, independently reviewed/delivered artifact",
+  "activation_blockers": [
+    "reviewed runtime and library commits not yet published",
+    "job/folder not registered or enabled; concrete XML hash and allowed user pending",
+    "builder Engine UUID and approved cached base prerequisite need qualification",
+    "no actual CI run or final artifact has been produced",
+    "managed owner executor artifact, consumer topology and Manifest compatibility must be qualified"
+  ]
+}
