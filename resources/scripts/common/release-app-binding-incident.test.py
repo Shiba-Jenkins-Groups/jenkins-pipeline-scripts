@@ -34,7 +34,7 @@ class NativeReplay(I.IncidentIO):
         self.loaded = False; self.bootstraps = 0; self.journal_lease = None
         self.fault = None; self.append = "nonce"; self.before = fixture.authorized["owner_before"]
 
-    def owner(self, transaction):
+    def owner(self, transaction, **kwargs):
         if self.fault == "owner-unknown": raise B.BindingError("owner_launchd_observation_unknown")
         if not self.loaded: return None
         value = dict(self.before, pid=self.before["pid"] + 1, uid_start=str(os.getuid()) + " fixture-new-start")

@@ -167,14 +167,22 @@ class NativeIO:
         require(result.returncode == 0, "native_binding_command_failed")
         return result.stdout
 
-    def owner(self, transaction, *, deadline=None):
+    def owner(self, transaction, *, deadline=None, timeout_code="owner_pause_unconfirmed"):
         require(sys.platform == "darwin", "native_owner_requires_macos")
+
+        observation = {"pid": None, "uid": None, "uid_classification": "unavailable", "uid_start": None,
+                       "kernel_path": None, "errno": None, "proc_pidpath_return": None}
+
+        def incomplete(code, classification):
+            error = BindingError(code)
+            error.owner_observation = dict(observation, classification=classification)
+            raise error
 
         def remaining(limit):
             if deadline is None:
                 return limit
             budget = deadline - time.monotonic()
-            require(budget > 0, "owner_pause_unconfirmed")
+            require(budget > 0, timeout_code)
             return min(limit, budget)
 
         result = subprocess.run(["/bin/launchctl", "print", transaction.domain],
@@ -188,32 +196,44 @@ class NativeIO:
             return None
         text = result.stdout.decode()
         match = re.search(r"^\s*pid = ([0-9]+)$", text, re.M)
-        require(match is not None, "owner_loaded_without_process")
+        if match is None:
+            incomplete("owner_loaded_without_process", "loaded-without-process")
         pid = int(match.group(1))
+        observation["pid"] = pid
         library = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
         library.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
         library.proc_pidpath.restype = ctypes.c_int
         buffer = ctypes.create_string_buffer(4096)
         ctypes.set_errno(0)
         result = library.proc_pidpath(pid, buffer, len(buffer))
+        observation.update(errno=ctypes.get_errno(), proc_pidpath_return=result)
         if result <= 0:
-            error = BindingError("owner_kernel_path_unavailable")
-            error.owner_observation = {"pid": pid, "errno": ctypes.get_errno(), "proc_pidpath_return": result}
-            raise error
+            incomplete("owner_kernel_path_unavailable", "kernel-path-unavailable")
         remaining(5)
         executable = buffer.value.decode()
+        observation["kernel_path"] = executable
         argv = ["/bin/ps", "-p", str(pid), "-o", "uid=,lstart="]
-        if deadline is None:
-            process = self.command(argv).decode().strip()
-        else:
-            result = subprocess.run(argv, capture_output=True, timeout=remaining(20))
-            remaining(20)
-            require(result.returncode == 0, "native_binding_command_failed")
-            process = result.stdout.decode().strip()
-        if not process or process.split(maxsplit=1)[0] != str(os.getuid()) or executable != transaction.config["executable"]:
-            error = BindingError("foreign_owner_process")
-            error.owner_observation = {"pid": pid}
-            raise error
+        result = subprocess.run(argv, capture_output=True, timeout=remaining(20))
+        remaining(20)
+        process = result.stdout.decode().strip()
+        if not process and result.returncode in {0, 1} and not result.stderr.strip():
+            incomplete("owner_process_unavailable", "process-unavailable")
+        require(result.returncode == 0, "native_binding_command_failed")
+        fields = process.split(maxsplit=1)
+        if len(fields) != 2 or not fields[0].isdigit():
+            incomplete("foreign_owner_process", "invalid-process-identity")
+        uid = int(fields[0])
+        observation.update(uid=uid, uid_classification="same-user" if uid == os.getuid() else "foreign-user",
+                           uid_start=process)
+        if uid != os.getuid():
+            incomplete("foreign_owner_process", "foreign-user")
+        if executable != transaction.config["executable"]:
+            # Apple's historical launchd source uses this exec trampoline:
+            # https://github.com/apple-oss-distributions/launchd/blob/main/src/core.c
+            # It is only an unverified, bounded post-bootstrap observation, not
+            # evidence that this host or a previous incident used that path.
+            classification = "system-launcher" if executable == "/usr/libexec/xpcproxy" else "foreign-executable"
+            incomplete("foreign_owner_process", classification)
         identity = {"pid": pid, "kernel_path": executable, "uid_start": process,
                     "binary_sha256": sha(read(Path(executable), 0o700))}
         remaining(5)
@@ -288,35 +308,146 @@ class NativeIO:
         self._pause_observation(transaction, "post-bootout", "deadline-expired", True)
         raise BindingError("owner_pause_unconfirmed")
 
+    def _resume_observation(self, transaction, phase, outcome, acknowledged, *, current=None, error=None):
+        observation = dict(getattr(error, "owner_observation", {}))
+        if current is not None:
+            fields = current.get("uid_start", "").split(maxsplit=1)
+            uid = int(fields[0]) if fields and fields[0].isdigit() else None
+            observation.update(pid=current.get("pid"), uid=uid, uid_start=current.get("uid_start"),
+                               uid_classification="same-user" if uid == os.getuid() else "foreign-user",
+                               kernel_path=current.get("kernel_path"), classification="owner-candidate",
+                               binary_sha256=current.get("binary_sha256"))
+        record = {"schema_version": 1, "kind": "owner-resume-observation", "transaction_id": transaction.id,
+                  "at": stamp(), "phase": phase, "outcome": outcome,
+                  "bootstrap_acknowledged": acknowledged, "previous_pid": transaction.owner_before["pid"]}
+        for key in ("pid", "uid", "uid_classification", "uid_start", "kernel_path", "errno",
+                    "proc_pidpath_return", "classification", "binary_sha256"):
+            record[key] = observation.get(key)
+        sequence = getattr(transaction, "_resume_observation_count", 0) + 1
+        transaction._resume_observation_count = sequence
+        create(transaction.backup / ("owner-resume-%04d.json" % sequence), encoded(record) + b"\n")
+
+    def _resume_ready(self, transaction, current, deadline):
+        def remaining():
+            budget = deadline - time.monotonic()
+            require(budget > 0, "owner_resume_unconfirmed")
+            return min(5, budget)
+
+        result = subprocess.run(["/usr/sbin/lsof", "-nP", "-iTCP:" + transaction.config["listen"].rsplit(":", 1)[1],
+                                 "-sTCP:LISTEN", "-t"], capture_output=True, timeout=remaining())
+        remaining()
+        values = result.stdout.decode().split()
+        require(not result.stderr.strip() and result.returncode in {0, 1}
+                and all(value.isdigit() and int(value) > 0 for value in values), "owner_listener_observation_unknown")
+        if not values:
+            return False
+        require(result.returncode == 0 and set(values) == {str(current["pid"])}, "owner_listener_identity_mismatch")
+        before = transaction.journal.lstat()
+        fd = os.open(transaction.journal, os.O_RDWR | os.O_NOFOLLOW)
+        try:
+            held = os.fstat(fd)
+            require(stat.S_ISREG(held.st_mode) and held.st_uid == os.getuid() and stat.S_IMODE(held.st_mode) == 0o600
+                    and (held.st_dev, held.st_ino) == (before.st_dev, before.st_ino), "owner_journal_identity_changed")
+            busy = False
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                busy = True
+            after = transaction.journal.lstat()
+            require((after.st_dev, after.st_ino) == (held.st_dev, held.st_ino), "owner_journal_identity_changed")
+            remaining()
+            return busy
+        finally:
+            os.close(fd)
+
     def resume(self, transaction):
-        require(self.owner(transaction) is None, "foreign_owner_before_resume")
-        self.command(["/bin/launchctl", "bootstrap", "gui/" + str(os.getuid()), str(transaction.plist)])
+        require(not getattr(transaction, "_resume_bootstrap_submitted", False), "owner_resume_once_claim_exists")
+        try:
+            current = self.owner(transaction)
+        except BaseException as error:
+            outcome = str(error) if isinstance(error, BindingError) else type(error).__name__
+            NativeIO._resume_observation(self, transaction, "pre-resume", outcome, False, error=error)
+            raise
+        NativeIO._resume_observation(self, transaction, "pre-resume",
+                                     "launchd-not-loaded" if current is None else "identity-observed", False, current=current)
+        require(current is None, "foreign_owner_before_resume")
+        NativeIO._resume_observation(self, transaction, "bootstrap-requested", "request-durable", False)
+        # Diagnostic fsyncs may block. Recheck after them and avoid another
+        # durable write before the sole bootstrap command.
+        try:
+            current = self.owner(transaction)
+            require(current is None, "foreign_owner_before_resume")
+        except BaseException as error:
+            outcome = str(error) if isinstance(error, BindingError) else type(error).__name__
+            NativeIO._resume_observation(self, transaction, "pre-bootstrap", outcome, False, current=current, error=error)
+            raise
+        transaction._resume_bootstrap_submitted = True
+        try:
+            self.command(["/bin/launchctl", "bootstrap", "gui/" + str(os.getuid()), str(transaction.plist)])
+        except BaseException as error:
+            outcome = str(error) if isinstance(error, BindingError) else type(error).__name__
+            NativeIO._resume_observation(self, transaction, "bootstrap-requested", outcome, False, error=error)
+            raise
         deadline = time.monotonic() + 15
+        NativeIO._resume_observation(self, transaction, "bootstrap-acknowledged", "command-succeeded", True)
+        pinned_pid, pinned_start = None, None
+
+        def generation(observation):
+            nonlocal pinned_pid, pinned_start
+            pid, start = observation.get("pid"), observation.get("uid_start")
+            if pid is not None:
+                require(type(pid) is int and pid > 0 and pid != transaction.owner_before["pid"], "owner_resume_identity_mismatch")
+                require(pinned_pid is None or pinned_pid == pid, "owner_resume_generation_changed")
+                pinned_pid = pid
+            if start is not None:
+                require(pinned_start is None or pinned_start == start, "owner_resume_generation_changed")
+                pinned_start = start
+
         while time.monotonic() < deadline:
             try:
-                current = self.owner(transaction)
+                try:
+                    current = self.owner(transaction, deadline=deadline, timeout_code="owner_resume_unconfirmed")
+                except BindingError as error:
+                    NativeIO._resume_observation(self, transaction, "post-bootstrap", str(error), True, error=error)
+                    observation = getattr(error, "owner_observation", {})
+                    classification = observation.get("classification")
+                    allowed = classification in {"loaded-without-process", "kernel-path-unavailable"}
+                    allowed = allowed or (classification == "process-unavailable"
+                                           and observation.get("kernel_path") == transaction.config["executable"])
+                    allowed = allowed or (classification == "system-launcher"
+                                           and observation.get("uid") == os.getuid()
+                                           and observation.get("kernel_path") == "/usr/libexec/xpcproxy")
+                    if not allowed:
+                        raise
+                    generation(observation)
+                    current = None
+                else:
+                    NativeIO._resume_observation(self, transaction, "post-bootstrap",
+                                                 "launchd-not-loaded" if current is None else "identity-observed", True, current=current)
+                    require(current is not None or pinned_pid is None, "owner_resume_generation_changed")
+                if current is not None:
+                    generation(current)
+                    require(current["binary_sha256"] == transaction.owner_before["binary_sha256"]
+                            and current["kernel_path"] == transaction.config["executable"]
+                            and current["uid_start"].split(maxsplit=1)[0] == str(os.getuid()), "owner_resume_identity_mismatch")
+                    if NativeIO._resume_ready(self, transaction, current, deadline):
+                        NativeIO._resume_observation(self, transaction, "verification-observed", "listener-and-journal-held", True, current=current)
+                        require(self.owner(transaction, deadline=deadline, timeout_code="owner_resume_unconfirmed") == current,
+                                "owner_resume_generation_changed")
+                        require(NativeIO._resume_ready(self, transaction, current, deadline), "owner_resume_readiness_changed")
+                        require(time.monotonic() < deadline, "owner_resume_unconfirmed")
+                        return current
             except BindingError as error:
-                if str(error) != "owner_loaded_without_process":
-                    raise
-                current = None
-            if current is not None:
-                require(current["binary_sha256"] == transaction.owner_before["binary_sha256"]
-                        and current["pid"] != transaction.owner_before["pid"], "owner_resume_identity_mismatch")
-                # Listener + lifetime journal lock proves the same binary passed
-                # VerifyStartupConfig and opened its freshly loaded manager.
-                result = subprocess.run(["/usr/sbin/lsof", "-nP", "-iTCP:" + transaction.config["listen"].rsplit(":", 1)[1],
-                                         "-sTCP:LISTEN", "-t"], capture_output=True, timeout=5)
-                listeners = set(result.stdout.decode().split())
-                if result.returncode == 0 and listeners == {str(current["pid"])}:
-                    fd = os.open(transaction.journal, os.O_RDWR | os.O_NOFOLLOW)
-                    try:
-                        try:
-                            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                        except BlockingIOError:
-                            return current
-                    finally:
-                        os.close(fd)
-            time.sleep(0.05)
+                NativeIO._resume_observation(self, transaction, "resume-rejected", str(error), True,
+                                             current=None if getattr(error, "owner_observation", None) else current, error=error)
+                raise
+            except subprocess.TimeoutExpired:
+                NativeIO._resume_observation(self, transaction, "post-bootstrap", "native-query-timeout", True)
+                raise BindingError("owner_resume_unconfirmed") from None
+            budget = deadline - time.monotonic()
+            if budget > 0:
+                time.sleep(min(0.05, budget))
+        NativeIO._resume_observation(self, transaction, "post-bootstrap", "deadline-expired", True)
         raise BindingError("owner_resume_unconfirmed")
 
     def app(self, transaction, container_id):

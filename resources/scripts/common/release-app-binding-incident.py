@@ -75,7 +75,7 @@ class IncidentIO(B.NativeIO):
         actual = self
         class Guard:
             submitted = False
-            def owner(self, value): return actual.owner(value)
+            def owner(self, value, **kwargs): return actual.owner(value, **kwargs)
             def command(self, argv):
                 need(argv[:2] == ["/bin/launchctl", "bootstrap"] and not self.submitted,
                      "incident_single_bootstrap_required")

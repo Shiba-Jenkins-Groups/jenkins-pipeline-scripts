@@ -108,7 +108,7 @@ from the already LOCAL-validated login/navigation fix. This is a proposal, not
 authorization to publish, update central job pins, restore a runtime, or deploy.
 
 The [activation template](owner95-library-activation.template.patch) records only
-the four current `2b109f6` coordinator/owner Library pins in the JCasC source.
+the four current `5f631e5` coordinator/owner Library pins in the JCasC source.
 Its placeholder is intentionally not executable. A separately authorized
 activation must render the final reviewed commit, compare the captured source
 and live job hashes, and update both fixed jobs consistently. The existing
@@ -120,3 +120,7 @@ The existing offline DEV rehearsal loads the new pause and incident fixture
 suites. Its receipt still states `DEV_CONTRACT_ONLY`,
 `runtime_deployed=false`, and `prod_enabled=false`. No live recovery action is
 added to that rehearsal or to an automatic job trigger.
+
+The separate [running-owner finalization contract](app-binding-running-finalization.md)
+handles an already submitted bootstrap whose verification did not finish. It
+does not rerun this restoration transaction or reinterpret its failed receipt.

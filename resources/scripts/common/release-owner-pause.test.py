@@ -366,15 +366,16 @@ class PauseTests(unittest.TestCase):
         self.assertEqual(len(self.events), 1)
         self.assert_preserved()
 
-    def test_resume_keeps_existing_missing_proc_failure_semantics(self):
+    def test_resume_keeps_unclassified_missing_proc_fail_closed(self):
         error = B.BindingError("owner_kernel_path_unavailable")
-        with mock.patch.object(self.io, "owner", side_effect=[None, error]), \
+        with mock.patch.object(self.io, "owner", side_effect=[None, None, error]), \
                 mock.patch.object(self.io, "command") as command:
             self.tx.plist = Path("/fixture/original.plist")
             with self.assertRaisesRegex(B.BindingError, "owner_kernel_path_unavailable"):
                 self.io.resume(self.tx)
         command.assert_called_once_with(["/bin/launchctl", "bootstrap", "gui/501", "/fixture/original.plist"])
-        self.assertEqual(self.records, [])
+        self.assertEqual(self.records[-1]["outcome"], "owner_kernel_path_unavailable")
+        self.assertTrue(self.records[-1]["bootstrap_acknowledged"])
 
     def test_owner_default_call_keeps_native_command_timeouts_and_identity(self):
         self.events = [self.event()]

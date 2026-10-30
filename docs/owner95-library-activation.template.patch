@@ -4,11 +4,11 @@
            }
            definition {
                cps {
--                  script("""@Library('jenkins-pipeline@2b109f6f568d60b937af9736d1975e276191f4bb') _
+-                  script("""@Library('jenkins-pipeline@5f631e55a72333fc45f0343f5532b7deafc3d1cd') _
 +                  script("""@Library('jenkins-pipeline@REVIEWED_LIBRARY_COMMIT_40_HEX') _
        autoReleasePipeline(
            enabled: true,
--          libraryRevision: '2b109f6f568d60b937af9736d1975e276191f4bb',
+-          libraryRevision: '5f631e55a72333fc45f0343f5532b7deafc3d1cd',
 +          libraryRevision: 'REVIEWED_LIBRARY_COMMIT_40_HEX',
            jenkinsApiUrl: 'http://shiba-docker-jenkins-controller-dev:8080',
            jenkinsReadCredentials: 'shiba-auto-release-jenkins-read',
@@ -17,11 +17,11 @@
            }
            definition {
                cps {
--                  script("""@Library('jenkins-pipeline@2b109f6f568d60b937af9736d1975e276191f4bb') _
+-                  script("""@Library('jenkins-pipeline@5f631e55a72333fc45f0343f5532b7deafc3d1cd') _
 +                  script("""@Library('jenkins-pipeline@REVIEWED_LIBRARY_COMMIT_40_HEX') _
        prodDeploymentPipeline(
            enabled: true,
--          libraryRevision: '2b109f6f568d60b937af9736d1975e276191f4bb',
+-          libraryRevision: '5f631e55a72333fc45f0343f5532b7deafc3d1cd',
 +          libraryRevision: 'REVIEWED_LIBRARY_COMMIT_40_HEX',
            nodeLabel: 'shiba-prod-owner-macos',
            runtimeRoot: '/Users/surpend/Developer/01_project/shiba-go-ditch-api-project',

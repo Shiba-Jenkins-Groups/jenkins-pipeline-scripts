@@ -5,6 +5,12 @@
 
 ## [Unreleased]
 
+### Fixed（owner 啟動身分觀測與既有程序收尾）
+
+- owner 啟動後只有限觀測明確的未就緒狀態；保留同 PID／啟動時間、UID、kernel path、binary、listener 與 journal lock 的正向確認，不把過渡程序當成已驗證 owner。
+- 增加獨立的 running-owner 事故收尾入口，保留原失敗 claim／receipt，只在重新核對原設定、App、journal 與 fences 後釋放該筆交易；不再次啟停 owner、不重部署 App。
+- 本項為新的 LOCAL 候選；Library 發布、正式收尾及部署接續仍依各自既有授權範圍執行。
+
 ### Fixed（App 綁定停止觀測與部署前事故恢復）
 
 - 成功送出一次 owner bootout 後，有限等待 launchd 與已退出 PID 的觀測收斂；仍須明確確認服務已卸載，停止前身分不完整及外來程序維持拒絕。

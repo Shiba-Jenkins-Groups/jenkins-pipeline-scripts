@@ -38,6 +38,8 @@ git --version
                          'release-app-binding.py', 'release-app-binding.test.py',
                          'release-owner-pause.test.py', 'release-app-binding-incident.py',
                          'release-app-binding-incident.test.py',
+                         'release-owner-resume.test.py', 'release-app-binding-finalize.py',
+                         'release-app-binding-finalize.test.py',
                          'release-app-binding-repair.test.py', 'release-binding-repair.py',
                          'release-binding-repair.test.py', 'release-owner-library-routing.test.py'].each { name ->
                             writeFile file: "suite/${name}", text: libraryResource("scripts/common/${name}")
@@ -52,7 +54,7 @@ export GIT_CONFIG_GLOBAL=/dev/null
 export GIT_CONFIG_NOSYSTEM=1
 export GIT_TERMINAL_PROMPT=0
 mkdir -p reports
-for suite in release-gate release-control release-candidate release-deploy runtime-image-verify release-recovery release-rebuild release-app-binding release-owner-pause release-app-binding-incident release-app-binding-repair release-binding-repair release-owner-library-routing; do
+for suite in release-gate release-control release-candidate release-deploy runtime-image-verify release-recovery release-rebuild release-app-binding release-owner-pause release-owner-resume release-app-binding-incident release-app-binding-finalize release-app-binding-repair release-binding-repair release-owner-library-routing; do
   python3 "suite/${suite}.test.py" 2>&1 | tee "reports/${suite}.log"
 done
 python3 - <<'PY'
@@ -62,7 +64,8 @@ receipt={'scope':'DEV_CONTRACT_ONLY','runtime_deployed':False,'prod_enabled':Fal
          'result':'SUCCESS','library_revision':(root/'reviewed-library.txt').read_text().strip(),
          'executed_suites':['release-gate','release-control','release-candidate','release-deploy',
                             'runtime-image-verify','release-recovery','release-rebuild',
-                            'release-app-binding','release-owner-pause','release-app-binding-incident','release-app-binding-repair',
+                            'release-app-binding','release-owner-pause','release-owner-resume',
+                            'release-app-binding-incident','release-app-binding-finalize','release-app-binding-repair',
                             'release-binding-repair','release-owner-library-routing'],
          'source_sha256':{p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted((root/'suite').glob('*.py'))}}
 (root/'reports/contract-receipt.json').write_text(json.dumps(receipt,indent=2)+chr(10))
