@@ -40,7 +40,7 @@ println 'PASS 4 DEV rehearsal configuration/control cases (LOCAL DSL mocks only)
 def shell = calls.findAll { it[0] == 'sh' }[1][1].toString()
 def expectedSuites = ['release-gate', 'release-control', 'release-candidate', 'release-deploy',
                       'runtime-image-verify', 'release-recovery', 'release-rebuild',
-                      'release-app-binding', 'release-app-binding-repair', 'release-binding-repair',
+                      'release-app-binding', 'release-owner-pause', 'release-app-binding-incident', 'release-app-binding-repair', 'release-binding-repair',
                       'release-owner-library-routing']
 def expectedResources = ['release-gate.py', 'release-evidence.py', 'release-promotion.py',
                          'release-finalization.py', 'release-deploy.py', 'release-candidate.py',
@@ -50,6 +50,8 @@ def expectedResources = ['release-gate.py', 'release-evidence.py', 'release-prom
                          'release-recovery.py', 'release-recovery.test.py',
                          'release-rebuild.py', 'release-rebuild.test.py',
                          'release-app-binding.py', 'release-app-binding.test.py',
+                         'release-owner-pause.test.py', 'release-app-binding-incident.py',
+                         'release-app-binding-incident.test.py',
                          'release-app-binding-repair.test.py', 'release-binding-repair.py',
                          'release-binding-repair.test.py', 'release-owner-library-routing.test.py']
 def executeSuite = { String failingSuite = null ->

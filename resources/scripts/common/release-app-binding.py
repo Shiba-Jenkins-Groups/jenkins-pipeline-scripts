@@ -167,9 +167,19 @@ class NativeIO:
         require(result.returncode == 0, "native_binding_command_failed")
         return result.stdout
 
-    def owner(self, transaction):
+    def owner(self, transaction, *, deadline=None):
         require(sys.platform == "darwin", "native_owner_requires_macos")
-        result = subprocess.run(["/bin/launchctl", "print", transaction.domain], capture_output=True, timeout=5)
+
+        def remaining(limit):
+            if deadline is None:
+                return limit
+            budget = deadline - time.monotonic()
+            require(budget > 0, "owner_pause_unconfirmed")
+            return min(limit, budget)
+
+        result = subprocess.run(["/bin/launchctl", "print", transaction.domain],
+                                capture_output=True, timeout=remaining(5))
+        remaining(5)  # A late response cannot confirm a completed pause.
         if result.returncode:
             # A command failure alone is not proof of an unloaded job.
             text = result.stderr.decode(errors="replace")
@@ -182,27 +192,100 @@ class NativeIO:
         pid = int(match.group(1))
         library = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
         library.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+        library.proc_pidpath.restype = ctypes.c_int
         buffer = ctypes.create_string_buffer(4096)
-        require(library.proc_pidpath(pid, buffer, len(buffer)) > 0, "owner_kernel_path_unavailable")
+        ctypes.set_errno(0)
+        result = library.proc_pidpath(pid, buffer, len(buffer))
+        if result <= 0:
+            error = BindingError("owner_kernel_path_unavailable")
+            error.owner_observation = {"pid": pid, "errno": ctypes.get_errno(), "proc_pidpath_return": result}
+            raise error
+        remaining(5)
         executable = buffer.value.decode()
-        process = self.command(["/bin/ps", "-p", str(pid), "-o", "uid=,lstart="]).decode().strip()
-        require(process.split(maxsplit=1)[0] == str(os.getuid())
-                and executable == transaction.config["executable"], "foreign_owner_process")
-        return {"pid": pid, "kernel_path": executable, "uid_start": process,
-                "binary_sha256": sha(read(Path(executable), 0o700))}
+        argv = ["/bin/ps", "-p", str(pid), "-o", "uid=,lstart="]
+        if deadline is None:
+            process = self.command(argv).decode().strip()
+        else:
+            result = subprocess.run(argv, capture_output=True, timeout=remaining(20))
+            remaining(20)
+            require(result.returncode == 0, "native_binding_command_failed")
+            process = result.stdout.decode().strip()
+        if not process or process.split(maxsplit=1)[0] != str(os.getuid()) or executable != transaction.config["executable"]:
+            error = BindingError("foreign_owner_process")
+            error.owner_observation = {"pid": pid}
+            raise error
+        identity = {"pid": pid, "kernel_path": executable, "uid_start": process,
+                    "binary_sha256": sha(read(Path(executable), 0o700))}
+        remaining(5)
+        return identity
+
+    def _pause_observation(self, transaction, phase, outcome, acknowledged, *, current=None, error=None):
+        # Only fixed identity/error metadata is retained. Never archive native
+        # stdout/stderr or credentials, and never overwrite a prior observation.
+        observation = getattr(error, "owner_observation", {})
+        before = transaction.owner_before
+        record = {"schema_version": 1, "kind": "owner-pause-observation", "transaction_id": transaction.id,
+                  "at": stamp(), "phase": phase, "outcome": outcome,
+                  "bootout_acknowledged": acknowledged, "expected_pid": before["pid"],
+                  "pid": (current or observation).get("pid"), "errno": observation.get("errno"),
+                  "proc_pidpath_return": observation.get("proc_pidpath_return"),
+                  "binary_sha256": (current or {}).get("binary_sha256")}
+        sequence = getattr(transaction, "_pause_observation_count", 0) + 1
+        transaction._pause_observation_count = sequence
+        create(transaction.backup / ("owner-pause-%04d.json" % sequence), encoded(record) + b"\n")
 
     def pause(self, transaction):
-        require(self.owner(transaction) == transaction.owner_before, "owner_changed_before_pause")
-        self.command(["/bin/launchctl", "bootout", transaction.domain])
+        try:
+            current = self.owner(transaction)
+        except BindingError as error:
+            self._pause_observation(transaction, "pre-pause", str(error), False, error=error)
+            raise
+        self._pause_observation(transaction, "pre-pause", "identity-observed", False, current=current)
+        require(current == transaction.owner_before, "owner_changed_before_pause")
+        self._pause_observation(transaction, "bootout-requested", "request-durable", False, current=current)
+        # Durable diagnostics can block on storage. Re-observe after those
+        # writes; do not introduce another fsync between this check and bootout.
+        try:
+            current = self.owner(transaction)
+        except BaseException as error:
+            outcome = str(error) if isinstance(error, BindingError) else type(error).__name__
+            self._pause_observation(transaction, "pre-bootout", outcome, False, error=error)
+            raise
+        if current != transaction.owner_before:
+            self._pause_observation(transaction, "pre-bootout", "owner_changed_before_pause", False, current=current)
+            raise BindingError("owner_changed_before_pause")
+        try:
+            self.command(["/bin/launchctl", "bootout", transaction.domain])
+        except BaseException:
+            self._pause_observation(transaction, "bootout-requested", "acknowledgement-unconfirmed", False)
+            raise
         deadline = time.monotonic() + 15
+        self._pause_observation(transaction, "bootout-acknowledged", "command-succeeded", True)
         while time.monotonic() < deadline:
             try:
-                if self.owner(transaction) is None:
-                    return
+                current = self.owner(transaction, deadline=deadline)
+            except subprocess.TimeoutExpired:
+                self._pause_observation(transaction, "post-bootout", "native-query-timeout", True)
+                raise BindingError("owner_pause_unconfirmed") from None
             except BindingError as error:
-                if str(error) != "owner_loaded_without_process":
+                self._pause_observation(transaction, "post-bootout", str(error), True, error=error)
+                if str(error) not in {"owner_loaded_without_process", "owner_kernel_path_unavailable"}:
                     raise
-            time.sleep(0.05)
+                if str(error) == "owner_kernel_path_unavailable":
+                    require(error.owner_observation["pid"] == transaction.owner_before["pid"],
+                            "owner_changed_during_pause")
+            else:
+                self._pause_observation(transaction, "post-bootout",
+                                        "launchd-not-loaded" if current is None else "identity-observed",
+                                        True, current=current)
+                require(time.monotonic() < deadline, "owner_pause_unconfirmed")
+                require(current is None or current == transaction.owner_before, "owner_changed_during_pause")
+                if current is None:
+                    return
+            budget = deadline - time.monotonic()
+            if budget > 0:
+                time.sleep(min(0.05, budget))
+        self._pause_observation(transaction, "post-bootout", "deadline-expired", True)
         raise BindingError("owner_pause_unconfirmed")
 
     def resume(self, transaction):

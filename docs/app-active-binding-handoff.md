@@ -74,6 +74,11 @@ the owner archives it even when begin fails before the normal deployment claim.
 An uncertain owner pause is distinguished from a confirmed pause. A failed
 resume retains resource admission fences and restores the startup pending gate.
 
+The separately authorized, pre-deployment pause incident restoration contract
+is described in [App binding pause incident](app-binding-pause-incident.md).
+It restores the original owner only; it is not an alternative App deployment
+route or an automatic cleanup of failed transactions.
+
 LOCAL validation:
 
 ```sh

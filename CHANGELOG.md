@@ -5,6 +5,12 @@
 
 ## [Unreleased]
 
+### Fixed（App 綁定停止觀測與部署前事故恢復）
+
+- 成功送出一次 owner bootout 後，有限等待 launchd 與已退出 PID 的觀測收斂；仍須明確確認服務已卸載，停止前身分不完整及外來程序維持拒絕。
+- 新增部署 claim 前、authorized 階段的受管事故恢復入口：鎖定原設定、artifact、App、journal、intent 與該次 pending，恢復原 owner 後才釋放自己的 resource fences；不部署 App、不改寫 intent、不重試或 rollback。
+- 本項目前僅 LOCAL 實作與離線驗證；發布 Library、解除正式 pending、恢復 owner 與部署接續仍需各自明確授權。
+
 ### Fixed（已成功部署後的原生 App 綁定維護）
 
 - 固定 coordinator／owner 新增明確授權的 ready binding 維護分支：以原成功部署的 HMAC receipt、四份設定 raw SHA 與十五分鐘授權鎖定一次修復；不重建、重掃或重部署 App，不覆寫正式部署紀錄。
