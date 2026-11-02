@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<flow-definition>
+  <description>Disabled template only. Generate the concrete SHA-pinned configuration using ocr-native-release.py render-job after reviewing all identities.</description>
+  <properties/>
+  <definition class="org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition" plugin="workflow-cps">
+    <script>@Library('jenkins-pipeline@REVIEWED_LIBRARY_40_HEX') _
+error('Template only: render the exact reviewed source, owner, parent and scanner pins before activation')
+</script>
+    <sandbox>true</sandbox>
+  </definition>
+  <triggers/>
+  <disabled>true</disabled>
+</flow-definition>
