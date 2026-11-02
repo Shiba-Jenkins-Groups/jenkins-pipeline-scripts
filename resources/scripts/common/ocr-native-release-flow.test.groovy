@@ -13,8 +13,10 @@ def valid = [enabled: true, libraryRevision: 'f' * 40, sourceCommit: 'd' * 40, s
                  artifact_hash_inventory: ['.pipeline/release-manifest.env': 'c' * 64,
                      'reports/runtime-image.json': 'c' * 64, 'image-ref.txt': 'c' * 64]]]
 def cause = [[_class: 'hudson.model.Cause$UserIdCause', userId: 'claude-code-use']]
+def lastCalls = []
 def runCase = { config, actualJob = job, actualCauses = cause, actualParams = [:] ->
     def calls = []
+    lastCalls = calls
     def binding = new Binding([env: [JOB_NAME: actualJob, BUILD_NUMBER: '1', BUILD_URL: 'http://localhost:9090/job/shiba-release-automation/job/apple-vision-native-release/1/'],
                                currentBuild: [getBuildCauses: { actualCauses }], params: actualParams])
     binding.setVariable('error', { message -> throw new IllegalStateException(message) })
@@ -35,6 +37,13 @@ assert calls.findAll { it[0] == 'checkout' }.size() == 2
 assert calls.findAll { it[0] == 'sh' }.size() == 2
 assert calls.find { it[0] == 'archiveArtifacts' }[1][0].allowEmptyArchive == false
 assert !source.contains('withCredentials') && !source.contains('launchctl') && !source.contains('build(job:')
+def encodedConfig = groovy.json.JsonOutput.toJson(valid).getBytes('UTF-8').encodeBase64().toString()
+assert runCase(encodedConfig).findAll { it[0] == 'node' } == [['node', 'shiba-prod-owner-macos']]
+['%', 'a', '====', '/w==', 'W10=', 'e30=\n', 'A' * 65540].each { bad ->
+    try { runCase(bad); assert false : 'invalid encoded input passed' }
+    catch (IllegalArgumentException expected) {}
+    assert lastCalls.isEmpty() : 'invalid encoding reached a Pipeline side effect'
+}
 def rejected = [
     [valid + [enabled: false], job, cause, [:]],
     [valid + [sourceCommit: 'main'], job, cause, [:]],
@@ -51,6 +60,7 @@ rejected.each { argsForCase ->
     catch (IllegalStateException expected) {}
 }
 println 'PASS native Pipeline control flow: one valid, nine rejected exact-source/manual-job configurations'
+println 'PASS trusted native entry: encoded configuration accepted; seven malformed/oversized inputs rejected before Pipeline effects'
 
 // Compile the actual function with Jenkins CPS and sandbox installed jars.
 def jars = args.length > 1 ? args[1] : null

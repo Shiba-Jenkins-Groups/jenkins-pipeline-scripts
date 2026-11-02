@@ -460,10 +460,11 @@ def render(args):
                   ownerPackage=identity['owner_package'],
                   ownerTestRun=identity['owner_test_run'], goVersion=identity['go_version'], approvers=[identity['requested_by']],
                   parentCI=identity['parent_ci'], scannerTools=identity['scanner_tools'])
-    # Groovy JsonSlurper parses exact JSON without interpolating source values.
+    # Only the trusted Library decodes/parses. Sandboxed WorkflowScript contains
+    # no constructors, static helpers or ScriptApproval-dependent JSON code.
     encoded = base64.b64encode(json.dumps(config, separators=(',', ':')).encode()).decode()
     script = "@Library('jenkins-pipeline@" + identity['library_revision'] + "') _\n" + \
-             "def cfg = new groovy.json.JsonSlurperClassic().parseText(new String('" + encoded + "'.decodeBase64(), 'UTF-8'))\nocrNativeReleasePipeline(cfg)\n"
+             "ocrNativeReleasePipeline('" + encoded + "')\n"
     root = ET.Element('flow-definition')
     ET.SubElement(root, 'description').text = 'Pinned macOS OCR and owner artifacts only. Manual approved user; no runtime deployment or automatic downstream.'
     ET.SubElement(root, 'properties')
@@ -489,7 +490,7 @@ def render_deployment(args):
     config['enabled'] = args.enable
     encoded = base64.b64encode(json.dumps(config, separators=(',', ':')).encode()).decode()
     script = "@Library('jenkins-pipeline@" + config['libraryRevision'] + "') _\n" + \
-             "def cfg = new groovy.json.JsonSlurperClassic().parseText(new String('" + encoded + "'.decodeBase64(), 'UTF-8'))\nocrNativeDeploymentPipeline(cfg)\n"
+             "ocrNativeDeploymentPipeline('" + encoded + "')\n"
     root = ET.Element('flow-definition')
     ET.SubElement(root, 'description').text = 'One reviewed native OCR owner transaction. Exact plan/CI/source pins, approved manual user, no parameters or automatic retry.'
     ET.SubElement(root, 'properties')

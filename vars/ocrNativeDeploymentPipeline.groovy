@@ -1,8 +1,33 @@
 import groovy.json.JsonOutput
+import groovy.json.JsonSlurperClassic
+
+// Decode only inside the trusted Library. The sandboxed job calls one function.
+def decodeNativeConfiguration(Object input) {
+    if (input instanceof Map) { return input }
+    if (!(input instanceof String) || input.size() == 0 || input.size() > 65536 ||
+        input.size() % 4 != 0 || !(input ==~ /[A-Za-z0-9+\/]*={0,2}/)) {
+        throw new IllegalArgumentException('Bounded canonical base64 native configuration required')
+    }
+    try {
+        byte[] raw = java.util.Base64.decoder.decode(input)
+        if (raw.length > 49152 || java.util.Base64.encoder.encodeToString(raw) != input) {
+            throw new IllegalArgumentException('Native configuration encoding differs')
+        }
+        def decoder = java.nio.charset.StandardCharsets.UTF_8.newDecoder()
+        decoder.onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+        decoder.onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+        def value = new JsonSlurperClassic().parseText(decoder.decode(java.nio.ByteBuffer.wrap(raw)).toString())
+        if (!(value instanceof Map)) { throw new IllegalArgumentException('Native configuration must be an object') }
+        return value
+    } catch (Exception failure) {
+        throw new IllegalArgumentException('Invalid encoded native configuration')
+    }
+}
 
 // The only runtime mutation job for the scoped native OCR release. All inputs
 // are reviewed immutable pins; it never accepts a command, image tag, or retry.
-def call(Map config = [:]) {
+def call(Object input = [:]) {
+    def config = decodeNativeConfiguration(input)
     def required = ['enabled', 'libraryRevision', 'sourceCommit', 'approvers',
                     'plan', 'planSHA256', 'ciReceipt', 'ciReceiptSHA256', 'artifactDirectory'] as Set
     if (config.keySet() != required || config.enabled != true ||

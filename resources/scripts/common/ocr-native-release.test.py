@@ -168,6 +168,10 @@ class NativeReleaseTests(unittest.TestCase):
         self.assertIn('<disabled>true</disabled>', rendered)
         self.assertIn('jenkins-pipeline@' + 'f' * 40, rendered)
         self.assertNotIn('main', rendered)
+        self.assertIn("ocrNativeReleasePipeline('", rendered)
+        self.assertNotIn('JsonSlurper', rendered)
+        self.assertNotIn('new String', rendered)
+        self.assertNotIn('decodeBase64', rendered)
 
     def test_deployment_renderer_has_only_reviewed_fixed_plan_inputs(self):
         config = {'libraryRevision': 'f' * 40, 'sourceCommit': 'd' * 40, 'approvers': ['claude-code-use'],
@@ -179,7 +183,10 @@ class NativeReleaseTests(unittest.TestCase):
         args = argparse.Namespace(config=path, enable=False)
         rendered = m.render_deployment(args)
         self.assertIn('<disabled>true</disabled>', rendered)
-        self.assertIn('ocrNativeDeploymentPipeline(cfg)', rendered)
+        self.assertIn("ocrNativeDeploymentPipeline('", rendered)
+        self.assertNotIn('JsonSlurper', rendered)
+        self.assertNotIn('new String', rendered)
+        self.assertNotIn('decodeBase64', rendered)
         self.assertIn('jenkins-pipeline@' + 'f' * 40, rendered)
         config['command'] = 'arbitrary'
         path.write_text(json.dumps(config))
