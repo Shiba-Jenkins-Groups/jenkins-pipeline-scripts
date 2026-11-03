@@ -164,8 +164,11 @@ def build(args):
     output.mkdir(mode=0o700, parents=False)
     reports = output / 'reports'
     reports.mkdir(mode=0o700)
+    # Go's built-in official alternate endpoint retains the sum.golang.org
+    # verifier key while avoiding the native builder's HiNet DNS redirection.
     env = dict(os.environ, GOTOOLCHAIN='local', GOWORK='off', GOFLAGS='', GOOS='darwin', GOARCH='arm64',
-               CGO_ENABLED='0', GOPROXY='http://127.0.0.1:9190/repository/go-group', GOSUMDB='sum.golang.org',
+               CGO_ENABLED='0', GOPROXY='http://127.0.0.1:9190/repository/go-group',
+               GOSUMDB='sum.golang.org https://sum.golang.google.cn',
                PYTHONDONTWRITEBYTECODE='1')
     tools = {}
     for name, pin in identity['scanner_tools'].items():
