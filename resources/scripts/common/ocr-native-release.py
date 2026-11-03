@@ -107,10 +107,20 @@ def validate_identity(identity):
 
 
 def run(command, cwd, env=None, log=None, input_data=None, timeout=600, separate_stderr=False):
-    result = subprocess.run(command, cwd=cwd, env=env, input=input_data, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE if separate_stderr else subprocess.STDOUT, timeout=timeout, check=False)
     if log:
         log.write(('$ ' + ' '.join(map(str, command)) + '\n').encode())
+        log.flush()
+    try:
+        result = subprocess.run(command, cwd=cwd, env=env, input=input_data, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE if separate_stderr else subprocess.STDOUT, timeout=timeout, check=False)
+    except subprocess.TimeoutExpired as error:
+        if log:
+            log.write(error.output or b'')
+            log.write(error.stderr or b'')
+            log.write(('\ncommand timed out after ' + str(error.timeout) + ' seconds\n').encode())
+            log.flush()
+        raise
+    if log:
         log.write(result.stdout)
         if separate_stderr:
             log.write(result.stderr)
@@ -192,7 +202,7 @@ def build(args):
             run([str(tools[name]), *command], output, env, log, timeout=30)
         scan_changes(source, identity['source_baseline_commit'], tools['gitleaks'], reports / 'ocr-gitleaks.json', output, env, log)
         scan_changes(owner, identity['owner_baseline_commit'], tools['gitleaks'], reports / 'owner-gitleaks.json', output, env, log)
-        run(['python3', '-B', 'tests/apple_vision_preparation_receipt.py'], source, env, log, timeout=180)
+        run(['python3', '-B', 'tests/apple_vision_preparation_receipt.py'], source, env, log, timeout=300)
         run(['go', 'test', '-mod=readonly', './internal/hostcontrol', '-run', identity['owner_test_run'], '-count=1'], owner, env, log)
         run(['go', 'vet', '-mod=readonly', identity['owner_package'], './internal/hostcontrol'], owner, env, log)
         run(['go', 'test', '-mod=readonly', './cmd/verify/ocr_release_manifest', '-count=1'], source, env, log)

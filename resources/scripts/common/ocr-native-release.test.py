@@ -170,6 +170,23 @@ class NativeReleaseTests(unittest.TestCase):
                 self.assertEqual(process.call_count, 1)
                 self.assertFalse((Path(args.output) / 'scanner-tools').exists())
 
+    def test_timeout_preserves_command_and_partial_diagnostics_without_input_data(self):
+        log = io.BytesIO()
+        command = ['python3', '-B', 'fixture.py']
+
+        def timed_out(actual, **kwargs):
+            self.assertEqual(actual, command)
+            self.assertEqual(log.getvalue(), b'$ python3 -B fixture.py\n')
+            raise subprocess.TimeoutExpired(actual, 300, output=b'partial stdout\n', stderr=b'partial stderr\n')
+
+        with patch.object(m.subprocess, 'run', side_effect=timed_out):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                m.run(command, self.directory, log=log, input_data=b'private input fixture',
+                      timeout=300, separate_stderr=True)
+        self.assertIn(b'partial stdout\npartial stderr\n', log.getvalue())
+        self.assertIn(b'command timed out after 300 seconds', log.getvalue())
+        self.assertNotIn(b'private input fixture', log.getvalue())
+
     def test_merge_source_scan_includes_all_changes_since_reviewed_baseline(self):
         repository = self.directory / 'git-source'
         repository.mkdir()
