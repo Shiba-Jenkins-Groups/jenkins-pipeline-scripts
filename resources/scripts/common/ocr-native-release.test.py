@@ -185,7 +185,75 @@ class NativeReleaseTests(unittest.TestCase):
                       timeout=300, separate_stderr=True)
         self.assertIn(b'partial stdout\npartial stderr\n', log.getvalue())
         self.assertIn(b'command timed out after 300 seconds', log.getvalue())
+        self.assertIn(b'elapsed_seconds=', log.getvalue())
         self.assertNotIn(b'private input fixture', log.getvalue())
+
+    def test_nonzero_numeric_returncode_and_elapsed_are_retained(self):
+        log = io.BytesIO()
+        process = subprocess.CompletedProcess(['native-fixture'], 124, stdout=b'', stderr=b'fixture stderr\n')
+        with patch.object(m.subprocess, 'run', return_value=process), \
+                patch.object(m.time, 'monotonic', side_effect=[100.0, 220.25]):
+            with self.assertRaisesRegex(ValueError, r'returncode=124'):
+                m.run(['native-fixture'], self.directory, log=log, separate_stderr=True)
+        self.assertIn(b'fixture stderr\n', log.getvalue())
+        self.assertIn(b'command returncode=124 elapsed_seconds=120.250', log.getvalue())
+
+    def test_startup_private_logs_survive_nonzero_and_outer_timeout(self):
+        for index, failure in enumerate([ValueError('native failed (returncode=124)'),
+                                          subprocess.TimeoutExpired(['native-fixture'], 135)]):
+            with self.subTest(failure=type(failure).__name__):
+                output = self.directory / ('startup-' + str(index))
+                output.mkdir()
+                log = io.BytesIO()
+
+                def startup(command, cwd, env, actual_log, **kwargs):
+                    self.assertEqual(command, ['native-fixture', '-check-compatibility'])
+                    self.assertEqual(cwd, output)
+                    self.assertEqual(env['OCR_RUNTIME_LANE'], 'prod')
+                    self.assertEqual(env['OCR_COLD_START_TIMEOUT_SECONDS'], '120')
+                    self.assertEqual(kwargs, {'timeout': 135, 'separate_stderr': True})
+                    self.assertIs(actual_log, log)
+                    (Path(env['OCRSVC_LOG_DIR']) / 'ocrsvc_apple-20261103.log').write_bytes(b'cold_start_timeout fixture\n')
+                    raise failure
+
+                with patch.object(m, 'run', side_effect=startup):
+                    with self.assertRaises(type(failure)) as caught:
+                        m.startup_compatibility(Path('native-fixture'), output, {}, log)
+                self.assertIs(caught.exception, failure)
+                self.assertIn(b'cold_start_timeout fixture\n', log.getvalue())
+
+    def test_startup_log_capture_bounds_bytes_files_and_follows_no_symlinks(self):
+        directory = self.directory / 'private-logs'
+        directory.mkdir()
+        (directory / 'a.log').write_bytes(b'a' * (m.STARTUP_LOG_BYTES + 1))
+        secret = self.directory / 'unrelated-private-file'
+        secret.write_bytes(b'PRIVATE_EXTERNAL_FIXTURE')
+        (directory / 'b.log').symlink_to(secret)
+        (directory / 'c.log').mkdir()
+        (directory / 'd.log').write_bytes(b'last permitted log\n')
+        (directory / 'e.log').write_bytes(b'not within file limit\n')
+        log = io.BytesIO()
+        m.append_startup_logs(directory, log)
+        captured = log.getvalue()
+        self.assertIn(b'a' * m.STARTUP_LOG_BYTES, captured)
+        self.assertNotIn(b'a' * (m.STARTUP_LOG_BYTES + 1), captured)
+        self.assertIn(b'startup log truncated at byte limit', captured)
+        self.assertIn(b'last permitted log\n', captured)
+        self.assertIn(b'startup logs truncated at file limit', captured)
+        self.assertNotIn(b'PRIVATE_EXTERNAL_FIXTURE', captured)
+        self.assertNotIn(b'not within file limit', captured)
+        self.assertLess(len(captured), m.STARTUP_LOG_BYTES + 1000)
+
+    def test_successful_startup_json_is_unchanged_by_log_capture(self):
+        output = self.directory / 'successful-startup'
+        output.mkdir()
+        payload = json.dumps(self.smoke).encode()
+        log = io.BytesIO()
+        with patch.object(m, 'run', return_value=payload):
+            actual = m.startup_compatibility(Path('native-fixture'), output, {}, log)
+        self.assertIs(actual, payload)
+        m.validate_smoke(json.loads(actual), self.native)
+        self.assertEqual(m.FILES, ['ocr-native-artifact.tar', 'ci-receipt.json', 'SHA256SUMS', 'contracts.log'])
 
     def test_merge_source_scan_includes_all_changes_since_reviewed_baseline(self):
         repository = self.directory / 'git-source'

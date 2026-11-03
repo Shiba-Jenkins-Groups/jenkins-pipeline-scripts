@@ -14,9 +14,11 @@ from pathlib import Path, PurePosixPath
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import tarfile
 import tempfile
+import time
 import urllib.request
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -34,6 +36,8 @@ PARENT_FILES = ['.pipeline/release-manifest.env', 'reports/runtime-image.json', 
 HEX40 = re.compile(r'[0-9a-f]{40}')
 HEX64 = re.compile(r'[0-9a-f]{64}')
 MAX_BYTES = 192 * 1024 * 1024
+STARTUP_LOG_BYTES = 64 * 1024
+STARTUP_LOG_FILES = 4
 
 
 def require(value, message):
@@ -110,6 +114,7 @@ def run(command, cwd, env=None, log=None, input_data=None, timeout=600, separate
     if log:
         log.write(('$ ' + ' '.join(map(str, command)) + '\n').encode())
         log.flush()
+    started = time.monotonic()
     try:
         result = subprocess.run(command, cwd=cwd, env=env, input=input_data, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE if separate_stderr else subprocess.STDOUT, timeout=timeout, check=False)
@@ -117,16 +122,56 @@ def run(command, cwd, env=None, log=None, input_data=None, timeout=600, separate
         if log:
             log.write(error.output or b'')
             log.write(error.stderr or b'')
-            log.write(('\ncommand timed out after ' + str(error.timeout) + ' seconds\n').encode())
+            log.write(('\ncommand timed out after ' + str(error.timeout) +
+                       ' seconds; elapsed_seconds=' + format(time.monotonic() - started, '.3f') + '\n').encode())
             log.flush()
         raise
     if log:
         log.write(result.stdout)
         if separate_stderr:
             log.write(result.stderr)
+        log.write(('\ncommand returncode=' + str(result.returncode) +
+                   ' elapsed_seconds=' + format(time.monotonic() - started, '.3f') + '\n').encode())
         log.flush()
-    require(result.returncode == 0, 'command failed: ' + str(command[0]))
+    require(result.returncode == 0, 'command failed: ' + str(command[0]) + ' (returncode=' + str(result.returncode) + ')')
     return result.stdout
+
+
+def append_startup_logs(directory, log):
+    # Only this build's fresh private directory is inspected. Bound diagnostics,
+    # follow no links and never let evidence collection hide the startup error.
+    try:
+        require(not directory.is_symlink() and directory.is_dir(), 'private startup log directory unavailable')
+        paths = sorted(directory.iterdir())
+        log.write(('\nstartup private logs: ' + str(len(paths)) + ' entries\n').encode())
+        for path in paths[:STARTUP_LOG_FILES]:
+            log.write(('startup log ' + json.dumps(path.name) + '\n').encode())
+            try:
+                descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                with os.fdopen(descriptor, 'rb') as handle:
+                    require(stat.S_ISREG(os.fstat(handle.fileno()).st_mode), 'not a regular startup log')
+                    data = handle.read(STARTUP_LOG_BYTES + 1)
+                log.write(data[:STARTUP_LOG_BYTES])
+                if len(data) > STARTUP_LOG_BYTES:
+                    log.write(b'\nstartup log truncated at byte limit\n')
+            except (OSError, ValueError) as error:
+                log.write(('startup log unavailable: ' + type(error).__name__ + '\n').encode())
+        if len(paths) > STARTUP_LOG_FILES:
+            log.write(b'\nstartup logs truncated at file limit\n')
+    except (OSError, ValueError) as error:
+        log.write(('startup logs unavailable: ' + type(error).__name__ + '\n').encode())
+    log.flush()
+
+
+def startup_compatibility(binary, output, env, log):
+    smoke_logs = output / 'startup-logs'
+    smoke_logs.mkdir(mode=0o700)
+    smoke_env = dict(env, OCR_RUNTIME_LANE='prod', OCR_COLD_START_TIMEOUT_SECONDS='120', OCRSVC_LOG_DIR=str(smoke_logs))
+    try:
+        return run([str(binary), '-check-compatibility'], output, smoke_env, log,
+                   timeout=135, separate_stderr=True)
+    finally:
+        append_startup_logs(smoke_logs, log)
 
 
 def exact_checkout(source, commit):
@@ -234,11 +279,7 @@ def build(args):
         native_receipt = json.loads(regular(native / 'artifact.json').read_text())
         native_binary_name = native_receipt.get('binary', '')
         require(re.fullmatch(r'shiba_ocr_prod_[0-9a-f]{12}', native_binary_name), 'unexpected native binary name')
-        smoke_logs = output / 'startup-logs'
-        smoke_logs.mkdir(mode=0o700)
-        smoke_env = dict(env, OCR_RUNTIME_LANE='prod', OCR_COLD_START_TIMEOUT_SECONDS='120', OCRSVC_LOG_DIR=str(smoke_logs))
-        smoke = run([str(native / native_binary_name), '-check-compatibility'], output, smoke_env, log,
-                    timeout=135, separate_stderr=True)
+        smoke = startup_compatibility(native / native_binary_name, output, env, log)
         smoke_payload = json.loads(smoke)
         validate_smoke(smoke_payload, native_receipt)
         (reports / 'startup-smoke.json').write_bytes(smoke)
