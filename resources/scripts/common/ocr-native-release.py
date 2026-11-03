@@ -166,7 +166,7 @@ def build(args):
     reports.mkdir(mode=0o700)
     # Go's built-in official alternate endpoint retains the sum.golang.org
     # verifier key while avoiding the native builder's HiNet DNS redirection.
-    env = dict(os.environ, GOTOOLCHAIN='local', GOWORK='off', GOFLAGS='', GOOS='darwin', GOARCH='arm64',
+    env = dict(os.environ, GOTOOLCHAIN=identity['go_version'], GOWORK='off', GOFLAGS='', GOOS='darwin', GOARCH='arm64',
                CGO_ENABLED='0', GOPROXY='http://127.0.0.1:9190/repository/go-group',
                GOSUMDB='sum.golang.org https://sum.golang.google.cn',
                PYTHONDONTWRITEBYTECODE='1')
@@ -178,7 +178,7 @@ def build(args):
         require(sha(binary.read_bytes()) == pin['sha256'], name + ' scanner hash mismatch')
         tools[name] = binary
     with (output / 'contracts.log').open('xb') as log:
-        require(run(['go', 'env', 'GOVERSION'], owner, env, log).decode().strip() == identity['go_version'], 'Go toolchain version mismatch')
+        require(run(['go', 'env', 'GOVERSION'], owner, env, log, separate_stderr=True).decode().strip() == identity['go_version'], 'Go toolchain version mismatch')
         if 'gitleaks' not in tools:
             # Versioned task-local scanner, Go module/sumdb verification and the
             # existing Nexus proxy only. No global install or fallback proxy.

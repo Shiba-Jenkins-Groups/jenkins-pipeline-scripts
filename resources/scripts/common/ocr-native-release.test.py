@@ -94,6 +94,82 @@ class NativeReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'origin'):
             m.validate_parent(broken)
 
+    def toolchain_build_arguments(self):
+        source, owner = self.directory / 'recognition-source', self.directory / 'owner-source'
+        source.mkdir()
+        owner.mkdir()
+        scanner = self.directory / 'mock-govulncheck'
+        scanner.write_bytes(b'offline scanner fixture; never executed')
+        scanner.chmod(0o755)
+        identity = copy.deepcopy(self.identity)
+        identity['go_version'] = 'go1.27.3'
+        identity['scanner_tools']['govulncheck'] = {'path': str(scanner), 'sha256': m.sha(scanner.read_bytes())}
+        path = self.directory / 'build-identity.json'
+        path.write_text(json.dumps(identity))
+        return argparse.Namespace(identity=path, recognition_source=source, owner_source=owner,
+                                  output=self.directory / 'build-output')
+
+    def test_exact_toolchain_accepts_first_download_stderr_without_weakening_version_guard(self):
+        args = self.toolchain_build_arguments()
+        notice = b'go: downloading go1.27.3 (darwin/arm64)\n'
+
+        class StopBeforeInstall(RuntimeError):
+            pass
+
+        def simulated_go(command, **kwargs):
+            environment = kwargs['env']
+            self.assertEqual(environment['GOTOOLCHAIN'], 'go1.27.3')
+            self.assertEqual(environment['GOPROXY'], 'http://127.0.0.1:9190/repository/go-group')
+            self.assertEqual(environment['GOSUMDB'], 'sum.golang.org https://sum.golang.google.cn')
+            if command == ['go', 'env', 'GOVERSION']:
+                # Model subprocess' actual stderr=STDOUT behavior so removing
+                # the separation causes the strict GOVERSION assertion to fail.
+                if kwargs['stderr'] == subprocess.STDOUT:
+                    return subprocess.CompletedProcess(command, 0, stdout=notice + b'go1.27.3\n', stderr=None)
+                self.assertEqual(kwargs['stderr'], subprocess.PIPE)
+                return subprocess.CompletedProcess(command, 0, stdout=b'go1.27.3\n', stderr=notice)
+            self.assertEqual(command, ['go', 'install', 'github.com/zricethezav/gitleaks/v8@v8.30.1'])
+            self.assertEqual(environment['GOBIN'], str(Path(args.output).absolute() / 'scanner-tools'))
+            raise StopBeforeInstall('version accepted; no installer or Go command executed')
+
+        with patch.dict(os.environ, {'GOTOOLCHAIN': 'local'}), \
+                patch.object(m.platform, 'system', return_value='Darwin'), \
+                patch.object(m.platform, 'machine', return_value='arm64'), \
+                patch.object(m.os, 'getuid', return_value=501), \
+                patch.object(m, 'exact_checkout', side_effect=lambda path, commit: Path(path)), \
+                patch.object(m.subprocess, 'run', side_effect=simulated_go) as process, \
+                patch.object(m.urllib.request, 'urlopen', side_effect=AssertionError('network forbidden')):
+            with self.assertRaises(StopBeforeInstall):
+                m.build(args)
+        self.assertEqual(process.call_count, 2)
+        log = (Path(args.output) / 'contracts.log').read_bytes()
+        self.assertIn(notice, log)  # Download diagnostics are retained, not discarded.
+        self.assertIn(b'go1.27.3\n', log)
+
+    def test_exact_toolchain_rejects_different_goversion_before_install(self):
+        args = self.toolchain_build_arguments()
+        for actual in ('go1.27.2', 'go1.27.4'):
+            with self.subTest(actual=actual):
+                args.output = self.directory / ('rejected-' + actual)
+
+                def simulated_go(command, **kwargs):
+                    self.assertEqual(command, ['go', 'env', 'GOVERSION'])
+                    self.assertEqual(kwargs['env']['GOTOOLCHAIN'], 'go1.27.3')
+                    self.assertEqual(kwargs['stderr'], subprocess.PIPE)
+                    return subprocess.CompletedProcess(command, 0, stdout=(actual + '\n').encode(),
+                                                       stderr=b'go: downloading go1.27.3 (darwin/arm64)\n')
+
+                with patch.object(m.platform, 'system', return_value='Darwin'), \
+                        patch.object(m.platform, 'machine', return_value='arm64'), \
+                        patch.object(m.os, 'getuid', return_value=501), \
+                        patch.object(m, 'exact_checkout', side_effect=lambda path, commit: Path(path)), \
+                        patch.object(m.subprocess, 'run', side_effect=simulated_go) as process, \
+                        patch.object(m.urllib.request, 'urlopen', side_effect=AssertionError('network forbidden')):
+                    with self.assertRaisesRegex(ValueError, 'Go toolchain version mismatch'):
+                        m.build(args)
+                self.assertEqual(process.call_count, 1)
+                self.assertFalse((Path(args.output) / 'scanner-tools').exists())
+
     def test_merge_source_scan_includes_all_changes_since_reviewed_baseline(self):
         repository = self.directory / 'git-source'
         repository.mkdir()
