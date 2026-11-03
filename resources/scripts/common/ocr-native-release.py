@@ -202,6 +202,7 @@ def build(args):
             run([str(tools[name]), *command], output, env, log, timeout=30)
         scan_changes(source, identity['source_baseline_commit'], tools['gitleaks'], reports / 'ocr-gitleaks.json', output, env, log)
         scan_changes(owner, identity['owner_baseline_commit'], tools['gitleaks'], reports / 'owner-gitleaks.json', output, env, log)
+        run(['python3', '-B', 'tests/apple_vision_preparation_process_test.py'], source, env, log, timeout=30)
         run(['python3', '-B', 'tests/apple_vision_preparation_receipt.py'], source, env, log, timeout=300)
         run(['go', 'test', '-mod=readonly', './internal/hostcontrol', '-run', identity['owner_test_run'], '-count=1'], owner, env, log)
         run(['go', 'vet', '-mod=readonly', identity['owner_package'], './internal/hostcontrol'], owner, env, log)
