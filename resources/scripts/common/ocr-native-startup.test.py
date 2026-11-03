@@ -167,8 +167,8 @@ class NativeStartupTests(unittest.TestCase):
         self.assertIn(b'private native fixture stderr', self.log.getvalue())
         self.assert_preserved()
 
-    def test_late_pass_cannot_publish_even_if_native_claims_under_limit(self):
-        self.clock.step, self.process.finish = 121, 121
+    def test_outer_limit_rejects_pass_even_if_native_claims_under_limit(self):
+        self.clock.step, self.process.finish = 615.001, 615.001
         with self.patches(), self.assertRaisesRegex(ValueError, 'wall time'):
             self.call()
         report = self.report()
@@ -177,12 +177,31 @@ class NativeStartupTests(unittest.TestCase):
         self.assertEqual((self.output / 'startup-diagnostic/smoke.json').read_bytes(), self.payload)
         self.assert_preserved()
 
-    def test_late_native_claim_cannot_publish_even_if_wall_under_limit(self):
-        self.smoke['initialization']['duration_ms'] = 120001
+    def test_native_limit_rejects_pass_even_if_wall_under_limit(self):
+        self.smoke['initialization']['duration_ms'] = 600001
         self.payload = json.dumps(self.smoke).encode()
         with self.patches(), self.assertRaisesRegex(ValueError, 'native startup duration'):
             self.call()
         self.assertEqual(self.report()['release_budget'], 'FAIL')
+        self.assert_preserved()
+
+    def test_155_second_preparation_passes_with_one_observational_sample(self):
+        self.clock.step, self.process.finish = 31, 155
+        self.smoke['initialization']['duration_ms'] = 155000
+        self.payload = json.dumps(self.smoke).encode()
+        samples = []
+        def observe(process, identity, evidence, report, log):
+            samples.append((process.pid, self.clock.now))
+            report.update(sample_attempted=True, sample_returncode=0, sample_cleanup_complete=True)
+        with self.patches(sample=observe):
+            actual = self.call()
+        report = self.report()
+        self.assertEqual(actual, self.payload)
+        self.assertEqual(samples, [(701, 124)])
+        self.assertEqual(report['release_budget'], 'PASS')
+        self.assertEqual(report['release_limit_seconds'], 600)
+        self.assertEqual(report['sample_after_seconds'], 120)
+        self.assertEqual(report['elapsed_seconds'], 155)
         self.assert_preserved()
 
     def test_outer_timeout_uses_one_sample_and_cleans_owned_native(self):

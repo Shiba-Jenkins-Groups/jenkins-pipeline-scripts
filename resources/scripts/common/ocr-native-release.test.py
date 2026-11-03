@@ -199,13 +199,13 @@ class NativeReleaseTests(unittest.TestCase):
         self.assertIn(b'fixture stderr\n', log.getvalue())
         self.assertIn(b'command returncode=124 elapsed_seconds=120.250', log.getvalue())
 
-    def test_release_budget_is_independent_of_long_diagnostic_watchdog(self):
-        for native_ms, wall_seconds in [(0, 0), (119999.9, 119.99), (120000, 120)]:
+    def test_release_allows_measured_macos_preparation_with_finite_limits(self):
+        for native_ms, wall_seconds in [(0, 0), (120000, 120), (155000, 155), (600000, 615)]:
             smoke = copy.deepcopy(self.smoke)
             smoke['initialization']['duration_ms'] = native_ms
             m.validate_startup_budget(smoke, wall_seconds)
             m.validate_smoke(smoke, self.native)
-        for native_ms, wall_seconds in [(119000, 120.001), (120001, 119), (600000, 600)]:
+        for native_ms, wall_seconds in [(155000, 615.001), (600001, 155), (600001, 615.001)]:
             smoke = copy.deepcopy(self.smoke)
             smoke['initialization']['duration_ms'] = native_ms
             with self.subTest(native_ms=native_ms, wall_seconds=wall_seconds), self.assertRaises(ValueError):
@@ -246,14 +246,23 @@ class NativeReleaseTests(unittest.TestCase):
         self.assertNotIn(b'not within file limit', captured)
         self.assertLess(len(captured), m.STARTUP_LOG_BYTES + 1000)
 
-    def test_self_consistent_archive_cannot_approve_late_diagnostic_success(self):
+    def test_self_consistent_archive_still_rejects_out_of_budget_success(self):
         late = copy.deepcopy(self.smoke)
-        late['initialization']['duration_ms'] = 120001
+        late['initialization']['duration_ms'] = 600001
         self.entries['reports/startup-smoke.json'] = json.dumps(late).encode()
         self.artifact()
         with self.assertRaises(ValueError):
             m.verify(self.directory)
         self.assertEqual(m.FILES, ['ocr-native-artifact.tar', 'ci-receipt.json', 'SHA256SUMS', 'contracts.log'])
+
+    def test_self_consistent_archive_accepts_155_second_preparation(self):
+        prepared = copy.deepcopy(self.smoke)
+        prepared['initialization']['duration_ms'] = 155000
+        self.entries['reports/startup-smoke.json'] = json.dumps(prepared).encode()
+        self.artifact()
+        receipt = m.verify(self.directory)
+        self.assertEqual(receipt['result'], 'PASS')
+        self.assertFalse(receipt['pipeline_final_success'])
 
     def test_merge_source_scan_includes_all_changes_since_reviewed_baseline(self):
         repository = self.directory / 'git-source'

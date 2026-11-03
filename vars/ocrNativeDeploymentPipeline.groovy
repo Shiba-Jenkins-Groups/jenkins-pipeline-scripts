@@ -48,7 +48,7 @@ def call(Object input = [:]) {
         error('OCR deployment requires one approved manual cause and no parameters')
     }
     properties([disableConcurrentBuilds(), buildDiscarder(logRotator(numToKeepStr: '30')), pipelineTriggers([])])
-    timeout(time: 15, unit: 'MINUTES') {
+    timeout(time: 20, unit: 'MINUTES') {
         node('shiba-prod-owner-macos') {
             dir("apple-ocr-deploy-${env.BUILD_NUMBER}") {
                 deleteDir()
@@ -81,7 +81,7 @@ command=['python3','-B',str(source/'scripts/ocr_release_session.py'),'apply']
 for key in ('plan','plan_sha256','ci_receipt','ci_receipt_sha256','artifact_directory'):
     command += ['--'+key.replace('_','-'),request[key]]
 command += ['--output',str(pathlib.Path('runtime-receipt.json').resolve()),'--confirm-prod-ocr']
-subprocess.run(command,check=True,timeout=660)
+subprocess.run(command,check=True,timeout=960)
 receipt=json.loads(pathlib.Path('runtime-receipt.json').read_text())
 assert receipt['schema']=='ocr-native-deployment-v1' and receipt['state']=='succeeded'
 assert receipt['owner_reactivated'] is True and receipt['replacement']['state']=='succeeded'

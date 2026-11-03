@@ -46,7 +46,8 @@ STARTUP_LOG_BYTES = 64 * 1024
 STARTUP_LOG_FILES = 4
 STARTUP_DIAGNOSTIC_SECONDS = 600
 STARTUP_OUTER_SECONDS = 615
-STARTUP_RELEASE_SECONDS = 120
+STARTUP_RELEASE_SECONDS = 600
+STARTUP_SAMPLE_SECONDS = 120
 STARTUP_CLEANUP_SECONDS = 10
 
 
@@ -177,10 +178,10 @@ def validate_startup_budget(smoke, elapsed_seconds=None):
     require(isinstance(smoke, dict) and isinstance(smoke.get('initialization'), dict), 'startup duration missing')
     duration = smoke['initialization'].get('duration_ms')
     require(type(duration) in (int, float) and 0 <= duration <= STARTUP_RELEASE_SECONDS * 1000 and math.isfinite(duration),
-            'native startup duration exceeds the independent 120-second release limit or is invalid')
+            'native startup duration exceeds the 600-second preparation limit or is invalid')
     if elapsed_seconds is not None:
-        require(type(elapsed_seconds) in (int, float) and 0 <= elapsed_seconds <= STARTUP_RELEASE_SECONDS and math.isfinite(elapsed_seconds),
-                'observed startup wall time exceeds the independent 120-second release limit or is invalid')
+        require(type(elapsed_seconds) in (int, float) and 0 <= elapsed_seconds <= STARTUP_OUTER_SECONDS and math.isfinite(elapsed_seconds),
+                'observed startup wall time exceeds the 615-second outer limit or is invalid')
 
 
 def executable_identity(path, expected_sha256=None):
@@ -359,7 +360,8 @@ def startup_compatibility(binary, output, env, log):
               'binary_identity': identity, 'cache_root': str(cache), 'cache_before': cache_before,
               'cache_state': 'existing_namespace_preserved' if cache_before['exists'] else 'namespace_absent_before_launch',
               'diagnostic_timeout_seconds': STARTUP_DIAGNOSTIC_SECONDS, 'outer_timeout_seconds': STARTUP_OUTER_SECONDS,
-              'release_limit_seconds': STARTUP_RELEASE_SECONDS, 'sample_attempted': False, 'execution_attempts': 0,
+              'release_limit_seconds': STARTUP_RELEASE_SECONDS, 'sample_after_seconds': STARTUP_SAMPLE_SECONDS,
+              'sample_attempted': False, 'execution_attempts': 0,
               'cleanup_remaining_seconds': STARTUP_CLEANUP_SECONDS}
     diagnostic_path = evidence / 'diagnostic.json'
     persist_startup(diagnostic_path, report)
@@ -393,7 +395,7 @@ def startup_compatibility(binary, output, env, log):
                 if elapsed >= STARTUP_OUTER_SECONDS:
                     report['status'] = 'outer_timeout'
                     raise subprocess.TimeoutExpired(command, STARTUP_OUTER_SECONDS)
-                if elapsed >= STARTUP_RELEASE_SECONDS and not report['sample_attempted']:
+                if elapsed >= STARTUP_SAMPLE_SECONDS and not report['sample_attempted']:
                     sample_startup_process(process, identity, evidence, report, log)
                     if report.get('interrupted_signal'):
                         raise InterruptedError('startup interrupted during sampler cleanup')

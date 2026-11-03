@@ -22,6 +22,8 @@ def runCase={ boolean failMutation, Object input=cfg ->
 def success=runCase(false)
 assert success.failure==null
 assert success.calls.findAll{it[0]=='archiveArtifacts'}.size()==1
+assert success.calls.find{it[0]=='timeout'}[1] == [time:20,unit:'MINUTES']
+assert source.contains('subprocess.run(command,check=True,timeout=960)')
 assert source.contains("receipt['state']=='succeeded'")&&source.contains("receipt['owner_reactivated'] is True")
 def unknown=runCase(true)
 assert unknown.failure=='owner mutation unknown'
