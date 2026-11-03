@@ -42,7 +42,8 @@ class NativeReleaseTests(unittest.TestCase):
                       'runtime_artifact_sha256': '2' * 64, 'runtime_identity': self.native['runtime_identity'],
                       'compatibility': {'status': 'pass', 'policy': 'receipt-smoke-v1'},
                       'cache_identity': {'verified': True, 'lane': 'prod', 'namespace': self.native['binary'],
-                                         'binary_sha256': self.native['binary_sha256']}, 'initialization': {'phase': 'ready'}}
+                                         'binary_sha256': self.native['binary_sha256']},
+                      'initialization': {'phase': 'ready', 'duration_ms': 42000.0}}
         owner = {'schema': 'service-control-owner-artifact-v1', 'source_commit': 'e' * 40,
                  'binary': 'service-control-owner', 'platform': 'darwin/arm64', 'binary_sha256': m.sha(owner_bytes)}
         manifest = {'source_commit': 'd' * 40, 'platform': 'darwin/arm64', 'binary_sha256': m.sha(manifest_bytes)}
@@ -198,29 +199,30 @@ class NativeReleaseTests(unittest.TestCase):
         self.assertIn(b'fixture stderr\n', log.getvalue())
         self.assertIn(b'command returncode=124 elapsed_seconds=120.250', log.getvalue())
 
-    def test_startup_private_logs_survive_nonzero_and_outer_timeout(self):
-        for index, failure in enumerate([ValueError('native failed (returncode=124)'),
-                                          subprocess.TimeoutExpired(['native-fixture'], 135)]):
-            with self.subTest(failure=type(failure).__name__):
-                output = self.directory / ('startup-' + str(index))
-                output.mkdir()
-                log = io.BytesIO()
+    def test_release_budget_is_independent_of_long_diagnostic_watchdog(self):
+        for native_ms, wall_seconds in [(0, 0), (119999.9, 119.99), (120000, 120)]:
+            smoke = copy.deepcopy(self.smoke)
+            smoke['initialization']['duration_ms'] = native_ms
+            m.validate_startup_budget(smoke, wall_seconds)
+            m.validate_smoke(smoke, self.native)
+        for native_ms, wall_seconds in [(119000, 120.001), (120001, 119), (600000, 600)]:
+            smoke = copy.deepcopy(self.smoke)
+            smoke['initialization']['duration_ms'] = native_ms
+            with self.subTest(native_ms=native_ms, wall_seconds=wall_seconds), self.assertRaises(ValueError):
+                m.validate_startup_budget(smoke, wall_seconds)
 
-                def startup(command, cwd, env, actual_log, **kwargs):
-                    self.assertEqual(command, ['native-fixture', '-check-compatibility'])
-                    self.assertEqual(cwd, output)
-                    self.assertEqual(env['OCR_RUNTIME_LANE'], 'prod')
-                    self.assertEqual(env['OCR_COLD_START_TIMEOUT_SECONDS'], '120')
-                    self.assertEqual(kwargs, {'timeout': 135, 'separate_stderr': True})
-                    self.assertIs(actual_log, log)
-                    (Path(env['OCRSVC_LOG_DIR']) / 'ocrsvc_apple-20261103.log').write_bytes(b'cold_start_timeout fixture\n')
-                    raise failure
-
-                with patch.object(m, 'run', side_effect=startup):
-                    with self.assertRaises(type(failure)) as caught:
-                        m.startup_compatibility(Path('native-fixture'), output, {}, log)
-                self.assertIs(caught.exception, failure)
-                self.assertIn(b'cold_start_timeout fixture\n', log.getvalue())
+    def test_invalid_or_missing_native_startup_duration_cannot_pass_verifier(self):
+        for duration in [None, True, False, -1, '100', float('nan'), float('inf'), -float('inf'), {}, []]:
+            smoke = copy.deepcopy(self.smoke)
+            if duration is None:
+                smoke['initialization'].pop('duration_ms')
+            else:
+                smoke['initialization']['duration_ms'] = duration
+            with self.subTest(duration=duration), self.assertRaises(ValueError):
+                m.validate_smoke(smoke, self.native)
+        for elapsed in [True, False, -1, '100', float('nan'), float('inf')]:
+            with self.subTest(elapsed=elapsed), self.assertRaises(ValueError):
+                m.validate_startup_budget(self.smoke, elapsed)
 
     def test_startup_log_capture_bounds_bytes_files_and_follows_no_symlinks(self):
         directory = self.directory / 'private-logs'
@@ -244,15 +246,13 @@ class NativeReleaseTests(unittest.TestCase):
         self.assertNotIn(b'not within file limit', captured)
         self.assertLess(len(captured), m.STARTUP_LOG_BYTES + 1000)
 
-    def test_successful_startup_json_is_unchanged_by_log_capture(self):
-        output = self.directory / 'successful-startup'
-        output.mkdir()
-        payload = json.dumps(self.smoke).encode()
-        log = io.BytesIO()
-        with patch.object(m, 'run', return_value=payload):
-            actual = m.startup_compatibility(Path('native-fixture'), output, {}, log)
-        self.assertIs(actual, payload)
-        m.validate_smoke(json.loads(actual), self.native)
+    def test_self_consistent_archive_cannot_approve_late_diagnostic_success(self):
+        late = copy.deepcopy(self.smoke)
+        late['initialization']['duration_ms'] = 120001
+        self.entries['reports/startup-smoke.json'] = json.dumps(late).encode()
+        self.artifact()
+        with self.assertRaises(ValueError):
+            m.verify(self.directory)
         self.assertEqual(m.FILES, ['ocr-native-artifact.tar', 'ci-receipt.json', 'SHA256SUMS', 'contracts.log'])
 
     def test_merge_source_scan_includes_all_changes_since_reviewed_baseline(self):

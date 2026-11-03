@@ -6,18 +6,24 @@ collect separately authenticates completed native and parent Jenkins builds.
 """
 import argparse
 import base64
+import ctypes
+from datetime import datetime, timezone
 import hashlib
 import io
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import platform
+import pwd
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import tarfile
 import tempfile
+import threading
 import time
 import urllib.request
 import urllib.parse
@@ -38,6 +44,10 @@ HEX64 = re.compile(r'[0-9a-f]{64}')
 MAX_BYTES = 192 * 1024 * 1024
 STARTUP_LOG_BYTES = 64 * 1024
 STARTUP_LOG_FILES = 4
+STARTUP_DIAGNOSTIC_SECONDS = 600
+STARTUP_OUTER_SECONDS = 615
+STARTUP_RELEASE_SECONDS = 120
+STARTUP_CLEANUP_SECONDS = 10
 
 
 def require(value, message):
@@ -163,15 +173,301 @@ def append_startup_logs(directory, log):
     log.flush()
 
 
-def startup_compatibility(binary, output, env, log):
-    smoke_logs = output / 'startup-logs'
-    smoke_logs.mkdir(mode=0o700)
-    smoke_env = dict(env, OCR_RUNTIME_LANE='prod', OCR_COLD_START_TIMEOUT_SECONDS='120', OCRSVC_LOG_DIR=str(smoke_logs))
+def validate_startup_budget(smoke, elapsed_seconds=None):
+    require(isinstance(smoke, dict) and isinstance(smoke.get('initialization'), dict), 'startup duration missing')
+    duration = smoke['initialization'].get('duration_ms')
+    require(type(duration) in (int, float) and 0 <= duration <= STARTUP_RELEASE_SECONDS * 1000 and math.isfinite(duration),
+            'native startup duration exceeds the independent 120-second release limit or is invalid')
+    if elapsed_seconds is not None:
+        require(type(elapsed_seconds) in (int, float) and 0 <= elapsed_seconds <= STARTUP_RELEASE_SECONDS and math.isfinite(elapsed_seconds),
+                'observed startup wall time exceeds the independent 120-second release limit or is invalid')
+
+
+def executable_identity(path, expected_sha256=None):
+    path = regular(path, executable=True).absolute()
+    require(path.resolve(strict=True) == path, 'canonical startup executable required')
+    before = path.stat()
+    digest = sha(path.read_bytes())
+    after = path.stat()
+    fields = lambda value: (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_mode)
+    require(fields(before) == fields(after), 'startup executable changed during hashing')
+    if expected_sha256 is not None:
+        require(HEX64.fullmatch(expected_sha256) and digest == expected_sha256, 'startup executable SHA mismatch')
+    return dict(path=str(path), sha256=digest, device=after.st_dev, inode=after.st_ino,
+                size=after.st_size, mtime_ns=after.st_mtime_ns, mode=after.st_mode)
+
+
+def startup_process_identity(process, binary_identity):
+    # Darwin SDK sys/proc_info.h: PROC_PIDTBSDINFO=3, MAXCOMLEN=16.
+    # A kernel start timestamp and canonical executable bracket the PGID check;
+    # argv/processName is never used to select a sampling target.
+    class BSDInfo(ctypes.Structure):
+        _fields_ = [(name, ctypes.c_uint32) for name in
+                    ['flags', 'status', 'xstatus', 'pid', 'ppid', 'uid', 'gid', 'ruid',
+                     'rgid', 'svuid', 'svgid', 'reserved']] + [
+                    ('comm', ctypes.c_char * 16), ('name', ctypes.c_char * 32)] + [
+                    (name, ctypes.c_uint32) for name in
+                    ['nfiles', 'pgid', 'pjobc', 'tdev', 'tpgid']] + [
+                    ('nice', ctypes.c_int32), ('start_sec', ctypes.c_uint64), ('start_usec', ctypes.c_uint64)]
+    require(process.poll() is None, 'owned startup process already exited')
+    lib = ctypes.CDLL('/usr/lib/libproc.dylib', use_errno=True)
+    lib.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
+    lib.proc_pidinfo.restype = ctypes.c_int
+    lib.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+    lib.proc_pidpath.restype = ctypes.c_int
+    def snapshot():
+        info = BSDInfo()
+        require(lib.proc_pidinfo(process.pid, 3, 0, ctypes.byref(info), ctypes.sizeof(info)) == ctypes.sizeof(info),
+                'owned startup kernel identity unavailable')
+        return {name: getattr(info, name) for name in ['pid', 'ppid', 'uid', 'pgid', 'start_sec', 'start_usec']}
+    before = snapshot()
+    buffer = ctypes.create_string_buffer(4096)
+    require(lib.proc_pidpath(process.pid, buffer, len(buffer)) > 0, 'owned startup executable unavailable')
+    path = os.fsdecode(buffer.value)
+    after = snapshot()
+    require(before == after and before['pid'] == process.pid and before['pgid'] == process.pid and
+            before['ppid'] == os.getpid() and before['uid'] == os.geteuid() and
+            os.getpgid(process.pid) == process.pid and path == binary_identity['path'] and
+            process.poll() is None, 'owned startup identity drift')
+    return dict(before, executable=path)
+
+
+def owned_group_exists(process):
     try:
-        return run([str(binary), '-check-compatibility'], output, smoke_env, log,
-                   timeout=135, separate_stderr=True)
+        os.killpg(process.pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+
+
+def cleanup_owned_process(process, deadline):
+    # process always came from our start_new_session Popen; no external PID input.
+    if owned_group_exists(process):
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        grace = min(deadline, time.monotonic() + 1)
+        while owned_group_exists(process) and time.monotonic() < grace:
+            process.poll()
+            time.sleep(0.02)
+        if owned_group_exists(process):
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    if process.poll() is None:
+        process.wait(timeout=max(0, deadline - time.monotonic()))
+    while owned_group_exists(process) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    return not owned_group_exists(process)
+
+
+def private_startup_file(path):
+    return os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'wb')
+
+
+def persist_startup(path, report):
+    descriptor, name = tempfile.mkstemp(prefix='.startup-writing-', dir=path.parent)
+    temporary = Path(name)
+    with os.fdopen(descriptor, 'wb') as handle:
+        handle.write((json.dumps(report, indent=2, sort_keys=True) + '\n').encode())
+        handle.flush()
+        os.fsync(handle.fileno())
+    temporary.replace(path)
+
+
+def startup_cache_state(cache):
+    try:
+        info = cache.lstat()
+    except FileNotFoundError:
+        return {'exists': False}
+    return {'exists': True, 'device': info.st_dev, 'inode': info.st_ino, 'mode': info.st_mode,
+            'is_directory': stat.S_ISDIR(info.st_mode), 'is_symlink': stat.S_ISLNK(info.st_mode)}
+
+
+def sample_startup_process(process, binary_identity, evidence, report, log):
+    # Attempt is recorded before Popen; even a failed sample is never retried.
+    require(not report.get('sample_attempted'), 'startup sampling attempt already consumed')
+    report['sample_attempted'] = True
+    sampler = None
+    try:
+        require(executable_identity(binary_identity['path'], binary_identity['sha256']) == binary_identity,
+                'startup executable changed before sampling')
+        before = startup_process_identity(process, binary_identity)
+        require(before == report['process_identity'], 'owned startup process changed before sampling')
+        report['sample_target_before'] = before
+        command = ['/usr/bin/sample', str(process.pid), '5', '10', '-file', str(evidence / 'owned-process.sample.txt')]
+        report['sample_command'] = command
+        persist_startup(evidence / 'diagnostic.json', report)
+        with private_startup_file(evidence / 'owned-process.sample.txt'):
+            pass
+        with private_startup_file(evidence / 'sample.stdout.log') as stdout, \
+                private_startup_file(evidence / 'sample.stderr.log') as stderr:
+            sampler = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
+                                       start_new_session=True)
+            report['sample_pid'] = sampler.pid
+            try:
+                sampler.wait(timeout=20)
+                report['sample_returncode'] = sampler.returncode
+            except subprocess.TimeoutExpired:
+                report['sample_timed_out'] = True
+        if process.poll() is None:
+            after = startup_process_identity(process, binary_identity)
+            report['sample_target_after'] = after
+            require(after == before, 'owned startup process changed during sampling')
+        else:
+            report['sample_target_exited'] = True
+    except InterruptedError:
+        raise
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        report['sample_error'] = type(error).__name__ + ': ' + str(error)
     finally:
-        append_startup_logs(smoke_logs, log)
+        if sampler is not None:
+            report['cleanup_in_progress'] = True
+            cleanup_started = time.monotonic()
+            remaining = report.get('cleanup_remaining_seconds', STARTUP_CLEANUP_SECONDS)
+            # On cancellation reserve half of the shared ten-second cleanup
+            # window for terminating the native process after its sampler.
+            deadline = cleanup_started + remaining / 2
+            try:
+                try:
+                    report['sample_cleanup_complete'] = cleanup_owned_process(sampler, deadline)
+                except (OSError, ValueError, subprocess.SubprocessError) as error:
+                    report.update(sample_cleanup_complete=False, sample_cleanup_error=type(error).__name__ + ': ' + str(error))
+            finally:
+                report['cleanup_remaining_seconds'] = max(0, remaining - (time.monotonic() - cleanup_started))
+                report['cleanup_in_progress'] = False
+        persist_startup(evidence / 'diagnostic.json', report)
+        require(report.get('sample_cleanup_complete', True), 'owned sampler cleanup is unconfirmed')
+
+
+def startup_compatibility(binary, output, env, log):
+    native = json.loads(regular(Path(binary).parent / 'artifact.json').read_text())
+    identity = executable_identity(binary, native['binary_sha256'])
+    require(Path(identity['path']).name == native['binary'] and
+            native['binary'] == 'shiba_ocr_prod_' + identity['sha256'][:12], 'startup artifact basename mismatch')
+    smoke_logs, evidence = output / 'startup-logs', output / 'startup-diagnostic'
+    smoke_logs.mkdir(mode=0o700)
+    evidence.mkdir(mode=0o700)
+    cache = Path(pwd.getpwuid(os.geteuid()).pw_dir) / 'Library/Caches' / native['binary']
+    cache_before = startup_cache_state(cache)
+    smoke_env = dict(env, OCR_RUNTIME_LANE='prod', OCR_COLD_START_TIMEOUT_SECONDS=str(STARTUP_DIAGNOSTIC_SECONDS),
+                     OCRSVC_LOG_DIR=str(smoke_logs))
+    command = [identity['path'], '-check-compatibility']
+    report = {'schema': 'ocr-native-startup-diagnostic-v1', 'status': 'preparing', 'command': command,
+              'binary_identity': identity, 'cache_root': str(cache), 'cache_before': cache_before,
+              'cache_state': 'existing_namespace_preserved' if cache_before['exists'] else 'namespace_absent_before_launch',
+              'diagnostic_timeout_seconds': STARTUP_DIAGNOSTIC_SECONDS, 'outer_timeout_seconds': STARTUP_OUTER_SECONDS,
+              'release_limit_seconds': STARTUP_RELEASE_SECONDS, 'sample_attempted': False, 'execution_attempts': 0,
+              'cleanup_remaining_seconds': STARTUP_CLEANUP_SECONDS}
+    diagnostic_path = evidence / 'diagnostic.json'
+    persist_startup(diagnostic_path, report)
+    process, started, handlers = None, None, {}
+    cleaning = False
+    def interrupted(signum, frame):
+        report['interrupted_signal'] = signum
+        if not cleaning and not report.get('cleanup_in_progress'):
+            raise InterruptedError('startup interrupted by signal ' + str(signum))
+    if threading.current_thread() is threading.main_thread():
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            handlers[sig] = signal.signal(sig, interrupted)
+    try:
+        log.write(('$ ' + ' '.join(command) + '\n').encode()); log.flush()
+        require(cache.resolve(strict=False) == cache and
+                (not cache_before['exists'] or cache_before['is_directory']), 'startup cache path is not a canonical directory')
+        with private_startup_file(evidence / 'stdout.log') as stdout, \
+                private_startup_file(evidence / 'stderr.log') as stderr:
+            started = time.monotonic()
+            report.update(status='launching', execution_attempts=1, started_at=datetime.now(timezone.utc).isoformat())
+            persist_startup(diagnostic_path, report)
+            process = subprocess.Popen(command, cwd=output, env=smoke_env, stdin=subprocess.DEVNULL,
+                                       stdout=stdout, stderr=stderr, start_new_session=True)
+            report.update(pid=process.pid, pgid=process.pid, status='running')
+            # A fast already-exited process cannot be sampled, and needs no PID identity.
+            if process.poll() is None:
+                report['process_identity'] = startup_process_identity(process, identity)
+            persist_startup(diagnostic_path, report)
+            while process.poll() is None:
+                elapsed = time.monotonic() - started
+                if elapsed >= STARTUP_OUTER_SECONDS:
+                    report['status'] = 'outer_timeout'
+                    raise subprocess.TimeoutExpired(command, STARTUP_OUTER_SECONDS)
+                if elapsed >= STARTUP_RELEASE_SECONDS and not report['sample_attempted']:
+                    sample_startup_process(process, identity, evidence, report, log)
+                    if report.get('interrupted_signal'):
+                        raise InterruptedError('startup interrupted during sampler cleanup')
+                time.sleep(0.1)
+            elapsed = time.monotonic() - started
+            report.update(returncode=process.returncode, elapsed_seconds=elapsed,
+                          finished_at=datetime.now(timezone.utc).isoformat(), status='completed')
+        output_bytes = (evidence / 'stdout.log').read_bytes()
+        log.write(('\ncommand returncode=' + str(process.returncode) +
+                   ' elapsed_seconds=' + format(elapsed, '.3f') + '\n').encode()); log.flush()
+        if output_bytes:
+            payload = json.loads(output_bytes)
+            with private_startup_file(evidence / 'smoke.json') as handle:
+                handle.write(output_bytes)
+            report['native_duration_ms'] = payload.get('initialization', {}).get('duration_ms')
+        require(process.returncode == 0, 'command failed: ' + identity['path'] + ' (returncode=' + str(process.returncode) + ')')
+        payload = json.loads(output_bytes)
+        validate_startup_budget(payload, elapsed)
+        report['release_budget'] = 'PASS'
+        return output_bytes
+    except BaseException as error:
+        report.update(error=type(error).__name__ + ': ' + str(error), release_budget='FAIL', status='failed')
+        raise
+    finally:
+        cleaning = True
+        try:
+            if process is not None:
+                cleanup_started = time.monotonic()
+                remaining = report.get('cleanup_remaining_seconds', STARTUP_CLEANUP_SECONDS)
+                try:
+                    report['native_cleanup_complete'] = cleanup_owned_process(process, cleanup_started + remaining)
+                except (OSError, ValueError, subprocess.SubprocessError) as error:
+                    report.update(native_cleanup_complete=False, cleanup_error=type(error).__name__ + ': ' + str(error))
+                finally:
+                    report['cleanup_remaining_seconds'] = max(0, remaining - (time.monotonic() - cleanup_started))
+                report['cleanup_complete'] = report['native_cleanup_complete'] and report.get('sample_cleanup_complete', True)
+                report['final_returncode'] = process.returncode
+            else:
+                report['cleanup_complete'] = True
+            if started is not None:
+                report.setdefault('elapsed_seconds', time.monotonic() - started)
+            try:
+                report['cache_after'] = startup_cache_state(cache)
+            except OSError as error:
+                report['cache_after'] = {'inspection_error': type(error).__name__ + ': ' + str(error)}
+            try:
+                report['binary_unchanged'] = executable_identity(binary, native['binary_sha256']) == identity
+            except (OSError, ValueError) as error:
+                report.update(binary_unchanged=False, binary_verification_error=type(error).__name__ + ': ' + str(error))
+            report['files'] = {}
+            for name in ['stdout.log', 'stderr.log', 'smoke.json', 'owned-process.sample.txt',
+                         'sample.stdout.log', 'sample.stderr.log']:
+                path = evidence / name
+                if path.is_file() and not path.is_symlink():
+                    data = path.read_bytes()
+                    report['files'][name] = {'size': len(data), 'sha256': sha(data)}
+                    if name in ['stdout.log', 'stderr.log']:
+                        log.write(('startup ' + name + '\n').encode())
+                        log.write(data[:STARTUP_LOG_BYTES])
+                        if len(data) > STARTUP_LOG_BYTES:
+                            log.write(b'\nstartup output truncated at byte limit\n')
+            if not report['cleanup_complete'] or not report['binary_unchanged'] or report.get('interrupted_signal'):
+                report.update(release_budget='FAIL', status='failed',
+                              final_failure='owned process cleanup, executable stability or cancellation rejected release')
+            persist_startup(diagnostic_path, report)
+            log.write(('startup diagnostic: ' + json.dumps(report, sort_keys=True) + '\n').encode()); log.flush()
+            append_startup_logs(smoke_logs, log)
+            require(report['cleanup_complete'], 'owned startup process cleanup is unconfirmed')
+            require(report['binary_unchanged'], 'startup executable changed during execution')
+            if report.get('interrupted_signal'):
+                raise InterruptedError('startup interrupted by signal ' + str(report['interrupted_signal']))
+        finally:
+            for sig, previous in handlers.items():
+                signal.signal(sig, previous)
 
 
 def exact_checkout(source, commit):
@@ -198,6 +494,7 @@ def scan_changes(source, baseline, tool, report, work, env, log):
 
 
 def validate_smoke(smoke, native):
+    validate_startup_budget(smoke)
     require(smoke.get('ready') is True and smoke.get('contract_version') == 1 and
             smoke.get('provider_id') == 'apple-vision' and smoke.get('platform_lane') == 'mac' and
             smoke.get('runtime_artifact_sha256') == native.get('runtime_artifact_sha256') and
