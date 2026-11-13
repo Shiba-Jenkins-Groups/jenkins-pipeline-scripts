@@ -38,6 +38,13 @@ def call(Map config = [:]) {
         ]),
         pipelineTriggers([upstream(upstreamProjects: "${product}/develop", threshold: 'SUCCESS')])
     ])
+    def recoveryPins = [config.omlxRecoverySource, config.omlxRecoveryVersion,
+        config.omlxRecoveryOperation, config.omlxRecoveryApprover]
+    if (recoveryPins.any { it } && (!(config.omlxRecoverySource ==~ /[0-9a-f]{40}/) ||
+        config.omlxRecoveryVersion != '1.1.24' || !(config.omlxRecoveryOperation ==~ /[0-9a-f]{32}/) ||
+        !config.approvers.contains(config.omlxRecoveryApprover))) {
+        error('Invalid incident oMLX recovery handoff configuration')
+    }
     def causes = currentBuild.getBuildCauses('hudson.model.Cause$UpstreamCause')
     def requestedBuild = params.SOURCE_BUILD?.toString()?.trim() ?: ''
     def requestedCommit = params.EXPECTED_COMMIT?.toString()?.trim() ?: ''
@@ -498,6 +505,50 @@ python3 control/release-finalization.py --source prod/source --state-directory "
               } finally {
                 archiveArtifacts artifacts: 'finalization.json,prod/source/.pipeline/release-manifest.env', allowEmptyArchive: true
               }
+            }
+            if (config.omlxRecoverySource && promotion.payload.source_commit == config.omlxRecoverySource) {
+                stage('Recover oMLX Before Deployment') {
+                    def finalized = parseReleaseJson(readFile('finalization.json'))
+                    def finalPayload = finalized.payload
+                    def expectedImage = "localhost:9290/${product}/prod/${config.omlxRecoveryVersion}"
+                    if (promotion.payload.version != config.omlxRecoveryVersion ||
+                        finalPayload?.kind != 'finalization' || finalPayload.status != 'SUCCESS' ||
+                        finalPayload.commit != promotion.payload.merge_commit || finalPayload.version != config.omlxRecoveryVersion ||
+                        !(finalPayload.digest ==~ /sha256:[0-9a-f]{64}/) ||
+                        finalPayload.manifest?.IMAGE_DIGEST != finalPayload.digest ||
+                        finalPayload.manifest?.IMAGE_REF != "${expectedImage}:${prodRun.number}") {
+                        error('Incident oMLX recovery requires the exact finalized PROD image')
+                    }
+                    def pins = [source_commit: config.omlxRecoverySource, commit: finalPayload.commit,
+                        digest: finalPayload.digest, coordinator_build: env.BUILD_NUMBER as Integer,
+                        prod_build: prodRun.number as Integer]
+                    writeFile file: 'omlx-recovery-handoff.json', text: JsonOutput.toJson(pins + [
+                        version: config.omlxRecoveryVersion, image: "${expectedImage}@${finalPayload.digest}".toString(),
+                        operation_id: config.omlxRecoveryOperation])
+                    archiveArtifacts artifacts: 'omlx-recovery-handoff.json', allowEmptyArchive: false
+                    def response
+                    timeout(time: 15, unit: 'MINUTES') {
+                        response = input(id: 'omlx-recovery-ready', submitter: config.omlxRecoveryApprover,
+                            submitterParameter: 'APPROVER', ok: 'Continue PROD deployment',
+                            message: "Recover operation ${config.omlxRecoveryOperation} using the exact signed finalization and image in the archived handoff. Submit the owner receipt after one verified start.",
+                            parameters: [text(name: 'RECOVERY_RECEIPT', defaultValue: '', description: 'Exact handoff coordinates and native owner recovery report')])
+                    }
+                    if (response.APPROVER != config.omlxRecoveryApprover || !response.RECOVERY_RECEIPT?.trim() ||
+                        response.RECOVERY_RECEIPT.size() > 16384) {
+                        error('Invalid incident oMLX recovery approver or receipt')
+                    }
+                    def receipt = parseReleaseJson(response.RECOVERY_RECEIPT)
+                    def start = receipt.owner?.start
+                    if (!pins.every { key, value -> receipt[key] == value } ||
+                        receipt.owner?.operation_id != config.omlxRecoveryOperation || receipt.owner?.resolved != true ||
+                        !(start?.id ==~ /[0-9a-f]{32}/) || start.id == config.omlxRecoveryOperation ||
+                        start.state != 'succeeded' || start.changed != true || start.service != 'omlx' ||
+                        start.action != 'start' || start.environment != 'prod' || start.actor != 'owner-recovery') {
+                        error('Native owner oMLX recovery receipt does not match this release')
+                    }
+                    writeFile file: 'omlx-recovery-receipt.json', text: JsonOutput.toJson(receipt + [approver: response.APPROVER])
+                    archiveArtifacts artifacts: 'omlx-recovery-receipt.json', allowEmptyArchive: false
+                }
             }
             stage('Authorize Deployment Handoff') {
                 withCredentials([file(credentialsId: config.approvalKeyCredentials, variable: 'APPROVAL_KEY_FILE'),

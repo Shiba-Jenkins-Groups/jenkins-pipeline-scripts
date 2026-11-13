@@ -1,4 +1,5 @@
 import groovy.json.JsonOutput
+import groovy.json.JsonSlurperClassic
 
 // Plain Groovy mocks only: sh, checkout, build, node and credentials NEVER run.
 def root = new File(args ? args[0] : '.').canonicalFile
@@ -15,6 +16,9 @@ def simulate = { String filename, Map options = [:] ->
     boolean deploy = filename == 'prodDeploymentPipeline.groovy'
     def calls = []
     def credentialGroups = []
+    def handoffEvents = []
+    def deploymentParameters = []
+    def writtenFiles = [:]
     def binding = new Binding()
     binding.setVariable('env', [JOB_NAME: releaseFolder + '/' + product + (deploy ? '-prod-deploy' : '-auto-release'), BUILD_NUMBER: '1'])
     binding.setVariable('params', [SIGNED_RELEASE_REQUEST: '{}'] + (options.recoveryParams ?: [:]))
@@ -31,13 +35,26 @@ def simulate = { String filename, Map options = [:] ->
     ['properties', 'archiveArtifacts', 'checkout', 'writeFile'].each { name ->
         binding.setVariable(name, { Object value ->
             calls << name
+            if (name == 'archiveArtifacts') {
+                def entries = value.artifacts.tokenize(',')
+                if (!value.allowEmptyArchive && entries.contains('deployment-request.json')) {
+                    handoffEvents << 'signed-request-archived'
+                }
+                if (entries.contains('finalization.json') && !entries.contains('control/policy.json')) {
+                    handoffEvents << 'signed-finalization-archived'
+                }
+                if (entries == ['omlx-recovery-handoff.json']) { handoffEvents << 'omlx-handoff-archived' }
+                if (entries == ['omlx-recovery-receipt.json']) { handoffEvents << 'omlx-receipt-archived' }
+            }
+            if (name == 'writeFile') { writtenFiles[value.file] = value.text }
             if (name == 'archiveArtifacts' && options.archiveFailure) { throw new IllegalStateException('archive unavailable') }
         })
     }
     binding.setVariable('deleteDir', { -> calls << 'deleteDir' })
-    ['disableConcurrentBuilds', 'pipelineTriggers', 'upstream', 'usernamePassword', 'file', 'text', 'string', 'parameters'].each { name ->
+    ['disableConcurrentBuilds', 'pipelineTriggers', 'upstream', 'usernamePassword', 'file', 'string', 'parameters'].each { name ->
         binding.setVariable(name, { Object... value -> [step: name] })
     }
+    binding.setVariable('text', { Map value -> [step: 'text'] + value })
     ['node', 'dir', 'withEnv', 'withCredentials', 'timeout'].each { name ->
         binding.setVariable(name, { Object value, Closure body -> body() })
     }
@@ -71,33 +88,60 @@ def simulate = { String filename, Map options = [:] ->
     })
     binding.setVariable('build', { Map values ->
         calls << 'build:' + values.job
+        if (values.job == config.deploymentJob) {
+            handoffEvents << 'owner-build'
+            deploymentParameters << values.parameters
+        }
         [number: 103, result: options.prodResult ?: 'SUCCESS']
+    })
+    binding.setVariable('timeout', { Map values, Closure body ->
+        handoffEvents << [timeout: values]
+        if (options.handoffTimeout) {
+            throw new IllegalStateException('mocked handoff timeout')
+        }
+        body()
     })
     binding.setVariable('input', { Map values ->
         calls << 'input'
-        [APPROVER: options.badApprover ? 'intruder' : 'reviewer', REASON: 'offline exact CVE review']
+        handoffEvents << [input: values]
+        if (options.handoffAbort) { throw new IllegalStateException('mocked handoff rejection') }
+        [APPROVER: options.badApprover ? 'intruder' : 'reviewer', REASON: 'offline exact CVE review'] + (options.inputResponse ?: [:])
     })
     binding.setVariable('readFile', { String path ->
         if (path.endsWith('source-status.json')) { return JsonOutput.toJson([
             decision: options.sourceStatus ?: 'NEW', source_commit: 'b' * 40, merge_commit: 'c' * 40]) }
         if (path.endsWith('review.json')) { return JsonOutput.toJson([decision: options.review ?: 'PASS', findings: [fake: [:]]]) }
         if (path.endsWith('runtime-receipt.json')) { return JsonOutput.toJson([payload: [status: 'SUCCESS']]) }
-        if (path.endsWith('promotion.json')) { return JsonOutput.toJson([payload: [merge_commit: 'b' * 40]]) }
+        if (path.endsWith('deployment-request.json') && options.signedRequest) { return options.signedRequest }
+        if (path.endsWith('promotion.json')) {
+            return JsonOutput.toJson([payload: [merge_commit: 'b' * 40, source_commit: options.promotionSource ?: 'b' * 40,
+                                               version: options.promotionVersion ?: '1.0.32']])
+        }
+        if (path.endsWith('finalization.json')) {
+            return JsonOutput.toJson([payload: [kind: 'finalization', product: product, status: options.finalizationStatus ?: 'SUCCESS',
+                commit: options.finalizationCommit ?: 'b' * 40, version: options.finalizationVersion ?: options.promotionVersion ?: '1.0.32',
+                digest: options.finalizationDigest ?: 'sha256:' + 'd' * 64, manifest: [IMAGE_REF: options.finalizationImage ?: 'localhost:9290/' + product + '/prod/1.1.24:103',
+                    IMAGE_DIGEST: options.finalizationManifestDigest ?: 'sha256:' + 'd' * 64]]])
+        }
         if (path.endsWith('identity.json')) {
             return JsonOutput.toJson([commit: options.wrongProdSha && path.contains('/prod/') ? 'c' * 40 : 'b' * 40,
-                                      version: '1.0.32', digest: 'sha256:' + 'd' * 64,
-                                      library_revision: config.libraryRevision])
+                                      version: options.promotionVersion ?: '1.0.32', digest: 'sha256:' + 'd' * 64,
+                                      image_digest: 'sha256:' + 'd' * 64,
+                                      immutable_image: 'fixture/repo@sha256:' + 'd' * 64, library_revision: config.libraryRevision])
         }
         return '{}'
     })
     def failed = false
+    def failureMessage = null
     try {
         def pipeline = new GroovyShell(binding).parse(new File(root, 'vars/' + filename))
-        pipeline.call(config + (options.disabled ? [enabled: false] : [:]))
-    } catch (IllegalStateException expected) {
+        pipeline.call(config + (options.disabled ? [enabled: false] : [:]) + (options.trustedConfig ?: [:]))
+    } catch (IllegalStateException | groovy.json.JsonException expected) {
         failed = true
+        failureMessage = expected.message
     }
-    [calls: calls, credentialGroups: credentialGroups, failed: failed]
+    [calls: calls, credentialGroups: credentialGroups, failed: failed, failureMessage: failureMessage, handoffEvents: handoffEvents,
+     deploymentParameters: deploymentParameters, writtenFiles: writtenFiles]
 }
 
 int tests = 0
@@ -202,4 +246,77 @@ for (options in [[disabled: true], [wrongCause: true], [multipleCause: true], [f
     assert !result.calls.any { it.toString().contains('release-deploy.py deploy') }
     tests++
 }
+def targetSource = '66c9b360c066eafea0b681787cb8ee7fa826825c'
+def targetOperation = '463a250290b6207ecafed7ffacf53d8f'
+def trustedGate = [omlxRecoverySource: targetSource, omlxRecoveryVersion: '1.1.24',
+    omlxRecoveryOperation: targetOperation, omlxRecoveryApprover: 'reviewer']
+def target = [promotionSource: targetSource, promotionVersion: '1.1.24', trustedConfig: trustedGate,
+    signedRequest: '{"fixture":"exact signed deployment request bytes"}']
+def recoveryReceipt = [operation_id: targetOperation, resolved: true,
+    start: [id: 'd' * 32, state: 'succeeded', changed: true, service: 'omlx', action: 'start',
+            environment: 'prod', actor: 'owner-recovery']]
+def receiptEnvelope = [source_commit: targetSource, commit: 'b' * 40, digest: 'sha256:' + 'd' * 64,
+    coordinator_build: 1, prod_build: 103, owner: recoveryReceipt]
+def approvedInput = [APPROVER: 'reviewer', RECOVERY_RECEIPT: JsonOutput.toJson(receiptEnvelope)]
+def ownerJobCall = 'build:' + config.deploymentJob
+def gateStage = 'Recover oMLX Before Deployment'
+def incident = simulate('autoReleasePipeline.groovy', target + [inputResponse: approvedInput])
+assert !incident.failed: incident.failureMessage
+assert incident.calls.count(gateStage) == 1
+assert incident.calls.count(ownerJobCall) == 1
+assert incident.calls.indexOf('Finalize Revalidated PROD Candidate') < incident.calls.indexOf(gateStage)
+assert incident.calls.indexOf(gateStage) < incident.calls.indexOf('Authorize Deployment Handoff')
+assert incident.calls.indexOf('Authorize Deployment Handoff') < incident.calls.indexOf(ownerJobCall)
+assert incident.handoffEvents[0..1] == ['signed-finalization-archived', 'omlx-handoff-archived']
+assert incident.handoffEvents[2].timeout == [time: 15, unit: 'MINUTES']
+assert incident.handoffEvents[3].input.id == 'omlx-recovery-ready'
+assert incident.handoffEvents[3].input.submitter == 'reviewer'
+assert incident.handoffEvents[3].input.submitterParameter == 'APPROVER'
+assert incident.handoffEvents[3].input.parameters.any { it.name == 'RECOVERY_RECEIPT' }
+assert incident.handoffEvents[4..-1] == ['omlx-receipt-archived', 'signed-request-archived', 'owner-build']
+def expectedHandoff = receiptEnvelope.findAll { key, value -> key != 'owner' } + [version: '1.1.24',
+    operation_id: targetOperation, image: 'localhost:9290/' + product + '/prod/1.1.24@sha256:' + 'd' * 64]
+assert new JsonSlurperClassic().parseText(incident.writtenFiles['omlx-recovery-handoff.json']) == expectedHandoff
+assert new JsonSlurperClassic().parseText(incident.writtenFiles['omlx-recovery-receipt.json']) == receiptEnvelope + [approver: 'reviewer']
+assert incident.deploymentParameters == [[[step: 'text', name: 'SIGNED_RELEASE_REQUEST', value: target.signedRequest]]]
+tests++
+
+for (options in [[promotionSource: 'c' * 40], [trustedConfig: [:]],
+                 [recoveryParams: deploymentRecovery],
+                 [recoveryParams: [APP_BINDING_REPAIR_COORDINATOR_BUILD: '90',
+                                   APP_BINDING_REPAIR_OWNER_BUILD: '19', APP_BINDING_REPAIR_PINS: '{}']],
+                 [recoveryParams: [REBUILD_PROD_COMMIT: 'b' * 40, PUBLISHED_COORDINATOR_BUILD: '49'],
+                  trustedConfig: trustedGate + [rebuildDockerEngineId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee']]]) {
+    def unaffected = simulate('autoReleasePipeline.groovy', target + options + [inputResponse: approvedInput])
+    assert !unaffected.failed && !unaffected.calls.contains(gateStage) && unaffected.calls.count(ownerJobCall) == 1: unaffected.failureMessage
+    tests++
+}
+
+def badReceipts = [[source_commit: 'c' * 40], [commit: 'c' * 40], [digest: 'sha256:' + 'a' * 64],
+    [coordinator_build: 2], [prod_build: 104]].collect { JsonOutput.toJson(receiptEnvelope + it) }
+for (badOwner in [recoveryReceipt + [resolved: false], recoveryReceipt + [operation_id: 'b' * 32],
+    recoveryReceipt + [start: recoveryReceipt.start + [state: 'unknown']],
+    recoveryReceipt + [start: recoveryReceipt.start + [id: targetOperation]],
+    recoveryReceipt + [start: recoveryReceipt.start + [changed: false]],
+    recoveryReceipt + [start: recoveryReceipt.start + [service: 'ollama']],
+    recoveryReceipt + [start: recoveryReceipt.start + [action: 'restart']],
+    recoveryReceipt + [start: recoveryReceipt.start + [environment: 'dev']],
+    recoveryReceipt + [start: recoveryReceipt.start + [actor: 'different-actor']]]) {
+    badReceipts << JsonOutput.toJson(receiptEnvelope + [owner: badOwner])
+}
+badReceipts << 'not-json'
+def refused = badReceipts.collect { [inputResponse: approvedInput + [RECOVERY_RECEIPT: it]] } +
+    [[inputResponse: approvedInput + [APPROVER: 'intruder']], [handoffTimeout: true], [handoffAbort: true],
+     [trustedConfig: trustedGate + [omlxRecoveryApprover: 'intruder']], [promotionVersion: '1.1.25'],
+     [finalizationStatus: 'FAILED'], [finalizationCommit: 'c' * 40], [finalizationVersion: '1.1.25'],
+     [finalizationDigest: 'sha256:invalid'], [finalizationImage: 'fixture/unrelated-image'],
+     [finalizationManifestDigest: 'sha256:' + 'a' * 64]]
+for (options in refused) {
+    def denied = simulate('autoReleasePipeline.groovy', target + [inputResponse: approvedInput] + options)
+    assert denied.failed
+    assert !denied.calls.contains('Authorize Deployment Handoff') && !denied.calls.contains(ownerJobCall)
+    assert !denied.handoffEvents.contains('signed-request-archived') && denied.deploymentParameters.empty
+    tests++
+}
+
 println "PASS: ${tests} offline Pipeline control-flow cases (not Jenkins CPS integration)"
