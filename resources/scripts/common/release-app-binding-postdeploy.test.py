@@ -114,6 +114,51 @@ class PostdeployRun(unittest.TestCase):
         self.assertEqual(self._receipt()["phase"], "managed-owner-resume")
         self.assertEqual(self._receipt()["status"], "FAILED")
 
+    def _precommit_attempt(self):
+        previous = self.backup / recovery.CLAIM
+        previous.mkdir(mode=0o700)
+        original_plan = {"plan_sha256": "b" * 64, "before": recovery.pins({self.owner: self.old}),
+                         "after": recovery.pins({self.owner: self.new}),
+                         "omlx": {"program": {"mode": 0o775, "inode": 42, "sha256": "c" * 64}}}
+        failure_raw = b"original signed failure bytes"
+        claim = {"status": "CLAIMED", "build_number": 2, "transaction_id": recovery.TX,
+                 "library_revision": recovery.PRIOR_LIBRARY, "plan_sha256": original_plan["plan_sha256"]}
+        recovery.B.create(previous / "claim.json", recovery.B.encoded(recovery.D.control.sign(claim, self.key)))
+        recovery.B.create(previous / "before-owner.json", self.old)
+        recovery.B.create(previous / "failure.json", failure_raw)
+        self.io.owner.return_value = None
+        self.prehardened = {"program": {"mode": 0o755, "inode": 42, "sha256": "c" * 64}}
+        recovery.O.plan.return_value = {self.owner: self.new}, self.prehardened
+        return previous, (original_plan, failure_raw)
+
+    def test_signed_precommit_continuation_uses_only_already_hardened_inode(self):
+        previous, prior = self._precommit_attempt()
+        recovery.execute(self.args, self.request, self.failed, self.failed_raw, self.key, self.io, prior)
+        plan = self._receipt()
+        self.assertEqual(plan["continued_from_build"], 2)
+        self.assertEqual(plan["omlx"]["program"]["mode"], 0o755)
+        self.args.action = "apply"
+        self.args.plan_sha256 = plan["plan_sha256"]
+        self.args.output = self.root / "continued-receipt.json"
+        recovery.execute(self.args, self.request, self.failed, self.failed_raw, self.key, self.io, prior)
+        self.io.unload_failed_registration.assert_not_called()
+        recovery.O.apply_mode.assert_not_called()
+        self.io.resume.assert_called_once()
+        self.assertEqual((previous / "failure.json").read_bytes(), prior[1])
+        self.assertTrue((previous / recovery.CONTINUATION / "completed.json").is_file())
+        self.assertEqual(self._receipt()["status"], "SUCCESS")
+
+    def test_continuation_refuses_an_unreviewed_inode_or_physical_progress(self):
+        previous, prior = self._precommit_attempt()
+        self.prehardened["program"]["inode"] = 72
+        with self.assertRaisesRegex(recovery.B.BindingError, "post_app_management_identity_or_config_changed"):
+            recovery.execute(self.args, self.request, self.failed, self.failed_raw, self.key, self.io, prior)
+        recovery.B.create(previous / "commit-intent.json", b"unexpected progress")
+        with self.assertRaisesRegex(recovery.B.BindingError, "previous_recovery_has_additional_progress"):
+            recovery.execute(self.args, self.request, self.failed, self.failed_raw, self.key, self.io, prior)
+        self.io.resume.assert_not_called()
+        self.assertTrue(self.pending.exists())
+
     def test_readiness_failure_does_not_become_a_successful_recovery(self):
         self._apply_reviewed()
         recovery.readiness.side_effect = recovery.B.BindingError("recognition_readiness_deadline_exceeded")

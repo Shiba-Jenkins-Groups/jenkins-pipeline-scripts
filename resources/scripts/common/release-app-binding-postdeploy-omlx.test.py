@@ -90,6 +90,14 @@ class ConfigTest(unittest.TestCase):
                 M.plan(docs)
         observe.assert_not_called()
 
+    def test_unsupported_program_mode_is_rejected_before_probing_bundle(self):
+        docs, pins = fixtures()
+        with patch.object(M, "COMMITTED", pins), patch.object(M, "_observed_identity") as observe:
+            for mode in (0o777, 0o744, float(0o755), "0755"):
+                with self.subTest(mode=mode), self.assertRaisesRegex(M.B.BindingError, "omlx_unsupported_program_mode"):
+                    M.plan(docs, program_mode=mode)
+        observe.assert_not_called()
+
 
 class ModeTest(unittest.TestCase):
     def setUp(self):
@@ -135,6 +143,32 @@ class ModeTest(unittest.TestCase):
         with self.assertRaisesRegex(M.B.BindingError, "omlx_reviewed_bundle_identity_changed"):
             M.apply_mode(before)
         self.assertEqual(stat.S_IMODE(self.program.stat().st_mode), 0o775)
+
+    def test_prehardened_plan_reads_exact_identity_without_chmod(self):
+        self.program.chmod(0o755)
+        before = self.program.stat()
+        docs, pins = fixtures()
+        with patch.object(M, "COMMITTED", pins), patch.object(M.os, "fchmod") as chmod:
+            _, public = M.plan(docs, program_mode=0o755)
+        chmod.assert_not_called()
+        self.signature.assert_called_once()
+        self.assertEqual(public["program"]["mode"], 0o755)
+        self.assertEqual(public["program"]["device"], before.st_dev)
+        self.assertEqual(public["program"]["inode"], before.st_ino)
+        self.assertEqual(public["program"]["sha256"], M.PROGRAM_SHA)
+        self.assertEqual(self.program.stat().st_ctime_ns, before.st_ctime_ns)
+
+    def test_prehardened_plan_rejects_old_mode_or_changed_bytes(self):
+        docs, pins = fixtures()
+        with patch.object(M, "COMMITTED", pins), patch.object(M.os, "fchmod") as chmod:
+            with self.assertRaisesRegex(M.B.BindingError, "omlx_executable_permissions_changed"):
+                M.plan(docs, program_mode=0o755)
+            self.program.chmod(0o755)
+            self.program.write_bytes(b"changed bytes!")
+            with self.assertRaisesRegex(M.B.BindingError, "omlx_executable_hash_changed"):
+                M.plan(docs, program_mode=0o755)
+        chmod.assert_not_called()
+        self.signature.assert_not_called()
 
 
 if __name__ == "__main__":

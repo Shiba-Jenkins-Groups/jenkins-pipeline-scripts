@@ -119,8 +119,9 @@ def _observed_identity(program_mode):
     }
 
 
-def plan(configs):
+def plan(configs, *, program_mode=0o775):
     """Return the deterministic candidate config bytes and public file identity."""
+    need(type(program_mode) is int and program_mode in (0o775, 0o755), "omlx_unsupported_program_mode")
     paths = {path.name: path for path in configs}
     need(len(paths) == len(configs) and set(paths) == set(COMMITTED), "omlx_config_scope_changed")
     raw = {name: configs[path] for name, path in paths.items()}
@@ -149,7 +150,7 @@ def plan(configs):
              and native["owner_sha256"] == OLD_GUI_SHA
              and B.resource_keys(service) == old_keys == ["mac:" + str(OWNER_UID) + ":" + str(GUI)],
              "omlx_prior_native_binding_changed")
-    identity = _observed_identity(0o775)
+    identity = _observed_identity(program_mode)
     for service in (owner_service, registry_service):
         service["revision"] += 1
         service["mac"]["program_sha256"] = PROGRAM_SHA

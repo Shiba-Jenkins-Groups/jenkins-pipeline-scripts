@@ -5,6 +5,7 @@ import datetime as dt
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 import time
 
@@ -33,6 +34,11 @@ FAILED_HASH = "3275f9ea2be7a4863869a136c503c05e0291a5e6c7e6bffd8fe22807bfe31a19"
 TX = "f52ecd166595666ecd7a248f100583da"
 JOB = "shiba-release-automation/shiba-go-ditch-api-project-prod-binding-recover-101"
 CLAIM = "postdeploy-recovery-101"
+CONTINUATION = "after-app-management"
+PRIOR_APPLY = 2
+PRIOR_LIBRARY = "e6c5ff7fb795baea15925f9ccc143714c56383d4"
+PRIOR_PLAN_HASH = "6b3bafa68cfe27e2f8eae2c466ef8e23389792982f99cf9381faa2a54549ed37"
+PRIOR_APPLY_HASH = "50511fea8a2ac1f5b96a0439f978e20f6614dead3eb12710e8f03397d8e5cbb4"
 
 
 def exact_lineage(url, key, get=E.jenkins_get):
@@ -67,6 +73,53 @@ def exact_lineage(url, key, get=E.jenkins_get):
     return request, failed, failed_raw
 
 
+def earlier_attempt(url, key, get=E.jenkins_get):
+    path = "/" + "/".join("job/" + item for item in JOB.split("/"))
+    build = json.loads(get(url, path + "/2/api/json?tree=number,building,result"))
+    require(build.get("number") == PRIOR_APPLY and build.get("building") is False
+            and build.get("result") == "FAILURE", "previous_recovery_build_mismatch")
+    plan_raw = get(url, path + "/1/artifact/recovery-plan.json")
+    failed_raw = get(url, path + "/2/artifact/recovery-receipt.json")
+    require(B.sha(plan_raw) == PRIOR_PLAN_HASH and B.sha(failed_raw) == PRIOR_APPLY_HASH,
+            "previous_recovery_artifact_mismatch")
+    plan = R.signed_payload(json.loads(plan_raw, object_pairs_hook=B.pairs), key)
+    failed = R.signed_payload(json.loads(failed_raw, object_pairs_hook=B.pairs), key)
+    require(plan["status"] == "QUALIFIED" and plan["transaction_id"] == failed["transaction_id"] == TX
+            and plan["library_revision"] == failed["library_revision"] == PRIOR_LIBRARY
+            and plan["plan_sha256"] == failed["plan_sha256"] == B.sha(B.encoded(
+                {field: value for field, value in plan.items() if field not in {"status", "plan_sha256"}}))
+            and failed["status"] == "FAILED" and failed["build_number"] == PRIOR_APPLY
+            and failed["jenkins_job"] == JOB and failed["phase"] == "qualify-omlx-and-candidate"
+            and failed["failure_code"] == "PermissionError"
+            and failed["failed_registration_unloaded"] is True and failed["released_fences"] == []
+            and not any(field in failed for field in ("omlx", "owner", "admission_released")),
+            "previous_recovery_did_not_stop_before_commit")
+    return plan, failed_raw
+
+
+def qualify_continuation(tx, prior, key, io, before, after, omlx):
+    plan, failed_raw = prior
+    previous = B.directory(tx.backup / CLAIM)
+    info = previous.lstat()
+    require(info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == 0o700
+            and {p.name for p in previous.iterdir()} ==
+            {"claim.json", "failure.json"} | {"before-" + p.name for p in before},
+            "previous_recovery_has_additional_progress")
+    claim = R.signed_payload(B.document(previous / "claim.json"), key)
+    require(claim["status"] == "CLAIMED" and claim["build_number"] == PRIOR_APPLY
+            and claim["transaction_id"] == TX and claim["library_revision"] == PRIOR_LIBRARY
+            and claim["plan_sha256"] == plan["plan_sha256"]
+            and B.read(previous / "failure.json") == failed_raw
+            and all(B.read(previous / ("before-" + path.name)) == raw for path, raw in before.items()),
+            "previous_recovery_claim_mismatch")
+    expected_omlx = dict(plan["omlx"], program=dict(plan["omlx"]["program"], mode=0o755))
+    require(plan["before"] == pins(before) and plan["after"] == pins(after) and omlx == expected_omlx,
+            "post_app_management_identity_or_config_changed")
+    require(io.owner(tx) is None, "previous_failed_owner_registration_reappeared")
+    io.verify_no_listener(tx)
+    return previous / CONTINUATION
+
+
 def check_config(transaction, candidate):
     result = subprocess.run([transaction.config["executable"], "--config", str(candidate), "--check-config"],
                             capture_output=True, timeout=20)
@@ -75,6 +128,13 @@ def check_config(transaction, candidate):
 
 
 class OwnerIO(B.NativeIO):
+    def verify_no_listener(self, tx):
+        port = tx.config["listen"].rsplit(":", 1)[1]
+        result = subprocess.run(["/usr/sbin/lsof", "-nP", "-iTCP:" + port, "-sTCP:LISTEN", "-t"],
+                                capture_output=True, timeout=5)
+        require(result.returncode == 1 and not result.stdout.strip() and not result.stderr.strip(),
+                "unexpected_service_control_port_listener")
+
     def unload_failed_registration(self, tx):
         try:
             current = self.owner(tx)
@@ -155,7 +215,7 @@ def verify_deployment_state(path, original, key):
     require(data == original, "original_signed_owner_state_changed")
 
 
-def execute(args, request, failed, failed_raw, key, io=None):
+def execute(args, request, failed, failed_raw, key, io=None, prior=None):
     io = io or OwnerIO()
     checkpoint = S.Checkpoint(args.runtime_root, args.state_directory, request, failed, io)
     state_path = args.state_directory / (request["commit"] + ".json")
@@ -173,18 +233,25 @@ def execute(args, request, failed, failed_raw, key, io=None):
             require(io.engine(tx) == args.docker_engine_id, "configured_engine_mismatch")
             verify_deployment_state(state_path, failed_raw, key)
             before = checkpoint.configs
-            after, omlx = O.plan(before)
+            if prior is None:
+                claim = tx.backup / CLAIM
+                after, omlx = O.plan(before)
+            else:
+                after, omlx = O.plan(before, program_mode=0o755)
+                claim = qualify_continuation(tx, prior, key, io, before, after, omlx)
+                receipt.update(continued_from_build=PRIOR_APPLY, previous_recovery_sha256=PRIOR_APPLY_HASH)
             plan = {"transaction_id": TX, "original_owner_build": OLD_OWNER_BUILD, "original_coordinator_build": COORDINATOR_BUILD,
                     "library_revision": args.library_revision, "request_sha256": REQUEST_HASH,
                     "original_failed_receipt_sha256": FAILED_HASH, "before": pins(before), "after": pins(after),
                     "omlx": omlx, "app": checkpoint.observed}
+            if prior is not None:
+                plan.update(continued_from_build=PRIOR_APPLY, previous_recovery_sha256=PRIOR_APPLY_HASH)
             plan_sha = B.sha(B.encoded(plan))
             if args.action == "plan":
                 plan.update(status="QUALIFIED", plan_sha256=plan_sha)
                 B.create(args.output, B.encoded(D.control.sign(plan, key)))
                 return
             require(args.plan_sha256 == plan_sha, "reviewed_recovery_plan_changed")
-            claim = tx.backup / CLAIM
             claim.mkdir(mode=0o700)
             B.sync(claim.parent)
             claimed = True
@@ -193,9 +260,18 @@ def execute(args, request, failed, failed_raw, key, io=None):
             for path, data in before.items():
                 B.create(claim / ("before-" + path.name), data)
             receipt["phase"] = "unload-failed-registration"
-            receipt["failed_registration_unloaded"] = io.unload_failed_registration(tx)
+            if prior is None:
+                receipt["failed_registration_unloaded"] = io.unload_failed_registration(tx)
+            else:
+                require(io.owner(tx) is None, "previous_failed_owner_registration_reappeared")
             receipt["phase"] = "qualify-omlx-and-candidate"
-            receipt["omlx"] = O.apply_mode(omlx)
+            if prior is None:
+                receipt["omlx"] = O.apply_mode(omlx)
+            else:
+                confirmed_after, confirmed_identity = O.plan(before, program_mode=0o755)
+                require(confirmed_after == after and confirmed_identity == omlx,
+                        "post_app_management_identity_changed_before_commit")
+                receipt["omlx"] = omlx
             candidate = claim / "candidate-owner.json"
             B.create(candidate, after[tx.owner_directory / "owner.json"])
             check_config(tx, candidate)
@@ -263,6 +339,7 @@ def main():
     parser.add_argument("--library-revision", required=True)
     parser.add_argument("--build-number", required=True, type=int)
     parser.add_argument("--plan-sha256", default="")
+    parser.add_argument("--earlier-attempt", default=0, type=int, choices=(0, PRIOR_APPLY))
     parser.add_argument("--key-file", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
@@ -274,9 +351,10 @@ def main():
         key = args.key_file.read_bytes()
         args.output = args.output.absolute()
         request, failed, failed_raw = exact_lineage(args.jenkins_url, key)
+        prior = earlier_attempt(args.jenkins_url, key) if args.earlier_attempt else None
         os.environ.pop("JENKINS_API_TOKEN", None)
         os.environ.pop("JENKINS_API_USER", None)
-        execute(args, request, failed, failed_raw, key)
+        execute(args, request, failed, failed_raw, key, prior=prior)
     except (ValueError, OSError, subprocess.SubprocessError) as error:
         expected_errors = (B.BindingError, O.B.BindingError, D.gate.InvalidEvidence, R.gate.InvalidEvidence)
         parser.exit(1, f"{str(error) if isinstance(error, expected_errors) else type(error).__name__}\n")

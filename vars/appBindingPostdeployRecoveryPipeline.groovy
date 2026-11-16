@@ -75,12 +75,14 @@ PY
                                              passwordVariable: 'JENKINS_API_TOKEN')]) {
                             withEnv(["REQUEST_ACTION=${action}", "PLAN_SHA=${planHash}", "RESULT_FILE=${output}",
                                      "LIBRARY_REVISION=${config.libraryRevision}", "RUNTIME_ROOT=${config.runtimeRoot}",
+                                     "EARLIER_ATTEMPT=${config.afterAppManagement == true ? 2 : 0}",
                                      "STATE_DIRECTORY=${config.stateDirectory}", "DOCKER_ENGINE_ID=${config.dockerEngineId}",
                                      'PYTHONDONTWRITEBYTECODE=1']) {
                                 sh '''python3 control/release-app-binding-postdeploy.py "$REQUEST_ACTION" \
     --jenkins-url http://127.0.0.1:9090 --key-file "$RECEIPT_KEY_FILE" --build-number "$BUILD_NUMBER" \
     --library-revision "$LIBRARY_REVISION" --runtime-root "$RUNTIME_ROOT" --state-directory "$STATE_DIRECTORY" \
-    --docker-engine-id "$DOCKER_ENGINE_ID" --plan-sha256 "$PLAN_SHA" --output "$RESULT_FILE"'''
+    --docker-engine-id "$DOCKER_ENGINE_ID" --plan-sha256 "$PLAN_SHA" \
+    --earlier-attempt "$EARLIER_ATTEMPT" --output "$RESULT_FILE"'''
                             }
                         }
                         def result = parseJson(readFile(output)).payload
