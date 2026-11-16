@@ -18,14 +18,20 @@ def call(Map config = [:]) {
     }
     def action = rehearsal ? 'rehearsal' : params.RECOVERY_ACTION
     def planHash = rehearsal ? '' : (params.RECOVERY_PLAN_SHA256 ?: '').trim()
-    if (!rehearsal && !(action == 'plan' && !planHash || action == 'apply' && planHash ==~ /[0-9a-f]{64}/)) {
+    if (!rehearsal && config.closureOnly == true && (action != 'close' || planHash)) {
+        error('This route only attests the already released transaction')
+    }
+    if (!rehearsal && config.closureOnly != true &&
+        !(action == 'plan' && !planHash || action == 'apply' && planHash ==~ /[0-9a-f]{64}/)) {
         error('Use plan, or apply with the exact qualified plan SHA256')
     }
     def files = ['release-gate.py', 'release-evidence.py', 'release-promotion.py', 'release-deploy.py',
                  'release-app-binding.py', 'release-binding-repair.py', 'release-app-binding-postdeploy.py',
-                 'release-app-binding-postdeploy-state.py', 'release-app-binding-postdeploy-omlx.py']
+                 'release-app-binding-postdeploy-state.py', 'release-app-binding-postdeploy-omlx.py',
+                 'release-app-binding-postdeploy-close.py']
     def suite = ['release-app-binding-postdeploy', 'release-app-binding-postdeploy-state',
-                 'release-app-binding-postdeploy-omlx', 'release-app-binding', 'release-owner-resume']
+                 'release-app-binding-postdeploy-omlx', 'release-app-binding-postdeploy-close',
+                 'release-app-binding', 'release-owner-resume']
     if (rehearsal) {
         files += suite.collect { it + '.test.py' }
     }
@@ -50,7 +56,7 @@ set -euo pipefail
 export PYTHONDONTWRITEBYTECODE=1
 mkdir -p reports
 for contract in release-app-binding-postdeploy release-app-binding-postdeploy-state \
-    release-app-binding-postdeploy-omlx release-app-binding release-owner-resume; do
+    release-app-binding-postdeploy-omlx release-app-binding-postdeploy-close release-app-binding release-owner-resume; do
     python3 "control/${contract}.test.py" 2>&1 | tee "reports/${contract}.log"
 done
 python3 - <<'PY'
@@ -68,7 +74,7 @@ PY
                     ['dockerEngineId', 'runtimeRoot', 'stateDirectory', 'receiptKeyCredentials', 'jenkinsReadCredentials'].each { key ->
                         if (!config[key]?.toString()?.trim()) { error("Missing trusted recovery setting ${key}") }
                     }
-                    stage(action == 'plan' ? 'Attest Existing App Binding' : 'Complete Original Binding and Verify Recognition') {
+                    stage(action == 'plan' ? 'Attest Existing App Binding' : 'Verify Owner and Recognition Readiness') {
                         def output = action == 'plan' ? 'recovery-plan.json' : 'recovery-receipt.json'
                         withCredentials([file(credentialsId: config.receiptKeyCredentials, variable: 'RECEIPT_KEY_FILE'),
                             usernamePassword(credentialsId: config.jenkinsReadCredentials, usernameVariable: 'JENKINS_API_USER',

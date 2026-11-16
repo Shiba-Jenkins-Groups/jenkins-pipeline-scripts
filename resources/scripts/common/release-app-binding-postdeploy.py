@@ -2,14 +2,13 @@
 """Complete the exact committed App binding interrupted at PROD owner #101."""
 import argparse
 import datetime as dt
+import importlib.util
 import json
 import os
 from pathlib import Path
 import stat
 import subprocess
 import time
-
-import importlib.util
 
 
 def load(name):
@@ -24,6 +23,7 @@ E = load("release-evidence")
 R = load("release-binding-repair")
 O = load("release-app-binding-postdeploy-omlx")
 S = load("release-app-binding-postdeploy-state")
+C = load("release-app-binding-postdeploy-close")
 B = S.B
 require = B.require
 OLD_LIBRARY = "d630558e3450557d85a9decaed82e46035630824"
@@ -39,6 +39,10 @@ PRIOR_APPLY = 2
 PRIOR_LIBRARY = "e6c5ff7fb795baea15925f9ccc143714c56383d4"
 PRIOR_PLAN_HASH = "6b3bafa68cfe27e2f8eae2c466ef8e23389792982f99cf9381faa2a54549ed37"
 PRIOR_APPLY_HASH = "50511fea8a2ac1f5b96a0439f978e20f6614dead3eb12710e8f03397d8e5cbb4"
+CONTINUATION_LIBRARY = "ddde8dd5f66d48af2d586be2e9f5d8f972b5076a"
+CONTINUATION_PLAN_HASH = "7b761f6e4a654b6cb9fceac62fb6cdd994de984614491ee5c8a5d56497206406"
+CONTINUATION_APPLY_HASH = "da0bdfcc9e6584a6466900b67e390ade0fe636d66e4ae1e60571468f1bc6ca44"
+CONTINUATION_APPLY = 4
 
 
 def exact_lineage(url, key, get=E.jenkins_get):
@@ -73,8 +77,12 @@ def exact_lineage(url, key, get=E.jenkins_get):
     return request, failed, failed_raw
 
 
+def job_path():
+    return "/" + "/".join("job/" + item for item in JOB.split("/"))
+
+
 def earlier_attempt(url, key, get=E.jenkins_get):
-    path = "/" + "/".join("job/" + item for item in JOB.split("/"))
+    path = job_path()
     build = json.loads(get(url, path + "/2/api/json?tree=number,building,result"))
     require(build.get("number") == PRIOR_APPLY and build.get("building") is False
             and build.get("result") == "FAILURE", "previous_recovery_build_mismatch")
@@ -197,7 +205,8 @@ def readiness(io, tx, expected):
                 payload = json.loads(health.stdout) if health.returncode == 0 else None
             except (ValueError, subprocess.TimeoutExpired):
                 payload = None
-            if isinstance(payload, dict) and payload.get("ready") is True:
+            if (isinstance(payload, dict) and payload.get("ready") is True
+                    and payload.get("service") == "receipt-recognition" and payload.get("contract_version") == 1):
                 return last
         # A later failure discards former successes, so both statuses are fresh.
         last.clear()
@@ -207,6 +216,71 @@ def readiness(io, tx, expected):
 
 def pins(configs):
     return {str(path): B.sha(raw) for path, raw in configs.items()}
+
+
+def applied_continuation(url, key, get=E.jenkins_get):
+    path = job_path()
+    build = json.loads(get(url, path + "/4/api/json?tree=number,building,result"))
+    require(build.get("number") == CONTINUATION_APPLY and build.get("building") is False
+            and build.get("result") == "FAILURE", "continuation_apply_build_mismatch")
+    plan_raw = get(url, path + "/3/artifact/recovery-plan.json")
+    applied_raw = get(url, path + "/4/artifact/recovery-receipt.json")
+    require(B.sha(plan_raw) == CONTINUATION_PLAN_HASH and B.sha(applied_raw) == CONTINUATION_APPLY_HASH,
+            "continuation_apply_artifact_mismatch")
+    plan = R.signed_payload(json.loads(plan_raw, object_pairs_hook=B.pairs), key)
+    applied = R.signed_payload(json.loads(applied_raw, object_pairs_hook=B.pairs), key)
+    require(plan["status"] == "QUALIFIED" and applied["status"] == "FAILED"
+            and plan["transaction_id"] == applied["transaction_id"] == TX
+            and plan["library_revision"] == applied["library_revision"] == CONTINUATION_LIBRARY
+            and applied["jenkins_job"] == JOB and applied["build_number"] == CONTINUATION_APPLY
+            and plan["plan_sha256"] == applied["plan_sha256"] == B.sha(B.encoded(
+                {field: value for field, value in plan.items() if field not in {"status", "plan_sha256"}}))
+            and plan["continued_from_build"] == applied["continued_from_build"] == PRIOR_APPLY
+            and plan["previous_recovery_sha256"] == applied["previous_recovery_sha256"] == PRIOR_APPLY_HASH
+            and applied["original_failed_receipt_sha256"] == FAILED_HASH
+            and applied["phase"] == "release-owned-admission"
+            and applied["failure_code"] == "postdeploy_foreign_resource_fence"
+            and isinstance(applied["owner"], dict)
+            and len(set(applied["released_fences"])) == len(applied["released_fences"]) == 9,
+            "continuation_apply_requires_exact_released_transaction")
+    return plan, applied, applied_raw
+
+
+def verify_by_readiness(args, request, failed, original, key, evidence, io=None):
+    """This lane attests a completion after #4; it issues no lifecycle action."""
+    io = io or OwnerIO()
+    plan, applied, applied_raw = evidence
+    backup = Path(failed["app_binding"]["backup"])
+    claim = backup / CLAIM / CONTINUATION
+    state_path = args.state_directory / (request["commit"] + ".json")
+    verify_deployment_state(state_path, original, key)
+    require(B.read(claim / "failure.json") == applied_raw, "on_disk_continuation_failure_changed")
+    intent = R.signed_payload(B.document(claim / "release-intent.json"), key)
+    require(intent["status"] == "INTENT" and intent["plan_sha256"] == plan["plan_sha256"]
+            and intent["owner"] == applied["owner"] and intent["transaction_id"] == TX
+            and intent["phase"] == applied["phase"] and intent["build_number"] == CONTINUATION_APPLY,
+            "on_disk_release_intent_changed")
+    tx = C.verify(args.runtime_root, request, failed, plan, applied, io)
+    require(io.engine(tx) == args.docker_engine_id, "configured_engine_mismatch")
+    before = {Path(path): B.read(claim / ("before-" + Path(path).name)) for path in plan["before"]}
+    rebinding, omlx = O.plan(before, program_mode=0o755)
+    require(pins(rebinding) == plan["after"] and omlx == plan["omlx"] == applied["omlx"],
+            "completed_omlx_binding_identity_changed")
+    services = readiness(io, tx, applied["owner"])
+    C.verify(args.runtime_root, request, failed, plan, applied, io)
+    verify_deployment_state(state_path, original, key)
+    result = {"schema_version": 1, "kind": "app-binding-postdeploy-recovery", "status": "SUCCESS",
+              "mode": "verification-only", "phase": "completed", "jenkins_job": JOB,
+              "build_number": args.build_number, "library_revision": args.library_revision,
+              "original_owner_build": OLD_OWNER_BUILD, "original_coordinator_build": COORDINATOR_BUILD,
+              "original_failed_receipt_sha256": FAILED_HASH, "request_sha256": REQUEST_HASH,
+              "continuation_build": CONTINUATION_APPLY, "continuation_failed_receipt_sha256": CONTINUATION_APPLY_HASH,
+              "plan_sha256": plan["plan_sha256"], "transaction_id": TX, "app": plan["app"],
+              "commit": request["commit"], "version": request["version"], "digest": request["digest"],
+              "owner": applied["owner"], "omlx": omlx, "services": services,
+              "released_fences": applied["released_fences"], "admission_released": True,
+              "finished_at": dt.datetime.now(dt.timezone.utc).isoformat()}
+    B.create(args.output, B.encoded(D.control.sign(result, key)))
 
 
 def verify_deployment_state(path, original, key):
@@ -331,7 +405,7 @@ def execute(args, request, failed, failed_raw, key, io=None, prior=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("plan", "apply"))
+    parser.add_argument("action", choices=("plan", "apply", "close"))
     parser.add_argument("--jenkins-url", required=True)
     parser.add_argument("--runtime-root", required=True, type=Path)
     parser.add_argument("--state-directory", required=True, type=Path)
@@ -351,12 +425,17 @@ def main():
         key = args.key_file.read_bytes()
         args.output = args.output.absolute()
         request, failed, failed_raw = exact_lineage(args.jenkins_url, key)
-        prior = earlier_attempt(args.jenkins_url, key) if args.earlier_attempt else None
+        require(args.action != "close" or args.earlier_attempt == PRIOR_APPLY, "wrong_closure_route")
+        evidence = applied_continuation(args.jenkins_url, key) if args.action == "close" else None
+        prior = earlier_attempt(args.jenkins_url, key) if args.earlier_attempt and evidence is None else None
         os.environ.pop("JENKINS_API_TOKEN", None)
         os.environ.pop("JENKINS_API_USER", None)
-        execute(args, request, failed, failed_raw, key, prior=prior)
+        if evidence is None:
+            execute(args, request, failed, failed_raw, key, prior=prior)
+        else:
+            verify_by_readiness(args, request, failed, failed_raw, key, evidence)
     except (ValueError, OSError, subprocess.SubprocessError) as error:
-        expected_errors = (B.BindingError, O.B.BindingError, D.gate.InvalidEvidence, R.gate.InvalidEvidence)
+        expected_errors = (B.BindingError, O.B.BindingError, C.B.BindingError, D.gate.InvalidEvidence, R.gate.InvalidEvidence)
         parser.exit(1, f"{str(error) if isinstance(error, expected_errors) else type(error).__name__}\n")
 
 
