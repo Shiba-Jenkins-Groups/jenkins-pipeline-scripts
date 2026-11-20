@@ -8,7 +8,7 @@ import re
 import subprocess
 import sys
 
-HARBOR_IMAGE = "goharbor/trivy-adapter-photon:v2.15.2"
+HARBOR_IMAGE = "goharbor/trivy-adapter-photon:v2.15.5"
 HARBOR_CACHE = "/home/scanner/.cache/trivy"
 
 
