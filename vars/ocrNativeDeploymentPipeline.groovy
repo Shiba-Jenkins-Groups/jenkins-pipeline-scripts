@@ -72,11 +72,14 @@ def call(Object input = [:]) {
 set -euo pipefail
 export PYTHONDONTWRITEBYTECODE=1
 python3 -B - <<'PY'
-import json, pathlib, subprocess
+import hashlib, json, pathlib, subprocess
 request=json.loads(pathlib.Path('request.json').read_text())
 source=pathlib.Path('source').resolve()
 assert subprocess.check_output(['git','rev-parse','HEAD'],cwd=source,text=True).strip()==request['source_commit']
 assert not subprocess.check_output(['git','status','--porcelain'],cwd=source).strip()
+plan_raw=pathlib.Path(request['plan']).read_bytes()
+assert hashlib.sha256(plan_raw).hexdigest()==request['plan_sha256']
+plan=json.loads(plan_raw)
 command=['python3','-B',str(source/'scripts/ocr_release_session.py'),'apply']
 for key in ('plan','plan_sha256','ci_receipt','ci_receipt_sha256','artifact_directory'):
     command += ['--'+key.replace('_','-'),request[key]]
@@ -84,7 +87,17 @@ command += ['--output',str(pathlib.Path('runtime-receipt.json').resolve()),'--co
 subprocess.run(command,check=True,timeout=960)
 receipt=json.loads(pathlib.Path('runtime-receipt.json').read_text())
 assert receipt['schema']=='ocr-native-deployment-v1' and receipt['state']=='succeeded'
-assert receipt['owner_reactivated'] is True and receipt['replacement']['state']=='succeeded'
+assert receipt['owner_reactivated'] is True
+if plan.get('schema')=='managed-recognition-runtime-binding-refresh/v1':
+    assert receipt['route']=='recognition_runtime_binding' and receipt['ocr_replacement_submitted'] is False
+    refresh=receipt['recognition_refresh']
+    assert refresh['state'] in {'binding_committed', 'binding_committed_unready'}
+    assert refresh['binding_committed'] is True and refresh['file_mutated'] is True
+    assert refresh['platform_mutated'] is False and refresh['maintenance_released'] is True
+    assert receipt['binding_checkpoint']['state']==refresh['state']
+    assert receipt['operation_id']==refresh['operation_id']==plan['operation_id']
+else:
+    assert receipt['replacement']['state']=='succeeded'
 assert receipt['plan_sha256']==request['plan_sha256'] and receipt['ci_receipt_sha256']==request['ci_receipt_sha256']
 assert receipt['job_name']=='shiba-release-automation/apple-vision-native-deploy'
 assert receipt['build_number']==int(__import__('os').environ['BUILD_NUMBER'])
