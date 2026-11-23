@@ -24,7 +24,9 @@ class ResumeTests(unittest.TestCase):
         self.before = {"pid": 818, "kernel_path": self.executable, "uid_start": "501 original-start",
                        "binary_sha256": B.sha(self.binary)}
         self.tx = types.SimpleNamespace(id="5" * 32, backup=Path("/fixture/private/backup"),
-                                        domain="gui/501/com.shiba.service-control.prod", plist=Path("/fixture/owner.plist"),
+                                        domain="gui/501/com.shiba.service-control.prod",
+                                        plist=Path("/fixture/Application Support/owner.plist"),
+                                        owner_directory=Path("/fixture/Application Support/prod"),
                                         journal=Path("/fixture/prod/operations.jsonl"), owner_before=copy.deepcopy(self.before),
                                         config={"executable": self.executable, "listen": "127.0.0.1:8120"})
         self.events, self.calls, self.records = [], [], []
@@ -58,6 +60,12 @@ class ResumeTests(unittest.TestCase):
 
     def ready_events(self, *middle):
         return [self.event("unloaded"), self.event("unloaded"), *middle, self.event(), self.event()]
+
+    def root_launcher(self, **changes):
+        job = dict(domain=self.tx.domain, plist=str(self.tx.plist), program=self.executable, type="LaunchAgent",
+                   argv=[self.executable, "--config", str(self.tx.owner_directory / "owner.json")])
+        job.update(changes.pop("job", {}))
+        return self.event("launcher", uid=0, launchd_job=job, **changes)
 
     def sleep(self, seconds):
         self.assertGreater(seconds, 0)
@@ -141,6 +149,14 @@ class ResumeTests(unittest.TestCase):
             if kind == "unknown":
                 return types.SimpleNamespace(returncode=113, stdout=b"private raw stdout", stderr=b"private raw error")
             raw = b"state = running\n" if kind == "missing-pid" else ("pid = %d\n" % self.active.get("pid", 21988)).encode()
+            if "launchd_job" in self.active:
+                job = self.active["launchd_job"]
+                lines = [job["domain"] + " = {", "\tactive count = 1", "\tpath = " + job["plist"],
+                         "\ttype = " + job["type"], "\tprogram = " + job["program"], "\targuments = {",
+                         *("\t\t" + argument for argument in job["argv"]), "\t}",
+                         "\tpid = " + str(self.active.get("pid", 21988))]
+                lines.extend(job.get("extra", []))
+                raw = ("\n".join(lines + ["}"]) + "\n").encode()
             return types.SimpleNamespace(returncode=0, stdout=raw, stderr=b"")
         if argv[:2] == ["/bin/launchctl", "bootstrap"]:
             self.assertEqual(argv, ["/bin/launchctl", "bootstrap", "gui/501", str(self.tx.plist)])
@@ -236,6 +252,76 @@ class ResumeTests(unittest.TestCase):
         self.assertEqual(self.bootstraps, 0)
         self.assertEqual(self.records[-1]["phase"], "pre-bootstrap")
         self.assert_preserved()
+
+    def test_acknowledged_root_launcher_allows_same_generation_to_become_exact_owner(self):
+        self.events = self.ready_events(self.root_launcher())
+        current = self.io.resume(self.tx)
+        self.assertEqual((current["pid"], current["uid_start"], current["kernel_path"], current["binary_sha256"]),
+                         (21988, "501 fixture-new-start", self.executable, self.before["binary_sha256"]))
+        waiting = next(r for r in self.records if r["classification"] == "bound-root-launcher")
+        self.assertEqual((waiting["phase"], waiting["uid"], waiting["kernel_path"]),
+                         ("post-bootstrap", 0, B.XPCPROXY))
+        self.assertTrue(waiting["bootstrap_acknowledged"])
+        self.assertIsNone(waiting["binary_sha256"])
+        self.assertEqual((self.bootstraps, self.lsof_calls), (1, 2))
+        self.assert_preserved()
+
+    def test_root_launcher_with_mismatched_or_ambiguous_job_is_rejected(self):
+        exact_argv = [self.executable, "--config", str(self.tx.owner_directory / "owner.json")]
+        cases = ({"domain": "gui/502/com.shiba.service-control.prod"}, {"type": "LaunchDaemon"},
+                 {"program": "/fixture/foreign-owner"}, {"plist": "/fixture/foreign.plist"},
+                 {"argv": exact_argv[:2] + ["/fixture/foreign-config"]}, {"argv": exact_argv + ["--extra"]},
+                 {"extra": ["\tpid = 21988"]}, {"extra": ["\targuments = {", "\t}"]})
+        for job in cases:
+            with self.subTest(job=job):
+                self.tx._resume_bootstrap_submitted = False
+                self.bootstraps = 0
+                self.events = self.ready_events(self.root_launcher(job=job))
+                with self.assertRaisesRegex(B.BindingError, "foreign_owner_process"):
+                    self.io.resume(self.tx)
+                self.assertEqual(self.records[-1]["classification"], "foreign-user")
+                self.assertEqual(self.lsof_calls, 0)
+                self.assert_preserved()
+
+    def test_exact_root_launcher_before_acknowledgement_is_refused(self):
+        self.events = [self.root_launcher()]
+        with self.assertRaisesRegex(B.BindingError, "foreign_owner_process"):
+            self.io.resume(self.tx)
+        self.assertEqual(self.bootstraps, 0)
+        self.assertEqual(self.records[-1]["classification"], "foreign-user")
+        self.assertFalse(self.records[-1]["bootstrap_acknowledged"])
+        self.assert_preserved()
+
+    def test_root_launcher_remains_unready_when_it_never_execs(self):
+        self.events = [self.event("unloaded"), self.event("unloaded")] + [self.root_launcher()] * 400
+        with self.assertRaisesRegex(B.BindingError, "owner_resume_unconfirmed"):
+            self.io.resume(self.tx)
+        self.assertAlmostEqual(self.clock, 115)
+        self.assertEqual(self.lsof_calls, 0)
+        self.assert_preserved()
+
+    def test_root_launcher_generation_is_pinned_independently_of_uid(self):
+        for owner in (self.event(start="different-start"), self.event(pid=21989)):
+            with self.subTest(owner=owner):
+                self.tx._resume_bootstrap_submitted = False
+                self.bootstraps = 0
+                self.events = self.ready_events(self.root_launcher(), owner)
+                with self.assertRaisesRegex(B.BindingError, "owner_resume_generation_changed"):
+                    self.io.resume(self.tx)
+                self.assertEqual(self.lsof_calls, 0)
+                self.assert_preserved()
+
+    def test_root_owner_and_regression_to_root_launcher_are_rejected(self):
+        cases = ((self.root_launcher(), self.event(uid=0)), (self.event(listeners=[], listener_rc=1), self.root_launcher()))
+        for events in cases:
+            with self.subTest(events=events):
+                self.tx._resume_bootstrap_submitted = False
+                self.bootstraps = 0
+                self.events = self.ready_events(*events)
+                with self.assertRaisesRegex(B.BindingError, "foreign_owner_process"):
+                    self.io.resume(self.tx)
+                self.assertEqual(self.records[-1]["classification"], "foreign-user")
+                self.assert_preserved()
 
     def test_root_uid_launcher_is_foreign_not_a_startup_transient(self):
         self.events = self.ready_events(self.event("launcher", uid=0))
