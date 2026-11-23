@@ -778,6 +778,7 @@ def loadDeliveryScripts(boolean compact) {
         'scripts/common/k3d-capacity.py',
         'scripts/common/ci-capacity.py',
         'scripts/common/ci-builder-ensure.sh',
+        'scripts/common/ci_builder_remote.py',
         'scripts/common/ci-builder.toml',
         'scripts/common/harbor-vulnerability-report.py',
         'scripts/common/release-finalize.sh',
@@ -923,11 +924,11 @@ def configureDeliveryEnvironment(Map config, Map mode) {
     // 既有 dev/prod 常駐 namespace 不在回收範圍，故不再需要專案 opt-in。
     env.DEPLOY_TEARDOWN = 'true'
     if (appCapacityBuilder && !leanDevelop) {
-        env.CI_BUILDX_BUILDER = 'shiba-app-ci'
+        env.CI_BUILDX_BUILDER = 'shiba-ci-components-buildkit'
         env.CI_BUILDX_PLATFORM = 'linux/arm64'
         // The existing Docker agent cache volume survives agent
         // replacement; builder metadata must use the same path.
-        env.BUILDX_CONFIG = '/home/jenkins/.cache/shiba-app-buildx'
+        env.BUILDX_CONFIG = '/home/jenkins/.cache/shiba-ci-components-buildkit-buildx'
     }
 
     // 人工確認閘的專案級覆蓋（deployInputGate: false 可關掉 prod 那道 input）。

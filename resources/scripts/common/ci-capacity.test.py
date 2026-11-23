@@ -13,10 +13,10 @@ spec.loader.exec_module(module)
 
 
 class AdmissionTest(unittest.TestCase):
-    def invoke(self, states, inspect_result=None):
+    def invoke(self, states, inspect_result=None, *, builder="shiba-app-ci", managed_result=True):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "ci-capacity.json"
-            argv = [str(SCRIPT), "--builder", "shiba-app-ci", "--capacity-script",
+            argv = [str(SCRIPT), "--builder", builder, "--capacity-script",
                     str(Path(directory) / "k3d.py"), "--policy-config",
                     str(Path(directory) / "policy.toml"), "--output", str(output)]
             calls = []
@@ -35,10 +35,19 @@ class AdmissionTest(unittest.TestCase):
                     return mock.Mock(returncode=0, stdout="reclaimed", stderr="")
                 raise AssertionError(command)
 
+            def verify_managed(policy, *, allow_unregistered):
+                self.assertEqual(Path(directory) / "policy.toml", policy)
+                self.assertTrue(allow_unregistered)
+                calls.append(["verify", "managed", "ownership"])
+                if isinstance(managed_result, Exception):
+                    raise managed_result
+                return managed_result
+
             with mock.patch.object(sys, "argv", argv), mock.patch.object(module, "observe", side_effect=observe), \
                     mock.patch.object(module, "run", side_effect=run), \
                     mock.patch.object(module, "inventory", return_value=3), \
                     mock.patch.object(module, "verify_ownership"), \
+                    mock.patch.object(module, "verify_registration", side_effect=verify_managed), \
                     mock.patch.object(module.time, "sleep"):
                 result = module.main()
             return result, json.loads(output.read_text()), calls
@@ -91,6 +100,21 @@ class AdmissionTest(unittest.TestCase):
         self.assertEqual(2, result)
         self.assertIn("not isolated", report["reason"])
         self.assertFalse(any(command[2] == "prune" for command in calls))
+
+    def test_low_capacity_verifies_managed_owner_before_prune(self):
+        result, report, calls = self.invoke(["BLOCKED", "OK"], builder=module.MANAGED_BUILDER)
+        self.assertEqual(0, result)
+        self.assertEqual(["ownership", "prune"], [command[2] for command in calls])
+        self.assertTrue(report["reclaim"]["attempted"])
+
+    def test_low_capacity_refuses_prune_when_managed_ownership_fails(self):
+        result, report, calls = self.invoke(
+            ["BLOCKED"], builder=module.MANAGED_BUILDER, managed_result=RuntimeError("policy mismatch")
+        )
+        self.assertEqual(2, result)
+        self.assertEqual(["ownership"], [command[2] for command in calls])
+        self.assertFalse(report["reclaim"]["attempted"])
+        self.assertEqual("policy mismatch", report["reason"])
 
     def test_waits_for_async_k3d_reclaim_then_passes(self):
         inspect = mock.Mock(returncode=0, stdout="Name: shiba-app-ci\nDriver: docker-container\n", stderr="")

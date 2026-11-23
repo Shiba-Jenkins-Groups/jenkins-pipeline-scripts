@@ -99,12 +99,17 @@ docker_build() {
     echo "[docker] Building image: ${image_name}"
 
     if [[ -n "${CI_BUILDX_BUILDER:-}" ]]; then
-        # Product opt-in only: a docker-container builder keeps its cache separate
-        # from the shared daemon builder. --load preserves scan/push/smoke inputs.
+        # The dedicated builder keeps its cache separate from the shared daemon
+        # builder. --load preserves scan/push/smoke inputs.
         [[ "${CI_BUILDX_BUILDER}" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || {
             echo "[docker] invalid CI builder name" >&2
             return 1
         }
+        if [[ "${CI_BUILDX_BUILDER}" == shiba-ci-components-buildkit ]]; then
+            local builder_scripts
+            builder_scripts="$(dirname "${BASH_SOURCE[0]}")"
+            python3 "${builder_scripts}/ci_builder_remote.py" "${builder_scripts}/ci-builder.toml" || return 1
+        fi
         docker buildx build --builder "${CI_BUILDX_BUILDER}" \
             --platform "${CI_BUILDX_PLATFORM:-linux/arm64}" --load \
             -f "${dockerfile}" \

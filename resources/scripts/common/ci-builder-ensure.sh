@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Provision only the App's isolated, persistent BuildKit worker after capacity admission.
+# Register the App's Buildx instance after capacity admission.
 set -euo pipefail
 
 builder="${CI_BUILDX_BUILDER:?dedicated builder name required}"
@@ -9,6 +9,10 @@ config="${1:?BuildKit config required}"
 mkdir -p "${BUILDX_CONFIG}"
 exec 9>"${BUILDX_CONFIG}/.ci-builder-setup.lock"
 flock -w 120 9
+
+if [[ "${builder}" == shiba-ci-components-buildkit ]]; then
+    exec python3 "$(dirname "$0")/ci_builder_remote.py" "${config}" --register
+fi
 
 policy_hash="$(sha256sum "${config}" | awk '{print $1}')"
 marker="${BUILDX_CONFIG}/.${builder}.policy-sha256"

@@ -86,11 +86,14 @@ assert capacity.calls.any { it.contains('ci-builder-ensure.sh') }
 assert capacity.calls.any { it == 'credential-file:k3s-kubeconfig:KUBECONFIG' }
 assert capacity.calls.indexOf(capacity.calls.find { it.contains('ci-capacity.py --builder') }) <
        capacity.calls.indexOf(capacity.calls.find { it.contains('/go-build.sh') })
-assert capacity.environment.CI_BUILDX_BUILDER == 'shiba-app-ci'
+assert capacity.environment.CI_BUILDX_BUILDER == 'shiba-ci-components-buildkit'
+assert capacity.environment.BUILDX_CONFIG == '/home/jenkins/.cache/shiba-ci-components-buildkit-buildx'
 assert candidate.environment.CI_BUILDX_BUILDER == null
 def lean = simulate(true, [branch: 'develop', lean: true, ciBuilder: true])
 assert !lean.failed
 assert !lean.calls.any { it.contains('ci-capacity.py --builder') }
+assert !lean.calls.any { it.contains('ci-builder-ensure.sh') }
+assert lean.environment.CI_BUILDX_BUILDER == null
 assert !lean.calls.any { it.contains('release-candidate.py') }
 assert !lean.calls.any { it.contains('dependency-check.sh') }
 assert !lean.calls.any { it == 'bash .pipeline/scripts/cd.sh docker-build' }

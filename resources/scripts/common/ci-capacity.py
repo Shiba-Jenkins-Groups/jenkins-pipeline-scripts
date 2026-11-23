@@ -11,6 +11,8 @@ import subprocess
 import sys
 import time
 
+from ci_builder_remote import BUILDER as MANAGED_BUILDER, verify_registration
+
 GIB = 1024 ** 3
 BUILDER_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 PINNED_IMAGE = "moby/buildkit@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8"
@@ -65,6 +67,19 @@ def verify_ownership(builder, policy):
                  f"buildx_buildkit_{builder}0"]).stdout.strip()
     if image != PINNED_IMAGE:
         raise RuntimeError("dedicated builder image differs from pinned digest; refusing prune")
+
+
+def can_reclaim(builder, policy):
+    if builder == MANAGED_BUILDER:
+        return verify_registration(policy, allow_unregistered=True)
+
+    inspect = run(["docker", "buildx", "inspect", builder], check=False)
+    if inspect.returncode:
+        return False
+    if not re.search(r"(?m)^Driver:\s+docker-container\s*$", inspect.stdout):
+        raise RuntimeError("named builder is not isolated docker-container driver")
+    verify_ownership(builder, policy)
+    return True
 
 
 def can_wait_for_async_reclaim(report):
@@ -145,11 +160,7 @@ def main():
         before = observe(args.capacity_script, before_path)
         report["before"] = before
         if before["status"] == "BLOCKED":
-            inspect = run(["docker", "buildx", "inspect", args.builder], check=False)
-            if inspect.returncode == 0:
-                if not re.search(r"(?m)^Driver:\s+docker-container\s*$", inspect.stdout):
-                    raise RuntimeError("named builder is not isolated docker-container driver")
-                verify_ownership(args.builder, args.policy_config)
+            if can_reclaim(args.builder, args.policy_config):
                 report["reclaim"]["inventory_before_count"] = inventory(args.builder, Path(f"{prefix}-cache-before.jsonl"))
                 command = ["docker", "buildx", "prune", "--builder", args.builder,
                            "--filter", "until=24h", "--min-free-space", str(BUILDER_TARGET_FREE_GIB * GIB),
