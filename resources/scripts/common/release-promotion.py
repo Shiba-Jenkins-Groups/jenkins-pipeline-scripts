@@ -14,6 +14,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
 import tempfile
@@ -67,8 +68,10 @@ class State:
         require(self.root.is_absolute() and self.root.is_dir(), "persistent state directory not provisioned")
 
     @contextlib.contextmanager
-    def lock(self):
-        fd = os.open(self.root / "promotion.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    def lock(self, *, create_missing=True):
+        path = self.root / "promotion.lock"
+        flags = os.O_RDWR | os.O_NOFOLLOW | (os.O_CREAT if create_missing else 0)
+        fd = os.open(path, flags, 0o600)
         try:
             deadline = time.monotonic() + 5
             while True:
@@ -78,6 +81,12 @@ class State:
                 except BlockingIOError:
                     require(time.monotonic() < deadline, "another release owns promotion lock")
                     time.sleep(0.1)
+            if not create_missing:
+                held, current = os.fstat(fd), path.lstat()
+                require(stat.S_ISREG(held.st_mode) and held.st_uid == os.getuid()
+                        and stat.S_IMODE(held.st_mode) == 0o600
+                        and (held.st_dev, held.st_ino) == (current.st_dev, current.st_ino),
+                        "existing release state lock is unsafe")
             yield
         finally:
             os.close(fd)
