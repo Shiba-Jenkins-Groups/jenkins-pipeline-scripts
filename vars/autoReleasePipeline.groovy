@@ -26,6 +26,8 @@ def call(Map config = [:]) {
     properties([
         disableConcurrentBuilds(),
         parameters([
+            string(name: 'APP_BINDING_105_OBSERVE', defaultValue: '', description: 'Read-only #105 owner scope observation. Enter 105.'),
+            text(name: 'APP_BINDING_105_REVIEW', defaultValue: '', description: 'Exact signed #105 observation receipt for one-time binding finalization'),
             string(name: 'APP_BINDING_REPAIR_COORDINATOR_BUILD', defaultValue: '', description: 'Authorized binding maintenance: original successful coordinator'),
             string(name: 'APP_BINDING_REPAIR_OWNER_BUILD', defaultValue: '', description: 'Authorized binding maintenance: original successful owner'),
             text(name: 'APP_BINDING_REPAIR_PINS', defaultValue: '', description: 'Exact raw SHA256 JSON for owner.json, registry.json, installation.json, consumer-admission.json'),
@@ -57,8 +59,24 @@ def call(Map config = [:]) {
     def repairOwner = params.APP_BINDING_REPAIR_OWNER_BUILD?.toString()?.trim() ?: ''
     def repairPins = params.APP_BINDING_REPAIR_PINS?.toString()?.trim() ?: ''
     def bindingRepair = repairCoordinator || repairOwner || repairPins
+    def observe105 = params.APP_BINDING_105_OBSERVE?.toString()?.trim() ?: ''
+    def review105 = params.APP_BINDING_105_REVIEW?.toString()?.trim() ?: ''
+    def committed105 = observe105 || review105
+    def committed105Author = ''
     def repairAuthor = ''
-    if (bindingRepair) {
+    if (committed105) {
+        def allCauses = currentBuild.getBuildCauses()
+        if (config.binding105Enabled != true || !(config.binding105DriverSha256 ==~ /[0-9a-f]{64}/) ||
+            !(config.binding105Approver instanceof String) || !config.binding105Approver.trim() ||
+            config.binding105Approver != config.binding105Approver.trim() || !config.approvers.contains(config.binding105Approver) ||
+            (observe105 && (observe105 != '105' || review105)) || review105.size() > 65536 ||
+            bindingRepair || rebuilding || requestedBuild || requestedCommit || deploymentRecovery ||
+            allCauses.size() != 1 || allCauses[0]._class != 'hudson.model.Cause$UserIdCause' ||
+            allCauses[0].userId != config.binding105Approver) {
+            error('#105 requires its fixed admission, one authorized user and one exact observation or review input')
+        }
+        committed105Author = allCauses[0].userId.toString()
+    } else if (bindingRepair) {
         def allCauses = currentBuild.getBuildCauses()
         if (!(repairCoordinator ==~ /[1-9][0-9]{0,8}/) || !(repairOwner ==~ /[1-9][0-9]{0,8}/) ||
             !repairPins || repairPins.size() > 4096 || rebuilding || requestedBuild || requestedCommit ||
@@ -118,6 +136,13 @@ def call(Map config = [:]) {
                  'release-deploy.py', 'release-app-binding.py', 'release-binding-repair.py'].each { name ->
                     writeFile file: "control/${name}", text: libraryResource("scripts/common/${name}")
                 }
+                if (committed105) {
+                    ['release-app-binding-committed.py', 'release-app-binding-committed-native.py',
+                     'release-app-binding-committed-job.py', 'release-app-binding-finalize.py',
+                     'release-app-binding-incident.py'].each { name ->
+                        writeFile file: "control/${name}", text: libraryResource("scripts/common/${name}")
+                    }
+                }
                 def commonStages = ['Checkout', 'Load Scripts', 'Detect', 'Early Capacity Admission', 'Secret Scan', 'Build', 'Test',
                     'Fast Contract Test', 'Dependency Scan', 'Package / Publish / Tag', 'Docker Build',
                     'Image Scan', 'Harbor Push', 'Harbor Vulnerability Report', 'Smoke Test',
@@ -137,13 +162,13 @@ def call(Map config = [:]) {
                         required_package_graphs: ['linux-arm64-nodynamic-tests',
                             'linux-arm64-devseed-nodynamic-tests', 'linux-arm64-nodynamic-server'],
                         require_no_govuln_affected_package_finding: true]],
-                    max_exception_seconds: 900, approvers: config.approvers,
+                    max_exception_seconds: 900, approvers: committed105 ? [config.binding105Approver] : config.approvers,
                     revoked_approval_ids: config.revokedApprovalIds ?: []
                 ])
                 // Resolve every later credential before scanning or claiming a release.
                 // Existence alone is insufficient for Secret File credentials: a
                 // malformed XML import can bind successfully to an empty key file.
-                if (bindingRepair) {
+                if (bindingRepair || committed105) {
                     withCredentials([usernamePassword(credentialsId: config.jenkinsReadCredentials,
                             usernameVariable: 'JENKINS_API_USER', passwordVariable: 'JENKINS_API_TOKEN')]) {
                         withEnv(["RELEASE_JENKINS_URL=${config.jenkinsApiUrl}", "RELEASE_DEPLOY_LABEL=${config.deploymentNodeLabel}", "RELEASE_LIBRARY_REVISION=${config.libraryRevision}"]) {
@@ -172,6 +197,49 @@ def call(Map config = [:]) {
                         }
                     }
                 }
+            }
+
+            if (committed105) {
+                writeFile file: 'binding-105-review.json', text: observe105 ? JsonOutput.toJson([intent: 'observe']) : review105
+                withEnv(["COMMIT_AUTHOR=${committed105Author}", "COMMIT_LIBRARY=${config.libraryRevision}",
+                         "COMMIT_DRIVER_SHA=${config.binding105DriverSha256}", "RELEASE_JENKINS_URL=${config.jenkinsApiUrl}",
+                         'PYTHONDONTWRITEBYTECODE=1']) {
+                    stage('Authorize Exact #105 Owner Handoff') {
+                        withCredentials([usernamePassword(credentialsId: config.jenkinsReadCredentials,
+                                usernameVariable: 'JENKINS_API_USER', passwordVariable: 'JENKINS_API_TOKEN'),
+                                file(credentialsId: config.receiptKeyCredentials, variable: 'RECEIPT_KEY_FILE')]) {
+                            sh '''python3 control/release-app-binding-committed-job.py collect --policy control/policy.json \
+    --key-file "$RECEIPT_KEY_FILE" --jenkins-url "$RELEASE_JENKINS_URL" \
+    --library-revision "$COMMIT_LIBRARY" --driver-sha256 "$COMMIT_DRIVER_SHA" \
+    --job "$JOB_NAME" --current-build "$BUILD_NUMBER" --author "$COMMIT_AUTHOR" \
+    --review binding-105-review.json --output deployment-request.json --history-output binding-105-history.json'''
+                        }
+                        archiveArtifacts artifacts: 'binding-105-review.json,binding-105-history.json,deployment-request.json', allowEmptyArchive: false
+                    }
+                    stage('Exact #105 Managed Owner Handoff') {
+                        def continued = build(job: config.deploymentJob, wait: true, propagate: false, parameters: [
+                            text(name: 'SIGNED_RELEASE_REQUEST', value: readFile('deployment-request.json')),
+                            text(name: 'APP_BINDING_105_HISTORY', value: readFile('binding-105-history.json'))
+                        ])
+                        if (continued.result != 'SUCCESS') {
+                            error("#105 owner build #${continued.number} failed; preserve its receipt and pending evidence")
+                        }
+                        withEnv(["COMMIT_OWNER_BUILD=${continued.number}"]) {
+                            withCredentials([usernamePassword(credentialsId: config.jenkinsReadCredentials,
+                                    usernameVariable: 'JENKINS_API_USER', passwordVariable: 'JENKINS_API_TOKEN'),
+                                    file(credentialsId: config.receiptKeyCredentials, variable: 'RECEIPT_KEY_FILE')]) {
+                                sh '''python3 control/release-app-binding-committed-job.py verify-owner --policy control/policy.json \
+    --key-file "$RECEIPT_KEY_FILE" --jenkins-url "$RELEASE_JENKINS_URL" \
+    --library-revision "$COMMIT_LIBRARY" --driver-sha256 "$COMMIT_DRIVER_SHA" \
+    --coordinator-build "$BUILD_NUMBER" --owner-build "$COMMIT_OWNER_BUILD" \
+    --request deployment-request.json --output binding-105-owner-receipt.json'''
+                            }
+                        }
+                        archiveArtifacts artifacts: 'binding-105-owner-receipt.json', allowEmptyArchive: false
+                        currentBuild.description = "#105 App binding ${observe105 ? 'observation' : 'finalization'}; owner #${continued.number}"
+                    }
+                }
+                return
             }
 
             if (bindingRepair) {
@@ -525,7 +593,11 @@ python3 control/release-promotion.py handoff --promotion promotion.json --finali
                 // Preserve only release evidence, never source checkouts, scanner
                 // caches or credential files. If archival fails, retain the
                 // workspace for diagnosis instead of destroying the only copy.
-                archiveArtifacts artifacts: 'binding-repair-pins.json,control/policy.json,scanner-db-receipt.json,develop/identity.json,prod/identity.json,develop/review.json,prod/review.json,develop/revalidated-review.json,prod/revalidated-review.json,develop/approval-request-review.json,prod/approval-request-review.json,develop/approval-request-evidence/**,prod/approval-request-evidence/**,develop/approval.json,prod/approval.json,develop/evidence/*.json,develop/evidence/*.jsonl,prod/evidence/*.json,prod/evidence/*.jsonl,develop/evidence/.pipeline/candidate*,prod/evidence/.pipeline/candidate*,develop/evidence/.pipeline/candidate-stages/*,prod/evidence/.pipeline/candidate-stages/*,develop/evidence/reports/junit/*,prod/evidence/reports/junit/*,promotion.json,finalization.json,deployment-request.json,prod/source/.pipeline/release-manifest.env,recovery/**,published/**', allowEmptyArchive: true
+                if (committed105) {
+                    archiveArtifacts artifacts: 'binding-105-review.json,binding-105-history.json,binding-105-owner-receipt.json,deployment-request.json', allowEmptyArchive: true
+                } else {
+                    archiveArtifacts artifacts: 'binding-repair-pins.json,control/policy.json,scanner-db-receipt.json,develop/identity.json,prod/identity.json,develop/review.json,prod/review.json,develop/revalidated-review.json,prod/revalidated-review.json,develop/approval-request-review.json,prod/approval-request-review.json,develop/approval-request-evidence/**,prod/approval-request-evidence/**,develop/approval.json,prod/approval.json,develop/evidence/*.json,develop/evidence/*.jsonl,prod/evidence/*.json,prod/evidence/*.jsonl,develop/evidence/.pipeline/candidate*,prod/evidence/.pipeline/candidate*,develop/evidence/.pipeline/candidate-stages/*,prod/evidence/.pipeline/candidate-stages/*,develop/evidence/reports/junit/*,prod/evidence/reports/junit/*,promotion.json,finalization.json,deployment-request.json,prod/source/.pipeline/release-manifest.env,recovery/**,published/**', allowEmptyArchive: true
+                }
                 // This dir is scoped to this exact build, not the agent root,
                 // persistent dependency cache, release state or runtime data.
                 deleteDir()

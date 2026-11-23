@@ -49,6 +49,7 @@ CONFIGS = {
 }
 LOCKS = ("prod", "owner-upgrade", "consumer-helper-upgrade", "resources")
 KIND = "app-binding-105-committed-continuation/v1"
+OBSERVE = KIND + "/observe"
 
 
 def digest(raw):
@@ -148,12 +149,14 @@ def coordinator_request(*, job, build, author, approvers, admitted, scope, faile
             and isinstance(author, str) and author.strip() == author and author and author in approvers,
             "fixed coordinator build and authorized incident operator required")
     historical(failed_raw, original_raw, key)
-    check_scope(scope)
+    if scope is not None:
+        check_scope(scope)
     return control.sign({
-        "kind": KIND, "owner_job": OWNER, "coordinator_job": job, "coordinator_build": build,
+        "kind": OBSERVE if scope is None else KIND, "owner_job": OWNER, "coordinator_job": job, "coordinator_build": build,
         "failed_owner_build": 105, "original_owner_build": 103, "failed_sha256": FAILED_SHA,
         "original_sha256": ORIGINAL_SHA, "library_revision": admitted.library_revision,
-        "driver_sha256": admitted.driver_sha256, "author": author, "scope_sha256": digest_json(scope),
+        "driver_sha256": admitted.driver_sha256, "author": author,
+        "scope_sha256": None if scope is None else digest_json(scope),
         "created_at": now.isoformat(), "expires_at": (now + timedelta(minutes=5)).isoformat(),
     }, key)
 
@@ -164,6 +167,72 @@ def check_ready(proof):
             and proof.uid == 501 and proof.executable == OWNER_PATH and proof.binary_sha256 == OWNER_BINARY
             and proof.listener_pid == proof.pid and proof.owns_pinned_journal is True,
             "exact admitted native owner generation, listener or journal is unconfirmed")
+
+
+def request_identity(request, *, admitted, approvers, upstream_build, key, now):
+    check_admission(admitted)
+    grant = signed_payload(request, key)
+    kind, scope_hash = grant.get("kind"), grant.get("scope_sha256")
+    require(type(upstream_build) is int and upstream_build > 238
+            and isinstance(grant.get("author"), str) and grant["author"] in approvers
+            and ((kind == KIND and hex_digest(scope_hash)) or (kind == OBSERVE and scope_hash is None)),
+            "fixed owner and trusted coordinator provenance required")
+    issued, expires = gate.timestamp(grant["created_at"]), gate.timestamp(grant["expires_at"])
+    require(grant == {
+        "kind": kind, "owner_job": OWNER, "coordinator_job": COORDINATOR, "coordinator_build": upstream_build,
+        "failed_owner_build": 105, "original_owner_build": 103, "failed_sha256": FAILED_SHA,
+        "original_sha256": ORIGINAL_SHA, "library_revision": admitted.library_revision,
+        "driver_sha256": admitted.driver_sha256, "author": grant["author"], "scope_sha256": grant["scope_sha256"],
+        "created_at": grant["created_at"], "expires_at": grant["expires_at"],
+    } and issued <= now < expires <= issued + timedelta(minutes=5), "wrong or expired fixed continuation grant")
+    return grant
+
+
+def owner_run(run):
+    require(isinstance(run, OwnerRun) and run.job == OWNER and type(run.build) is int and run.build > 105
+            and run.upstream_job == COORDINATOR and type(run.upstream_build) is int and run.upstream_build > 238,
+            "fixed owner and trusted coordinator provenance required")
+
+
+def check_stored_archives(state, failed_raw, original_raw):
+    for commit, raw in ((FAILED_COMMIT, failed_raw), (ORIGINAL_COMMIT, original_raw)):
+        require(state.exists(commit) and gate.canonical(state.read(commit)) == gate.canonical(json.loads(raw)),
+                "persistent #105 or #103 owner record differs from the exact archive")
+
+
+def claim_key():
+    return digest_json([KIND, TRANSACTION, FAILED_SHA])[:40]
+
+
+def owner_observe(request, *, run, admitted, approvers, native, state, failed_raw, original_raw, key, clock):
+    """Return a signed reviewed scope from the fixed native owner without consuming anything."""
+    owner_run(run)
+    grant = request_identity(request, admitted=admitted, approvers=approvers,
+                             upstream_build=run.upstream_build, key=key, now=clock())
+    require(grant["kind"] == OBSERVE and native is not None and native.registration() == admitted,
+            "fixed native observation is not installed or authorized")
+    historical(failed_raw, original_raw, key)
+    lifecycle = native.lifecycle()
+    require(isinstance(lifecycle, str) and bool(lifecycle), "existing prod.lock must be retained")
+    with state.lock(create_missing=False), native.hold_remaining():
+        check_stored_archives(state, failed_raw, original_raw)
+        lease, scope = native.lease(), native.scope()
+        check_scope(scope)
+        require(isinstance(lease, Lease) and bool(lease.identity) and lease.locks == LOCKS
+                and native.pending() == PENDING_SHA and native.active_fences() == scope["fences"]
+                and native.scope() == scope and native.lifecycle() == lifecycle
+                and native.registration() == admitted and native.lease() == lease,
+                "committed binding observation changed before review")
+        finished = clock()
+        request_identity(request, admitted=admitted, approvers=approvers,
+                         upstream_build=run.upstream_build, key=key, now=finished)
+        return control.sign({
+            "kind": OBSERVE + "/receipt", "status": "OBSERVED", "transaction": TRANSACTION,
+            "failed_owner_build": 105, "owner_build": run.build, "coordinator_build": run.upstream_build,
+            "request_sha256": digest_json(request), "scope_sha256": digest_json(scope), "scope": scope,
+            "library_revision": admitted.library_revision, "driver_sha256": admitted.driver_sha256,
+            "author": grant["author"], "finished_at": finished.isoformat(),
+        }, key)
 
 
 def owner_finish(request, *, run, admitted, approvers, native, state, failed_raw, original_raw, key, clock):
@@ -178,19 +247,11 @@ def owner_finish(request, *, run, admitted, approvers, native, state, failed_raw
     check_admission(admitted)
     require(native is not None and native.registration() == admitted,
             "fixed native owner continuation is not installed")
-    grant = signed_payload(request, key)
-    require(isinstance(run, OwnerRun) and run.job == OWNER and type(run.build) is int and run.build > 105
-            and run.upstream_job == COORDINATOR and type(run.upstream_build) is int and run.upstream_build > 238
-            and isinstance(grant.get("author"), str) and grant["author"] in approvers
-            and hex_digest(grant.get("scope_sha256")), "fixed owner and trusted coordinator provenance required")
+    owner_run(run)
+    grant = request_identity(request, admitted=admitted, approvers=approvers,
+                             upstream_build=run.upstream_build, key=key, now=clock())
+    require(grant["kind"] == KIND, "mutation requires the reviewed committed continuation grant")
     issued, expires = gate.timestamp(grant["created_at"]), gate.timestamp(grant["expires_at"])
-    require(grant == {
-        "kind": KIND, "owner_job": OWNER, "coordinator_job": COORDINATOR, "coordinator_build": run.upstream_build,
-        "failed_owner_build": 105, "original_owner_build": 103, "failed_sha256": FAILED_SHA,
-        "original_sha256": ORIGINAL_SHA, "library_revision": admitted.library_revision,
-        "driver_sha256": admitted.driver_sha256, "author": grant["author"], "scope_sha256": grant["scope_sha256"],
-        "created_at": grant["created_at"], "expires_at": grant["expires_at"],
-    } and issued < expires <= issued + timedelta(minutes=5), "wrong fixed continuation grant")
     historical(failed_raw, original_raw, key)
     lifecycle = native.lifecycle()
     require(isinstance(lifecycle, str) and bool(lifecycle), "existing prod.lock must be retained")
@@ -209,8 +270,9 @@ def owner_finish(request, *, run, admitted, approvers, native, state, failed_raw
         check_lease()
         return scope
 
-    claim = digest_json([KIND, TRANSACTION, FAILED_SHA])[:40]
+    claim = claim_key()
     with state.lock(create_missing=False), native.hold_remaining():
+        check_stored_archives(state, failed_raw, original_raw)
         lease = native.lease()
         require(isinstance(lease, Lease) and bool(lease.identity) and lease.locks == LOCKS,
                 "existing lifecycle and owner locks must be retained")
@@ -242,9 +304,13 @@ def owner_finish(request, *, run, admitted, approvers, native, state, failed_raw
             require(native.pending() is None and native.active_fences() == {} and native.ready_owner() == proof,
                     "committed binding release outcome unconfirmed")
             check_lease()
-            result = control.sign(dict(record, status="SUCCESS", owner_pid=proof.pid), key)
+            finished = clock()
+            require(issued <= finished < expires, "committed binding success arrived after authorization expired")
+            result = control.sign(dict(record, status="SUCCESS", owner_pid=proof.pid,
+                                       finished_at=finished.isoformat()), key)
             state.write(claim, result)
             return result
         except BaseException:
-            state.write(claim, control.sign(dict(record, status="FAILED", outcome="review_required"), key))
+            state.write(claim, control.sign(dict(record, status="FAILED", outcome="review_required",
+                                                 finished_at=clock().isoformat()), key))
             raise

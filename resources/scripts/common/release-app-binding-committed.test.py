@@ -96,6 +96,8 @@ class CommittedBindingTests(unittest.TestCase):
         self.root = Path(fixture.name).resolve()
         (self.root / "promotion.lock").touch(mode=0o600)
         self.state = entry.control.State(self.root)
+        self.state.write(entry.FAILED_COMMIT, json.loads(FAILED))
+        self.state.write(entry.ORIGINAL_COMMIT, json.loads(ORIGINAL))
         self.native = FixturePort()
         pins = patch.multiple(entry, FAILED_SHA=entry.digest(FAILED), ORIGINAL_SHA=entry.digest(ORIGINAL))
         pins.start()
@@ -115,7 +117,7 @@ class CommittedBindingTests(unittest.TestCase):
 
     def records(self):
         return [entry.signed_payload(json.loads(p.read_bytes()), KEY)
-                for p in self.root.glob("*.json")]
+                for p in self.root.glob("*.json") if p.stem not in {entry.FAILED_COMMIT, entry.ORIGINAL_COMMIT}]
 
     def test_exact_native_readiness_finalizes_and_new_coordinator_build_cannot_replay(self):
         result = entry.signed_payload(self.run_owner(), KEY)
@@ -144,7 +146,7 @@ class CommittedBindingTests(unittest.TestCase):
     def test_under_lock_drift_old_receipt_or_expiry_rejects_before_resume(self):
         with self.assertRaisesRegex(ValueError, "exact archived"):
             self.run_owner(failed_raw=FAILED + b" ")
-        with self.assertRaisesRegex(ValueError, "grant.*changed"):
+        with self.assertRaisesRegex(ValueError, "expired fixed continuation grant"):
             self.run_owner(clock=lambda: NOW + timedelta(minutes=5))
         self.native.marker = "0" * 64
         with self.assertRaisesRegex(ValueError, "original committed pending"):
