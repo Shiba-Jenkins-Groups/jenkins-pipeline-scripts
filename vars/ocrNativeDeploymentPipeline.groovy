@@ -72,7 +72,7 @@ def call(Object input = [:]) {
 set -euo pipefail
 export PYTHONDONTWRITEBYTECODE=1
 python3 -B - <<'PY'
-import hashlib, json, pathlib, subprocess
+import hashlib, json, pathlib, re, subprocess
 request=json.loads(pathlib.Path('request.json').read_text())
 source=pathlib.Path('source').resolve()
 assert subprocess.check_output(['git','rev-parse','HEAD'],cwd=source,text=True).strip()==request['source_commit']
@@ -88,7 +88,8 @@ subprocess.run(command,check=True,timeout=960)
 receipt=json.loads(pathlib.Path('runtime-receipt.json').read_text())
 assert receipt['schema']=='ocr-native-deployment-v1' and receipt['state']=='succeeded'
 assert receipt['owner_reactivated'] is True
-if plan.get('schema')=='managed-recognition-runtime-binding-refresh/v1':
+schema=plan.get('schema')
+if schema in {'managed-recognition-runtime-binding-refresh/v1','managed-recognition-runtime-binding-refresh/v2'}:
     assert receipt['route']=='recognition_runtime_binding' and receipt['ocr_replacement_submitted'] is False
     refresh=receipt['recognition_refresh']
     assert refresh['state'] in {'binding_committed', 'binding_committed_unready'}
@@ -96,6 +97,17 @@ if plan.get('schema')=='managed-recognition-runtime-binding-refresh/v1':
     assert refresh['platform_mutated'] is False and refresh['maintenance_released'] is True
     assert receipt['binding_checkpoint']['state']==refresh['state']
     assert receipt['operation_id']==refresh['operation_id']==plan['operation_id']
+    if schema=='managed-recognition-runtime-binding-refresh/v2':
+        assert plan['schema_version']==2 and refresh['state']=='binding_committed'
+        assert receipt['recognition_status']['contract_health']=='ready'
+        assert len(receipt['restart_continuity_validations'])==2
+        for validation in receipt['restart_continuity_validations']:
+            assert validation['operation_id']==plan['operation_id']
+            assert validation['restart_continuity']==plan['restart_continuity']
+            assert validation['native_ci_receipt']=={'path':request['ci_receipt'],'sha256':request['ci_receipt_sha256']}
+        observations=receipt['recognition_refresh_continuity_observations']
+        assert observations['path']==str(pathlib.Path(refresh['receipt_directory'])/'continuity-observations.json')
+        assert re.fullmatch(r'[0-9a-f]{64}',observations['sha256'])
 else:
     assert receipt['replacement']['state']=='succeeded'
 assert receipt['plan_sha256']==request['plan_sha256'] and receipt['ci_receipt_sha256']==request['ci_receipt_sha256']
