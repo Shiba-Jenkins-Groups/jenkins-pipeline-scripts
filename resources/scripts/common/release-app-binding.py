@@ -30,6 +30,7 @@ DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 SERVICES = {"app", "minio", "notify", "ocrsvc", "ollama", "omlx", "recognition"}
 CONSUMER = "app-lifecycle-prod"
 LABEL = "com.shiba.service-control.prod"
+XPCPROXY = "/usr/libexec/xpcproxy"
 MAX_FILE = 128 << 20
 
 
@@ -167,6 +168,21 @@ class NativeIO:
         require(result.returncode == 0, "native_binding_command_failed")
         return result.stdout
 
+    @staticmethod
+    def _matches_bootstrap_job(transaction, text, indent, pid):
+        uid = os.getuid()
+        lines = text.splitlines()
+        if (uid <= 0 or transaction.domain != f"gui/{uid}/{LABEL}" or not lines or not indent
+                or lines[0] != transaction.domain + " = {"):
+            return False
+        fields = {"pid": str(pid), "type": "LaunchAgent", "path": str(transaction.plist),
+                  "program": transaction.config["executable"]}
+        for key, value in fields.items():
+            prefix = f"{indent}{key} = "
+            if [line for line in lines[1:] if line.startswith(prefix)] != [prefix + value]:
+                return False
+        return True
+
     def owner(self, transaction, *, deadline=None, timeout_code="owner_pause_unconfirmed"):
         require(sys.platform == "darwin", "native_owner_requires_macos")
 
@@ -195,10 +211,10 @@ class NativeIO:
                     "owner_launchd_observation_unknown")
             return None
         text = result.stdout.decode()
-        match = re.search(r"^\s*pid = ([0-9]+)$", text, re.M)
+        match = re.search(r"^([ \t]*)pid = ([0-9]+)$", text, re.M)
         if match is None:
             incomplete("owner_loaded_without_process", "loaded-without-process")
-        pid = int(match.group(1))
+        pid = int(match.group(2))
         observation["pid"] = pid
         library = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
         library.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
@@ -226,13 +242,15 @@ class NativeIO:
         observation.update(uid=uid, uid_classification="same-user" if uid == os.getuid() else "foreign-user",
                            uid_start=process)
         if uid != os.getuid():
+            if uid == 0 and executable == XPCPROXY and self._matches_bootstrap_job(transaction, text, match.group(1), pid):
+                incomplete("foreign_owner_process", "bound-root-launcher")
             incomplete("foreign_owner_process", "foreign-user")
         if executable != transaction.config["executable"]:
             # Apple's historical launchd source uses this exec trampoline:
             # https://github.com/apple-oss-distributions/launchd/blob/main/src/core.c
             # It is only an unverified, bounded post-bootstrap observation, not
             # evidence that this host or a previous incident used that path.
-            classification = "system-launcher" if executable == "/usr/libexec/xpcproxy" else "foreign-executable"
+            classification = "system-launcher" if executable == XPCPROXY else "foreign-executable"
             incomplete("foreign_owner_process", classification)
         identity = {"pid": pid, "kernel_path": executable, "uid_start": process,
                     "binary_sha256": sha(read(Path(executable), 0o700))}
@@ -362,6 +380,8 @@ class NativeIO:
 
     def resume(self, transaction):
         require(not getattr(transaction, "_resume_bootstrap_submitted", False), "owner_resume_once_claim_exists")
+        expected_uid = os.getuid()
+        require(expected_uid > 0, "owner_resume_identity_mismatch")
         try:
             current = self.owner(transaction)
         except BaseException as error:
@@ -383,7 +403,7 @@ class NativeIO:
             raise
         transaction._resume_bootstrap_submitted = True
         try:
-            self.command(["/bin/launchctl", "bootstrap", "gui/" + str(os.getuid()), str(transaction.plist)])
+            self.command(["/bin/launchctl", "bootstrap", "gui/" + str(expected_uid), str(transaction.plist)])
         except BaseException as error:
             outcome = str(error) if isinstance(error, BindingError) else type(error).__name__
             NativeIO._resume_observation(self, transaction, "bootstrap-requested", outcome, False, error=error)
@@ -391,15 +411,21 @@ class NativeIO:
         deadline = time.monotonic() + 15
         NativeIO._resume_observation(self, transaction, "bootstrap-acknowledged", "command-succeeded", True)
         pinned_pid, pinned_start = None, None
+        owner_seen = False
 
         def generation(observation):
             nonlocal pinned_pid, pinned_start
-            pid, start = observation.get("pid"), observation.get("uid_start")
+            pid, uid_start = observation.get("pid"), observation.get("uid_start")
             if pid is not None:
                 require(type(pid) is int and pid > 0 and pid != transaction.owner_before["pid"], "owner_resume_identity_mismatch")
                 require(pinned_pid is None or pinned_pid == pid, "owner_resume_generation_changed")
                 pinned_pid = pid
-            if start is not None:
+            if uid_start is not None:
+                fields = uid_start.split(maxsplit=1)
+                require(len(fields) == 2 and fields[0].isdigit(), "owner_resume_identity_mismatch")
+                # The launcher drops privileges during exec. The kernel start
+                # time belongs to the PID generation, independently of UID.
+                start = fields[1]
                 require(pinned_start is None or pinned_start == start, "owner_resume_generation_changed")
                 pinned_start = start
 
@@ -415,8 +441,13 @@ class NativeIO:
                     allowed = allowed or (classification == "process-unavailable"
                                            and observation.get("kernel_path") == transaction.config["executable"])
                     allowed = allowed or (classification == "system-launcher"
-                                           and observation.get("uid") == os.getuid()
-                                           and observation.get("kernel_path") == "/usr/libexec/xpcproxy")
+                                           and observation.get("uid") == expected_uid
+                                           and observation.get("kernel_path") == XPCPROXY)
+                    # The root trampoline can only delay the acknowledged
+                    # bootstrap. It never proves owner identity or readiness.
+                    allowed = allowed or (not owner_seen and classification == "bound-root-launcher"
+                                           and observation.get("uid") == 0
+                                           and observation.get("kernel_path") == XPCPROXY)
                     if not allowed:
                         raise
                     generation(observation)
@@ -429,7 +460,8 @@ class NativeIO:
                     generation(current)
                     require(current["binary_sha256"] == transaction.owner_before["binary_sha256"]
                             and current["kernel_path"] == transaction.config["executable"]
-                            and current["uid_start"].split(maxsplit=1)[0] == str(os.getuid()), "owner_resume_identity_mismatch")
+                            and current["uid_start"].split(maxsplit=1)[0] == str(expected_uid), "owner_resume_identity_mismatch")
+                    owner_seen = True
                     if NativeIO._resume_ready(self, transaction, current, deadline):
                         NativeIO._resume_observation(self, transaction, "verification-observed", "listener-and-journal-held", True, current=current)
                         require(self.owner(transaction, deadline=deadline, timeout_code="owner_resume_unconfirmed") == current,
