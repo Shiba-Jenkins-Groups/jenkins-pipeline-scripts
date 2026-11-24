@@ -485,7 +485,22 @@ python3 control/release-rebuild.py handoff --root published --source prod/source
                 return
             }
 
-            verifyPhase('develop', sourceBuild, requestedCommit ?: null)
+            def developIdentity = verifyPhase('develop', sourceBuild, requestedCommit ?: null)
+            def developVersion = fileExists('develop/source/VERSION') ? readFile('develop/source/VERSION').trim() : ''
+            def ocrOwnerSource = '40dc79be8cb72a9480b718663294d97a7487388c'
+            def ocrOwnerVersion = '1.1.38'
+            def ocrOwnerApprover = config.ocrOwner138Approver
+            def ocrOwnerHandoff = config.containsKey('ocrOwner138Approver') ||
+                developIdentity.commit == ocrOwnerSource || developVersion == ocrOwnerVersion
+            if (ocrOwnerHandoff) {
+                if (developIdentity.commit != ocrOwnerSource || developVersion != ocrOwnerVersion) {
+                    error('The OCR owner handoff accepts only the pinned v1.1.38 develop source')
+                }
+                if (!(ocrOwnerApprover instanceof String) || !ocrOwnerApprover || ocrOwnerApprover != ocrOwnerApprover.trim() ||
+                    !config.approvers.contains(ocrOwnerApprover)) {
+                    error('The v1.1.38 OCR owner handoff requires its authorized approver')
+                }
+            }
             if (!requestedBuild) {
                 stage('Deduplicate Release Source') {
                     withCredentials([
@@ -566,6 +581,57 @@ python3 control/release-finalization.py --source prod/source --state-directory "
               } finally {
                 archiveArtifacts artifacts: 'finalization.json,prod/source/.pipeline/release-manifest.env', allowEmptyArchive: true
               }
+            }
+            // This release needs the finalized image to repair the resident owner
+            // before the existing deployment owner can verify its dependencies.
+            if (ocrOwnerHandoff || promotion.payload.source_commit == ocrOwnerSource ||
+                promotion.payload.version == ocrOwnerVersion) {
+                stage('Recover OCR Owner Before Deployment') {
+                    def finalized = parseReleaseJson(readFile('finalization.json'))
+                    def candidate = finalized.payload
+                    def repository = "localhost:9290/${product}/prod/${ocrOwnerVersion}"
+                    if (!ocrOwnerHandoff || promotion.payload.source_commit != ocrOwnerSource ||
+                        promotion.payload.version != ocrOwnerVersion ||
+                        candidate?.kind != 'finalization' || candidate.status != 'SUCCESS' || candidate.product != product ||
+                        candidate.version != ocrOwnerVersion || !(candidate.commit ==~ /[0-9a-f]{40}/) ||
+                        candidate.commit != promotion.payload.merge_commit || !(candidate.digest ==~ /sha256:[0-9a-f]{64}/) ||
+                        candidate.manifest?.RELEASE_TAG != "v${ocrOwnerVersion}" || candidate.manifest.GIT_COMMIT != candidate.commit ||
+                        candidate.manifest.IMAGE_DIGEST != candidate.digest || candidate.manifest.IMAGE_REF != "${repository}:${prodRun.number}") {
+                        error('The OCR owner handoff requires the exact finalized v1.1.38 candidate')
+                    }
+                    def pins = [schema: 'ocr-owner-138-handoff/v1', version: ocrOwnerVersion, source_commit: ocrOwnerSource,
+                        commit: candidate.commit, digest: candidate.digest, coordinator_build: env.BUILD_NUMBER as Integer,
+                        prod_build: prodRun.number as Integer, image: "${repository}@${candidate.digest}".toString()]
+                    writeFile file: 'ocr-owner-138-handoff.json', text: JsonOutput.toJson(pins)
+                    archiveArtifacts artifacts: 'ocr-owner-138-handoff.json', allowEmptyArchive: false
+                    def response
+                    timeout(time: 30, unit: 'MINUTES') {
+                        response = input(id: 'ocr-owner-138-ready', submitter: ocrOwnerApprover, submitterParameter: 'APPROVER',
+                            ok: 'Continue PROD deployment',
+                            message: 'Use the archived signed finalization and exact image to activate the resident owner. Submit the handoff fields plus owner.source_commit, owner.version, owner.manifest_sha256, owner.activated, and ready owner.ocrsvc and owner.recognition status snapshots.',
+                            parameters: [text(name: 'OWNER_RECEIPT', defaultValue: '', description: 'Exact handoff and installed owner readiness report')])
+                    }
+                    if (!(response instanceof Map) || response.APPROVER != ocrOwnerApprover ||
+                        !(response.OWNER_RECEIPT instanceof String) || !response.OWNER_RECEIPT.trim() ||
+                        response.OWNER_RECEIPT.size() > 16384) {
+                        error('Invalid v1.1.38 OCR owner approver or receipt')
+                    }
+                    def report = parseReleaseJson(response.OWNER_RECEIPT)
+                    def owner = report instanceof Map ? report.owner : null
+                    if (!(owner instanceof Map) || !pins.every { key, value -> report[key] == value } ||
+                        owner.source_commit != candidate.commit || owner.version != candidate.version || owner.activated != true ||
+                        !(owner.manifest_sha256 ==~ /[0-9a-f]{64}/) ||
+                        ![ocrsvc: 3, recognition: 5].every { name, revision ->
+                            def snapshot = owner[name]
+                            snapshot instanceof Map && snapshot.id == name && snapshot.environment == 'prod' &&
+                                snapshot.registry_revision == revision && snapshot.desired_state == 'running' &&
+                                snapshot.process_state == 'running' && snapshot.contract_health == 'ready'
+                        }) {
+                        error('The installed owner receipt does not match v1.1.38 or its ready PROD dependencies')
+                    }
+                    writeFile file: 'ocr-owner-138-receipt.json', text: JsonOutput.toJson(report + [approver: response.APPROVER])
+                    archiveArtifacts artifacts: 'ocr-owner-138-receipt.json', allowEmptyArchive: false
+                }
             }
             stage('Authorize Deployment Handoff') {
                 withCredentials([file(credentialsId: config.approvalKeyCredentials, variable: 'APPROVAL_KEY_FILE'),
