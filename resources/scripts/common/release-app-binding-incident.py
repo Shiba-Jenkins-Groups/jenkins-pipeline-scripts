@@ -56,16 +56,16 @@ def checked(path, expected):
     return parse(raw), identity
 
 
-def source_identity(revision):
+def source_identity(revision, files=SOURCE_FILES):
     need(B.COMMIT.fullmatch(revision or ""), "exact_source_revision_required")
     directory = Path(__file__).resolve().parent
     root = subprocess.check_output(["git", "-C", str(directory), "rev-parse", "--show-toplevel"], text=True).strip()
     head = subprocess.check_output(["git", "-C", root, "rev-parse", "HEAD"], text=True).strip()
-    paths = [str((directory / name).relative_to(root)) for name in SOURCE_FILES]
+    paths = [str((directory / name).relative_to(root)) for name in files]
     tracked = subprocess.check_output(["git", "-C", root, "ls-files", "--", *paths], text=True).splitlines()
     clean = subprocess.run(["git", "-C", root, "diff", "--quiet", "HEAD", "--", *paths], check=False)
     need(head == revision and set(tracked) == set(paths) and clean.returncode == 0, "reviewed_incident_source_changed")
-    return {"revision": revision, "files": {name: B.sha((directory / name).read_bytes()) for name in SOURCE_FILES}}
+    return {"revision": revision, "files": {name: B.sha((directory / name).read_bytes()) for name in files}}
 
 
 class IncidentIO(B.NativeIO):
@@ -94,6 +94,9 @@ class IncidentIO(B.NativeIO):
 
 
 class Incident:
+    claim_name = CLAIM
+    backup_files = ORIGINAL_FILES
+
     def __init__(self, metadata_path, metadata_sha, runtime, transaction_id, io):
         need(TX.fullmatch(transaction_id or ""), "exact_original_transaction_required")
         self.metadata_path, self.metadata_sha = Path(metadata_path), metadata_sha
@@ -107,8 +110,9 @@ class Incident:
         self.backup = self.root / "prod" / ("app-binding-" + self.id)
         need(self.metadata.get("backup") == str(self.backup), "foreign_incident_backup")
         B.directory(self.backup)
-        self.claim = self.backup / CLAIM
+        self.claim = self.backup / self.claim_name
         self.held, self.pins, self.released = {}, {}, []
+        self.archived_inputs = {}
         self.archived = self.claimed = self.resume_submitted = self.resumed = False
         self.owner_after = None
         self.phase = "preflight"
@@ -176,7 +180,7 @@ class Incident:
         expected = {str(t.prefix(key).with_suffix(".pending")) for key in t.keys} - set(released)
         actual = {str(p) for p in t.resources.glob("*.pending")}
         need(actual == expected and not list(t.owner_directory.glob("*.lifecycle.pending"))
-             and not list((t.resources / "consumer-jobs").iterdir()), "incident_foreign_fence_or_job")
+             and set((t.resources / "consumer-jobs").iterdir()) == self.expected_consumer_jobs(), "incident_foreign_fence_or_job")
         for name in actual:
             raw, identity = pin(Path(name))
             need(raw == (self.id + "\n").encode(), "incident_foreign_resource_pending")
@@ -187,6 +191,40 @@ class Incident:
         raw, identity = pin(path)
         need(raw == self.pending_raw and {k: v for k, v in identity.items() if k != "path"} ==
              {k: v for k, v in self.pins[str(t.pending)].items() if k != "path"}, "incident_installation_marker_changed")
+
+    def expected_consumer_jobs(self):
+        return set()
+
+    def verify_phase(self, authorized):
+        failures = list(self.backup.glob("failure-*.json"))
+        need(len(failures) == 1 and re.fullmatch(r"failure-[0-9a-f]{8}\.json", failures[0].name), "incident_exact_failure_required")
+        failure = parse(self.remember(failures[0]))
+        need(failure == self.metadata["failure"] and failure.get("transaction_id") == self.id and failure.get("backup") == str(self.backup)
+             and failure.get("kind") == "active-app-binding" and failure.get("status") == "pending-preserved"
+             and failure.get("phase") == "authorized" and failure.get("owner_pause_requested") is True
+             and failure.get("owner_paused") is False and failure.get("owner_state") == "unconfirmed"
+             and failure.get("code") == "owner_kernel_path_unavailable" and failure.get("automatic_retry") is False
+             and failure.get("automatic_rollback") is False, "incident_predeploy_failure_required")
+        need({p.name for p in self.backup.iterdir()} == self.backup_files | {"resource-states", failures[0].name},
+             "incident_progress_or_extra_evidence_present")
+
+    def verify_paused_journal(self):
+        before = B.read(self.backup / "operations-before-pause.jsonl")
+        need(self.journal_raw.startswith(before), "incident_journal_prefix_changed")
+        B.journal_idle(before); B.journal_idle(self.journal_raw)
+
+    def archive_input(self, path, archive):
+        expected = self.pins[str(path)]
+        os.link(path, archive, follow_symlinks=False)
+        need(pin(archive, expected["mode"])[1] == {**expected, "path": str(archive)}, "incident_archived_input_changed")
+        B.sync(archive.parent)
+        need(pin(path, expected["mode"])[1] == expected, "incident_reviewed_input_identity_changed")
+        path.unlink()
+        self.archived_inputs[str(path)] = archive
+        B.sync(path.parent)
+
+    def after_owner_verified(self):
+        pass
 
     def open(self):
         need(not os.path.lexists(self.claim), "incident_once_claim_exists_no_retry")
@@ -230,7 +268,7 @@ class Incident:
         plist = plistlib.loads(B.read(t.plist))
         need(plist["Label"] == B.LABEL and plist["ProgramArguments"] == [config["executable"], "--config", str(t.owner_directory / "owner.json")]
              and plist["RunAtLoad"] is True and plist["KeepAlive"] is True, "incident_launchagent_contract_changed")
-        need(set(self.metadata["backup_files"]) == ORIGINAL_FILES, "incident_backup_contract_changed")
+        need(set(self.metadata["backup_files"]) == self.backup_files, "incident_backup_contract_changed")
         for name, expected in self.metadata["backup_files"].items():
             raw = self.remember(self.backup / name)
             need(B.sha(raw) == expected["sha256"] and len(raw) == expected["bytes"], "incident_original_backup_changed")
@@ -238,17 +276,6 @@ class Incident:
         authorized = parse(B.read(self.backup / "authorized.json"))
         need(authorized.get("transaction_id") == self.id and all(authorized.get(k) == v for k, v in self.metadata["authorized"].items()),
              "incident_authorized_record_changed")
-        failures = list(self.backup.glob("failure-*.json"))
-        need(len(failures) == 1 and re.fullmatch(r"failure-[0-9a-f]{8}\.json", failures[0].name), "incident_exact_failure_required")
-        failure = parse(self.remember(failures[0]))
-        need(failure == self.metadata["failure"] and failure.get("transaction_id") == self.id and failure.get("backup") == str(self.backup)
-             and failure.get("kind") == "active-app-binding" and failure.get("status") == "pending-preserved"
-             and failure.get("phase") == "authorized" and failure.get("owner_pause_requested") is True
-             and failure.get("owner_paused") is False and failure.get("owner_state") == "unconfirmed"
-             and failure.get("code") == "owner_kernel_path_unavailable" and failure.get("automatic_retry") is False
-             and failure.get("automatic_rollback") is False, "incident_predeploy_failure_required")
-        need({p.name for p in self.backup.iterdir()} == ORIGINAL_FILES | {"resource-states", failures[0].name},
-             "incident_progress_or_extra_evidence_present")
         app = config["services"]["app"]
         need(app["platform"] == "docker_container" and app["actions"] == ["status"] and len(app["docker"]["targets"]) == 1
              and app["lifecycle_lock"] == str(self.runtime / "data/locks/prod.lock")
@@ -280,12 +307,11 @@ class Incident:
              and pending.get("old_app_key") == t.old_key and B.SHA.fullmatch(pending.get("request_sha256", "")),
              "incident_exact_installation_marker_required")
         for key in t.keys: self.remember(t.prefix(key).with_suffix(".pending"))
+        self.verify_phase(authorized)
         self.check_markers()
         self.journal_fd = self.hold(t.journal)
         self.journal_raw = self.remember(t.journal)
-        before = B.read(self.backup / "operations-before-pause.jsonl")
-        need(self.journal_raw.startswith(before), "incident_journal_prefix_changed")
-        B.journal_idle(before); B.journal_idle(self.journal_raw)
+        self.verify_paused_journal()
         t.owner_before = copy.deepcopy(authorized["owner_before"])
         need(type(t.owner_before.get("pid")) is int and t.owner_before["pid"] > 0
              and t.owner_before.get("kernel_path") == config["executable"]
@@ -306,10 +332,10 @@ class Incident:
     def recheck(self, *, resumed=False):
         self.check_locks()
         for name, expected in self.pins.items():
-            if name == str(self.transaction.pending) and self.archived: continue
             if name == str(self.transaction.journal) and resumed: continue
             if name in self.released: continue
-            need(pin(Path(name), expected["mode"])[1] == expected, "incident_reviewed_input_identity_changed")
+            path = self.archived_inputs.get(name, Path(name))
+            need(pin(path, expected["mode"])[1] == {**expected, "path": str(path)}, "incident_reviewed_input_identity_changed")
         need(checked(self.metadata_path, self.metadata_sha)[1] == self.metadata_pin, "incident_metadata_identity_changed")
         need(self.transaction.source_pins() == self.metadata["authorized"]["pins"], "incident_protected_source_changed")
         need(self.inventory_states() == self.state_inventory, "incident_state_inventory_changed")
@@ -349,9 +375,10 @@ class Incident:
         self.held.clear()
 
 
-def collect(metadata, expected_metadata_sha256, runtime, transaction_id, revision, *, io=None, verify_source=source_identity):
+def collect(metadata, expected_metadata_sha256, runtime, transaction_id, revision, *,
+            io=None, verify_source=source_identity, incident_factory=Incident):
     source = verify_source(revision)
-    incident = Incident(metadata, expected_metadata_sha256, runtime, transaction_id, io or IncidentIO())
+    incident = incident_factory(metadata, expected_metadata_sha256, runtime, transaction_id, io or IncidentIO())
     try:
         incident.open(); incident.recheck()
         return {"schema_version": 1, "kind": "app-binding-incident-collection", "source": source,
@@ -361,19 +388,19 @@ def collect(metadata, expected_metadata_sha256, runtime, transaction_id, revisio
         incident.close()
 
 
-def plan(collection_path, expected_collection_sha256, *, io=None, verify_source=source_identity, now=None):
+def plan(collection_path, expected_collection_sha256, *, io=None, verify_source=source_identity, incident_factory=Incident, now=None):
     value, identity = checked(Path(collection_path), expected_collection_sha256)
     need(value.get("schema_version") == 1 and value.get("kind") == "app-binding-incident-collection", "incident_collection_required")
     old = value["snapshot"]
     current = collect(old["metadata"]["path"], old["metadata"]["sha256"], old["runtime"], old["transaction_id"],
-                      value["source"]["revision"], io=io, verify_source=verify_source)
+                      value["source"]["revision"], io=io, verify_source=verify_source, incident_factory=incident_factory)
     need(current == value, "incident_collection_changed")
     now = time.time() if now is None else now
     return {"schema_version": 1, "kind": "app-binding-incident-plan", "created_at": now, "expires_at": now + 900,
             "collection": identity, "reviewed": value, "automatic_retry": False, "resume_limit": 1}
 
 
-def apply(plan_path, expected_plan_sha256, *, io=None, verify_source=source_identity, now=None):
+def apply(plan_path, expected_plan_sha256, *, io=None, verify_source=source_identity, incident_factory=Incident, now=None):
     value, plan_pin = checked(Path(plan_path), expected_plan_sha256)
     now = time.time() if now is None else now
     started = time.monotonic()
@@ -388,7 +415,7 @@ def apply(plan_path, expected_plan_sha256, *, io=None, verify_source=source_iden
     collection, identity = checked(Path(value["collection"]["path"]), value["collection"]["sha256"])
     need(identity == value["collection"] and collection == reviewed, "incident_reviewed_collection_changed")
     old = reviewed["snapshot"]
-    incident = Incident(old["metadata"]["path"], old["metadata"]["sha256"], old["runtime"], old["transaction_id"], io or IncidentIO())
+    incident = incident_factory(old["metadata"]["path"], old["metadata"]["sha256"], old["runtime"], old["transaction_id"], io or IncidentIO())
     try:
         incident.open(); incident.recheck()
         need(incident.snapshot() == old and pin(Path(plan_path))[1] == plan_pin, "incident_reviewed_plan_changed")
@@ -399,17 +426,10 @@ def apply(plan_path, expected_plan_sha256, *, io=None, verify_source=source_iden
         incident.recheck()
         valid_review()
         incident.phase = "archive-installation-marker"
-        archive = incident.claim / "owner-upgrade.pending.archived.json"
         # Exclusive link+unlink preserves the original inode and cannot replace
         # an existing archive. Recheck both names immediately before removal.
-        os.link(incident.transaction.pending, archive, follow_symlinks=False)
-        expected_marker = incident.pins[str(incident.transaction.pending)]
-        need({k: v for k, v in pin(archive)[1].items() if k != "path"} ==
-             {k: v for k, v in expected_marker.items() if k != "path"}, "incident_installation_marker_changed")
-        need(pin(incident.transaction.pending)[1] == expected_marker, "incident_installation_marker_changed")
-        incident.transaction.pending.unlink()
+        incident.archive_input(incident.transaction.pending, incident.claim / "owner-upgrade.pending.archived.json")
         incident.archived = True
-        B.sync(incident.transaction.owner_directory); B.sync(incident.claim)
         incident.recheck()
         # Startup must obtain its lifetime journal EX itself. Resource EX leases
         # and every resource pending marker remain held throughout bootstrap.
@@ -426,6 +446,7 @@ def apply(plan_path, expected_plan_sha256, *, io=None, verify_source=source_iden
              and after.get("uid_start", "").split(maxsplit=1)[0] == str(os.getuid()), "incident_resume_identity_changed")
         incident.resumed = True; incident.phase = "owner-verified"
         incident.recheck(resumed=True)
+        incident.after_owner_verified()
         release = sorted(str(incident.transaction.prefix(key).with_suffix(".pending")) for key in incident.transaction.keys)
         B.create(incident.claim / "release-intent.json", B.encoded({"transaction_id": incident.id,
                  "markers": {name: incident.pins[name] for name in release}, "owner_after": after}) + b"\n")
@@ -440,6 +461,7 @@ def apply(plan_path, expected_plan_sha256, *, io=None, verify_source=source_iden
                   "plan_sha256": expected_plan_sha256, "source_revision": reviewed["source"]["revision"],
                   "claim_path": str(incident.claim), "original_app": old["app"],
                   "installation_pending_archived": True, "resource_fences_released": release,
+                  "archived_inputs": {name: str(path) for name, path in incident.archived_inputs.items()},
                   "config_intent_unchanged": True, "checked_journal_prefix_preserved": True,
                   "automatic_retry": False, "automatic_rollback": False, "deployment_performed": False,
                   "startup_metadata_probes": "possible under unchanged original owner policy"}
@@ -451,7 +473,9 @@ def apply(plan_path, expected_plan_sha256, *, io=None, verify_source=source_iden
                   "plan_sha256": expected_plan_sha256, "source_revision": reviewed["source"]["revision"],
                   "claim_path": str(incident.claim), "original_app": old["app"],
                   "claim_owned": incident.claimed,
-                  "installation_pending_archived": incident.archived, "resume_submitted": incident.resume_submitted,
+                  "installation_pending_archived": str(incident.transaction.pending) in incident.archived_inputs if hasattr(incident, "transaction") else False,
+                  "archived_inputs": {name: str(path) for name, path in incident.archived_inputs.items()},
+                  "resume_submitted": incident.resume_submitted,
                   "owner_verified": incident.resumed, "resource_fences_released": incident.released,
                   "resource_fences_present": [], "resource_fences_unknown": [], "automatic_retry": False,
                   "automatic_rollback": False, "code": str(error) if isinstance(error, B.BindingError) else type(error).__name__}
