@@ -171,11 +171,15 @@ class Owner111Incident(I.Incident):
 
     def inspect_app(self):
         observed = super().inspect_app()
-        timestamp = control.gate.timestamp
+        started_at = observed["started_at"]
         need(observed["container_id"] == OLD_CONTAINER and observed["image_id"] == OLD_IMAGE
-             and observed["started_at"] == OLD_STARTED_AT and observed["restart_count"] == OLD_RESTART_COUNT
-             and timestamp(observed["started_at"]) < self.failed_started,
+             and started_at == OLD_STARTED_AT and observed["restart_count"] == OLD_RESTART_COUNT,
              "owner111_healthy_old_app_generation_required")
+        # Pin Docker's full timestamp above. For ordering against Jenkins UTC
+        # timestamps, use the microsecond precision supported by host Python 3.9.
+        seconds, fraction = started_at[:-1].split(".", maxsplit=1)
+        need(control.gate.timestamp(f"{seconds}.{fraction[:6]}Z") < self.failed_started,
+             "owner111_old_app_started_after_admission")
         return observed
 
     def after_owner_verified(self):

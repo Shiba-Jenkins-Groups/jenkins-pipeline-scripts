@@ -52,7 +52,8 @@ class Owner111Tests(unittest.TestCase):
         start = dt.datetime.now(dt.timezone.utc)
         # The same old App restarted during a dependency change after #110
         # succeeded and before #111 began.
-        self.reviewed_app_start = (start - dt.timedelta(seconds=40)).isoformat()
+        previous_start = start - dt.timedelta(seconds=40)
+        self.reviewed_app_start = previous_start.strftime("%Y-%m-%dT%H:%M:%S.%f") + "301Z"
         production_fields = dict(
             kind="deployment", schema_version=2, product=R.PRODUCT,
             commit=R.FAILED_COMMIT, version="1.1.35", digest=R.FAILED_DIGEST,
@@ -216,7 +217,7 @@ class Owner111Tests(unittest.TestCase):
             self.assertTrue(self.job.exists())
         self.assertEqual(self.io.bootstraps, 0)
 
-    def test_same_container_restart_after_old_receipt_is_not_unchanged_generation(self):
+    def test_same_container_restart_after_failed_attempt_began_is_rejected(self):
         app = self.io.app
 
         def late_start(transaction, container):
