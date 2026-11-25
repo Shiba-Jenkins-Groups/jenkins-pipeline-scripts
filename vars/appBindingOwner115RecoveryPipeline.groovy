@@ -16,8 +16,9 @@ def call(Map config = [:]) {
         causes[0].userId != 'claude-code-use') {
         error('Owner #115 recovery requires a direct build by the release operator')
     }
-    if (params || env.BUILD_NUMBER != '1') {
-        error('Owner #115 recovery only permits the first build with no parameters')
+    def closureOnly = config.closureOnly == true
+    if (params || env.BUILD_NUMBER != (closureOnly ? '2' : '1')) {
+        error('Owner #115 permits only the exact scoped build with no parameters')
     }
 
     def originalControl = ['release-gate.py', 'release-evidence.py', 'release-promotion.py',
@@ -25,6 +26,7 @@ def call(Map config = [:]) {
                            'release-rebuild.py']
     def recovery = ['release-app-binding-115-evidence.py', 'release-app-binding-115-recovery.py',
                     'release-app-binding-115-runtime.py', 'release-app-binding-admitted-115.py']
+    if (closureOnly) { recovery.add('release-app-binding-115-closure.py') }
     def commit = '84c2b0a6eae1fb74944af0083859450d321dbcbd'
     def scmUrl = 'https://github.com/ShibaDev2026/shiba-go-ditch-api-project.git'
 
@@ -48,21 +50,28 @@ def call(Map config = [:]) {
                                          usernameVariable: 'JENKINS_API_USER', passwordVariable: 'JENKINS_API_TOKEN')]) {
                         withEnv(['RELEASE_JENKINS_URL=http://127.0.0.1:9090', 'PYTHONDONTWRITEBYTECODE=1',
                                  "RECOVERY_LIBRARY_REVISION=${config.libraryRevision}"]) {
-                            stage('Verify Signed #115 and Running App') {
-                                sh '''python3 control/release-app-binding-115-recovery.py --mode verify \
+                            if (closureOnly) {
+                                stage('Verify Completed #115 Binding Without Applying') {
+                                    sh '''python3 control/release-app-binding-115-recovery.py --mode close \
+    --source "$PWD/source" --control "$PWD/control" --receipt "$PWD/closure-receipt.json"'''
+                                }
+                            } else {
+                                stage('Verify Signed #115 and Running App') {
+                                    sh '''python3 control/release-app-binding-115-recovery.py --mode verify \
     --source "$PWD/source" --control "$PWD/control" --receipt "$PWD/verify-receipt.json"'''
-                            }
-                            stage('Complete Existing Owner #115 Binding') {
-                                sh '''python3 control/release-app-binding-115-recovery.py --mode apply \
+                                }
+                                stage('Complete Existing Owner #115 Binding') {
+                                    sh '''python3 control/release-app-binding-115-recovery.py --mode apply \
     --source "$PWD/source" --control "$PWD/control" --receipt "$PWD/recovery-receipt.json"'''
+                                }
                             }
                         }
                     }
-                    def result = decode(readFile('recovery-receipt.json')).payload
+                    def result = decode(readFile(closureOnly ? 'closure-receipt.json' : 'recovery-receipt.json')).payload
                     if (result.status != 'SUCCESS') { error('Owner #115 signed recovery did not complete') }
-                    currentBuild.description = 'PROD owner #115 binding recovery for v1.1.39'
+                    currentBuild.description = closureOnly ? 'Read-only #115 binding closeout for v1.1.39' : 'PROD owner #115 binding recovery for v1.1.39'
                 } finally {
-                    archiveArtifacts artifacts: 'reviewed-library.txt,verify-receipt.json,recovery-receipt.json',
+                    archiveArtifacts artifacts: 'reviewed-library.txt,verify-receipt.json,recovery-receipt.json,closure-receipt.json',
                                      allowEmptyArchive: true
                 }
             }

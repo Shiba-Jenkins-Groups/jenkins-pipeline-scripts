@@ -5,6 +5,7 @@ import argparse
 import datetime as dt
 import hashlib
 import importlib.util
+import json
 import os
 from pathlib import Path
 import re
@@ -20,6 +21,8 @@ COMMIT = "84c2b0a6eae1fb74944af0083859450d321dbcbd"
 ENGINE = "9f2f05b6-4637-45c7-ab13-cf5a35e2a539"
 CONTAINER = "4aee6e553ba3a886e2772240f23d1c2067b9f51b7571150b82f1dba9967606b7"
 CANDIDATE_IMAGE_ID = "sha256:861ae9baf79fa6f8021da642143ed720dc9370dc23239fda99ad6f59395acbaf"
+BUILD_FOR_MODE = {"verify": 1, "apply": 1, "close": 2}
+RECEIPT_FOR_MODE = {"verify": "verify-receipt.json", "apply": "recovery-receipt.json", "close": "closure-receipt.json"}
 CONTROL_SHA256 = {
     "release-app-binding.py": "2857a7c200e97a82d10cc25509317a7d654eb5abccc19832fdec78aee3d2aefe",
     "release-deploy.py": "7b16f46977c38024af1e3afb344b77441f564771e0bf47a84272b1c31b0a4140",
@@ -59,7 +62,7 @@ def approved_path(path, workspace, exists=True):
 
 def validate_workspace(args):
     require(sys.platform == "darwin" and os.environ.get("NODE_NAME") == NODE
-            and os.environ.get("JOB_NAME") == JOB and os.environ.get("BUILD_NUMBER") == "1",
+            and os.environ.get("JOB_NAME") == JOB and os.environ.get("BUILD_NUMBER") == str(BUILD_FOR_MODE[args.mode]),
             "unapproved_owner_job")
     require(re.fullmatch(r"[0-9a-f]{40}", os.environ.get("RECOVERY_LIBRARY_REVISION", "")),
             "missing_recovery_library_identity")
@@ -67,7 +70,7 @@ def validate_workspace(args):
     approved_path(args.source, workspace)
     approved_path(args.control, workspace)
     approved_path(args.receipt, workspace, exists=False)
-    require(args.receipt.name == ("verify-receipt.json" if args.mode == "verify" else "recovery-receipt.json"),
+    require(args.receipt.name == RECEIPT_FOR_MODE[args.mode],
             "unexpected_recovery_receipt_name")
     require(args.receipt.parent.is_dir() and not os.path.lexists(args.receipt), "recovery_receipt_already_exists")
     for name, expected in CONTROL_SHA256.items():
@@ -99,16 +102,24 @@ def observe(runtime_module, deploy, request):
 def verify_closed(binding, transaction, observed):
     config = binding.document(transaction.owner_directory / "owner.json")
     registry = binding.document(transaction.owner_directory / "registry.json")
-    for service in (config["services"]["app"], registry["services"]["app"]):
+    original_config = binding.document(transaction.backup / "owner.json")
+    original_registry = binding.document(transaction.backup / "registry.json")
+    require(config["services"]["app"]["actions"] == ["status"], "unexpected_owner_app_grant")
+    for document, original in ((config, original_config), (registry, original_registry)):
+        service = document["services"]["app"]
+        previous = original["services"]["app"]
         targets = service["docker"]["targets"]
         require(len(targets) == 1 and targets[0]["id"] == observed["container_id"]
-                and targets[0]["image_id"] == observed["image_id"] and service["actions"] == ["status"],
+                and targets[0]["image_id"] == observed["image_id"]
+                and service["actions"] == previous["actions"] and service["revision"] == previous["revision"] + 1,
                 "unexpected_final_binding")
-    require(transaction.io.owner(transaction) is not None, "resident_owner_not_observed")
+    owner = transaction.io.owner(transaction)
+    require(owner is not None, "resident_owner_not_observed")
     require(not os.path.lexists(transaction.pending) and not os.path.lexists(transaction.job_path)
             and not any(os.path.lexists(path) and binding.read(path) == (TRANSACTION + "\n").encode()
                         for path in transaction.owned_pending),
             "original_transaction_not_closed")
+    return owner
 
 
 def verify_prior_observation(deploy, binding, path, payload, key):
@@ -129,10 +140,11 @@ def execute(args):
     evidence = module("owner115_evidence", here / "release-app-binding-115-evidence.py")
     attachment = module("owner115_attachment", here / "release-app-binding-admitted-115.py")
     runtime_module = module("owner115_runtime", here / "release-app-binding-115-runtime.py")
+    closure = module("owner115_closure", here / "release-app-binding-115-closure.py") if args.mode == "close" else None
     key = Path(os.environ["RELEASE_SIGNING_KEY"]).read_bytes()
     payload = {
         "schema_version": 1, "kind": "app-binding-incident-115-recovery", "product": deploy.gate.PRODUCT,
-        "mode": args.mode, "job": JOB, "build": 1, "coordinator_build": 257, "owner_build": 115,
+        "mode": args.mode, "job": JOB, "build": BUILD_FOR_MODE[args.mode], "coordinator_build": 257, "owner_build": 115,
         "recovery_library_revision": os.environ["RECOVERY_LIBRARY_REVISION"],
         "transaction_id": TRANSACTION, "source_commit": COMMIT, "started_at": now(),
         "status": "FAILED", "apply_claimed": False, "native_binding_finished": False,
@@ -143,6 +155,11 @@ def execute(args):
         require(finalization["commit"] == COMMIT and finalization["digest"] == request["digest"],
                 "unexpected_recovery_finalization")
         payload.update(version=request["version"], digest=request["digest"], original_evidence_sha256=hashes)
+        if closure is not None:
+            payload.update(closure.observe_completed(binding, attachment, evidence, runtime_module, deploy,
+                           args.source, RUNTIME, request, failure, hashes, key, verify_closed))
+            payload["status"] = "SUCCESS"
+            return 0
         transaction = attachment.attach(binding, request, failure, RUNTIME)
         evidence.verify_persistent_failure(DEPLOYMENT_STATE, key, failure)
         claim = transaction.owner_directory / "app-binding-incident-115-recovery.claim.json"
@@ -187,7 +204,7 @@ def execute(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", required=True, choices=("verify", "apply"))
+    parser.add_argument("--mode", required=True, choices=tuple(BUILD_FOR_MODE))
     parser.add_argument("--source", required=True, type=Path)
     parser.add_argument("--control", required=True, type=Path)
     parser.add_argument("--receipt", required=True, type=Path)
